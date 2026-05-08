@@ -480,6 +480,1139 @@
   </div>
 </div>
 
+<script type="text/worker" id="worker-src">
+// ============================================================================
+// Render worker. Owns the main canvas via transferControlToOffscreen.
+// Receives:
+//   - 'init' { canvas, dpr, W, H, params }
+//   - 'audio' { bass, mid, treble, level, bassFast } each main rAF
+//   - 'param' { name, value }   /  'params' { values }
+//   - 'resize' { W, H, dpr }
+// Posts back:
+//   - 'debug' { ... } periodically for the dev panel display
+// ============================================================================
+'use strict';
+
+// === constants ===
+const FLYOUT_COUNT = 10;
+const Z_FAR = 2.0;
+const Z_NEAR = 0.04;
+const PARTICLE_BASE_R = 1.0;
+const PARTICLE_PULSE_AMOUNT = 12;
+// particle stamp tile is rebuilt on resize so it stays large enough for the
+// scaled-up shape buffer (max pulseR × ~1.5 for square corners). Defaults
+// match the unscaled (vs=1) sizing.
+let particleTileSize = 48;
+let particleHalf = particleTileSize / 2;
+const SHAPE_N = 24;
+const SHAPE_NAMES = ['dot', 'square', 'star', 'octagon', 'crescent'];
+const GRAIN_RES = 320;
+const SCANLINE_PERIOD = 2;
+const SLICE_BURST_MIN = 5;
+const SLICE_BURST_MAX = 12;
+const SLICE_ANGLE_JITTER = 8 * Math.PI / 180;
+const ONSET_COOLDOWN_MIN = 12;
+const ONSET_COOLDOWN_MAX = 35;
+const FREEZE_FRAMES_MIN = 4;
+const COLOR_PALETTE = [
+  [  0, 255,  65],
+  [255,  40,  60],
+  [180,  30, 255],
+  [ 60, 110, 255],
+  [255, 255, 255],
+];
+const BAYER8 = new Uint8Array([
+   0, 32,  8, 40,  2, 34, 10, 42,
+  48, 16, 56, 24, 50, 18, 58, 26,
+  12, 44,  4, 36, 14, 46,  6, 38,
+  60, 28, 52, 20, 62, 30, 54, 22,
+   3, 35, 11, 43,  1, 33,  9, 41,
+  51, 19, 59, 27, 49, 17, 57, 25,
+  15, 47,  7, 39, 13, 45,  5, 37,
+  63, 31, 55, 23, 61, 29, 53, 21,
+]);
+const CAR_ASPECT = 1.4755;
+const CAR_SUBPATHS = [
+    [-0.2963,0.3389,-0.4688,0.3324,-0.4886,0.3189,-0.4932,0.3083,-0.4958,0.3032,-0.4996,0.2805,-0.4875,0.0143,-0.4827,0.0258,-0.4793,0.0465,-0.4759,0.0469,-0.4589,0.053,-0.4441,0.056,-0.4349,0.0563,-0.2669,0.0693,0.0885,0.0682,0.3704,0.0641,0.4171,0.0604,0.435,0.0541,0.4396,0.054,0.4455,0.0562,0.4779,0.038,0.4794,0.0411,0.4848,0.1498,0.4892,0.2858,0.4852,0.3091,0.4758,0.3232,0.4588,0.3329,0.4209,0.3377,-0.2963,0.3389],
+    [-0.3476,0.2975,-0.3433,0.247,-0.3462,0.2566,-0.3526,0.3009,-0.3525,0.3056,-0.3476,0.2975],
+    [0.3522,0.2901,0.348,0.2614,0.3441,0.246,0.3493,0.297,0.3532,0.3022,0.3522,0.2901],
+    [-0.3078,0.2339,-0.3151,0.2291,-0.3213,0.2351,-0.314,0.2399,-0.3078,0.2339],
+    [0.0143,0.2392,0.3263,0.2266,0.431,0.2215,0.4355,0.2239,0.4437,0.224,0.4422,0.1964,0.4406,0.1689,0.4477,0.1656,0.4532,0.1609,0.4484,0.1619,0.3124,0.1714,0.2206,0.1749,0.2146,0.1826,0.1995,0.196,0.126,0.2037,-0.1344,0.2037,-0.192,0.1988,-0.2141,0.1826,-0.2201,0.1749,-0.3106,0.1714,-0.4474,0.1623,-0.4518,0.1601,-0.4379,0.1677,-0.4292,0.1704,-0.4337,0.1733,-0.439,0.1709,-0.4402,0.1798,-0.4418,0.2067,-0.4437,0.224,-0.4352,0.2239,-0.4306,0.2214,-0.4229,0.2188,-0.2655,0.2315,-0.2328,0.2324,-0.2056,0.234,-0.1768,0.2348,-0.1416,0.2367,-0.1084,0.2386,-0.0737,0.2396,-0.0462,0.2406,0.0143,0.2392],
+    [0.4285,0.1727,0.4324,0.1703,0.4362,0.1713,0.4324,0.1737,0.4285,0.1727],
+    [0.3211,0.2367,0.3147,0.2316,0.3084,0.2353,0.3141,0.24,0.3205,0.2415,0.3211,0.2367],
+    [0.3458,0.2335,0.3446,0.2367,0.3458,0.2399,0.3458,0.2335],
+    [-0.359,0.229,-0.4011,0.2273,-0.4242,0.2275,-0.3999,0.2291,-0.3577,0.2307,-0.3398,0.2308],
+    [0.4552,0.2069,0.4532,0.1946,0.4514,0.2073,0.4508,0.2213,0.4547,0.2218,0.4552,0.2069],
+    [-0.4485,0.2195,-0.451,0.2137,-0.4535,0.2156,-0.451,0.2214,-0.4485,0.2195],
+    [-0.2171,0.1315,-0.2121,0.0998,-0.2114,0.0961,-0.2186,0.1028,-0.2211,0.1247,-0.2238,0.1351,-0.2299,0.1268,-0.2337,0.1203,-0.2351,0.115,-0.2433,0.1155,-0.2606,0.1206,-0.2646,0.1299,-0.2651,0.1362,-0.2671,0.1319,-0.2689,0.1278,-0.2686,0.1337,-0.2698,0.1407,-0.2735,0.1424,-0.3242,0.1436,-0.3775,0.1405,-0.3857,0.1324,-0.3895,0.1302,-0.3861,0.1408,-0.3761,0.1449,-0.373,0.147,-0.4027,0.1478,-0.4273,0.1467,-0.4287,0.1259,-0.4356,0.0875,-0.4412,0.07,-0.4484,0.0769,-0.4577,0.0821,-0.4625,0.0731,-0.467,0.0637,-0.4678,0.0721,-0.456,0.1101,-0.4433,0.1429,-0.4504,0.1435,-0.4557,0.1427,-0.4531,0.1462,-0.347,0.1551,-0.2324,0.1605,-0.2183,0.1605,-0.2171,0.1315],
+    [0.345,0.1552,0.4511,0.1462,0.4537,0.1427,0.4481,0.1436,0.4421,0.1406,0.4467,0.1249,0.4518,0.114,0.4669,0.064,0.4646,0.0555,0.4609,0.0649,0.4556,0.0796,0.4514,0.083,0.4446,0.0776,0.4372,0.0706,0.4313,0.0865,0.4241,0.1246,0.4227,0.1466,0.3993,0.1483,0.3696,0.1475,0.3653,0.1453,0.3715,0.1449,0.3824,0.1397,0.3848,0.1316,0.3788,0.1354,0.36,0.1421,0.3088,0.1438,0.2701,0.1455,0.2665,0.1371,0.2616,0.1322,0.26,0.1287,0.2557,0.1204,0.2387,0.1155,0.2291,0.1138,0.2289,0.1235,0.2265,0.1281,0.2242,0.1263,0.2214,0.1281,0.2189,0.1337,0.2164,0.1495,0.2149,0.1598,0.2295,0.1606,0.345,0.1552],
+    [-0.1171,0.1355,-0.1186,0.1221,-0.1186,0.1126,-0.1429,0.1119,-0.1672,0.1112,-0.1677,0.1247,-0.1681,0.1383,-0.1691,0.1247,-0.1708,0.1134,-0.1757,0.1119,-0.182,0.1262,-0.1828,0.1396,-0.1492,0.1396,-0.1171,0.1355],
+    [0.1831,0.1258,0.1831,0.112,0.1581,0.1124,0.1332,0.1127,0.1317,0.1255,0.1302,0.1383,0.1298,0.1249,0.1285,0.1135,0.123,0.1115,0.1175,0.1135,0.1166,0.1255,0.1166,0.1396,0.1498,0.1396,0.1831,0.1396],
+    [-0.2835,0.1281,-0.2899,0.1173,-0.2963,0.1141,-0.2904,0.114,-0.2853,0.1057,-0.2876,0.0985,-0.2963,0.0956,-0.3378,0.0937,-0.3719,0.0989,-0.3727,0.1083,-0.3622,0.1118,-0.3526,0.1122,-0.3628,0.1137,-0.3733,0.1191,-0.3719,0.1293,-0.3065,0.136,-0.2835,0.1357],
+    [-0.3097,0.1148,-0.302,0.1149,-0.3065,0.1161,-0.3097,0.1148],
+    [0.3569,0.1323,0.371,0.1306,0.3718,0.1134,0.3725,0.0961,0.3301,0.0961,0.2878,0.0961,0.2853,0.1027,0.2843,0.1351,0.3569,0.1323],
+    [-0.132,0.107,-0.1666,0.107,-0.1493,0.1079,-0.132,0.107],
+    [0.1671,0.107,0.1326,0.107,0.1498,0.1079,0.1671,0.107],
+    [0.0966,0.0942,-0.0977,0.0942,0.0003,0.0949,0.0966,0.0942],
+    [-0.2942,0.056,-0.328,0.0551,-0.329,0.0468,-0.33,0.0386,-0.3304,0.0469,-0.3331,0.0549,-0.3373,0.0499,-0.3478,0.0419,-0.3796,0.0399,-0.4075,0.0437,-0.4109,0.0475,-0.416,0.0455,-0.4133,0.0409,-0.4129,0.0343,-0.423,-0.0236,-0.42,-0.0607,-0.4179,-0.1123,-0.4156,-0.0784,-0.4152,-0.0292,-0.2088,-0.0285,0.2067,-0.0286,0.4157,-0.0292,0.4158,-0.0707,0.4206,-0.1314,0.423,-0.0784,0.4265,-0.0237,0.419,0.0317,0.4181,0.0409,0.4143,0.0475,0.4116,0.0434,0.3825,0.0397,0.3473,0.0439,0.3419,0.05,0.3486,0.0534,0.2871,0.0548,0.2136,0.0525,0.2103,0.0494,0.2157,0.0437,0.2209,0.0383,0.2171,0.0374,0.2088,0.0418,0.2062,0.039,0.2102,0.0277,0.2123,0.0145,0.2103,-0.008,0.2103,-0.0214,0.104,-0.0221,-0.1063,-0.0221,-0.2103,-0.0214,-0.2103,-0.0093,-0.212,0.0133,-0.2081,0.0291,-0.2043,0.04,-0.2077,0.0432,-0.2193,0.0391,-0.2142,0.0456,-0.2098,0.0528,-0.2942,0.056],
+    [0.3339,0.045,0.3314,0.0373,0.3288,0.045,0.3314,0.0526,0.3339,0.045],
+    [-0.3407,0.0296,-0.3232,0.0296,-0.3232,0.0028,-0.3232,-0.0241,-0.3679,-0.0241,-0.4127,-0.0241,-0.4127,0.0014,-0.4127,0.0269,-0.4043,0.0295,-0.3771,0.0309,-0.3407,0.0296],
+    [-0.226,0.0028,-0.226,-0.0241,-0.2708,-0.0241,-0.3155,-0.0241,-0.3155,0.0028,-0.3155,0.0296,-0.2708,0.0296,-0.226,0.0296],
+    [0.3211,0.0028,0.3211,-0.0241,0.2751,-0.0241,0.2291,-0.0241,0.2291,0.0028,0.2291,0.0296,0.2751,0.0296,0.3211,0.0296],
+    [0.4155,0.0261,0.4178,-0.0002,0.417,-0.0228,0.3723,-0.0228,0.3275,-0.0228,0.3268,0,0.3273,0.0262,0.3706,0.03,0.4155,0.0261],
+    [-0.4441,0.0269,-0.4417,0.0043,-0.4432,0.0448,-0.4441,0.0269],
+    [0.437,0.0207,0.4381,0.0124,0.438,0.0303,0.437,0.0207],
+    [-0.0061,0.0194,-0.0051,0.0108,0.0003,0.0092,0.0056,0.0108,0.0067,0.0194,0.0056,0.028,0.0003,0.0296,-0.0051,0.028,-0.0061,0.0194],
+    [-0.4793,0.0141,-0.4828,-0.0202,-0.4849,-0.0517,-0.4593,-0.0706,-0.4781,0.0192,-0.4793,0.0141],
+    [0.4774,0.016,0.4681,-0.0272,0.4598,-0.0706,0.4728,-0.0644,0.4852,-0.056,0.4835,-0.0292,0.4774,0.016],
+    [-0.2313,-0.072,-0.2468,-0.1097,-0.2591,-0.1387,-0.2697,-0.1489,-0.304,-0.1532,-0.3663,-0.1477,-0.4044,-0.1454,-0.3762,-0.2017,-0.3273,-0.2771,-0.2946,-0.3111,-0.2592,-0.318,0.024,-0.325,0.2776,-0.3154,0.3009,-0.3052,0.3268,-0.2757,0.4045,-0.1449,0.3641,-0.1477,0.2709,-0.1511,0.2574,-0.1392,0.2444,-0.1099,0.2215,-0.0602,0.2279,-0.0791,0.2444,-0.1251,0.2543,-0.1538,0.2449,-0.1554,0.176,-0.157,0.1166,-0.1597,0.1288,-0.1806,0.15,-0.1923,0.184,-0.1949,0.2207,-0.1879,0.2434,-0.1702,0.2534,-0.1591,0.2572,-0.161,0.2428,-0.1853,0.2123,-0.2042,0.1746,-0.2079,0.1406,-0.2011,0.1239,-0.188,0.1127,-0.1686,0.1082,-0.157,-0.0685,-0.1567,-0.252,-0.1548,-0.2589,-0.1532,-0.2461,-0.1199,-0.2247,-0.0598,-0.2313,-0.072],
+    [-0.243,-0.1711,-0.2223,-0.1879,-0.1936,-0.1957,-0.1472,-0.1926,-0.1199,-0.171,-0.1113,-0.16,-0.1095,-0.1663,-0.1335,-0.1992,-0.1738,-0.2099,-0.2183,-0.2028,-0.244,-0.1836,-0.2567,-0.1622,-0.243,-0.1711],
+    [-0.2951,-0.2171,-0.2669,-0.268,-0.2727,-0.2652,-0.2814,-0.261,-0.306,-0.232,-0.3258,-0.1916,-0.3308,-0.1775,-0.3357,-0.168,-0.3296,-0.1668,-0.2951,-0.2171],
+    [0.339,-0.166,0.3325,-0.1778,0.3271,-0.1894,0.3153,-0.2222,0.2833,-0.2618,0.2816,-0.2586,0.2779,-0.2615,0.304,-0.2076,0.3312,-0.1664,0.339,-0.166],
+    [0.2867,-0.2481,0.2851,-0.2531,0.2921,-0.2414,0.2867,-0.2481],
+    [-0.2731,-0.1723,-0.2594,-0.184,-0.2511,-0.1956,-0.2535,-0.2236,-0.2576,-0.2534,-0.2876,-0.211,-0.3066,-0.1729,-0.2918,-0.1707,-0.2731,-0.1723],
+    [0.3084,-0.1733,0.2625,-0.2516,0.2583,-0.2535,0.2523,-0.2107,0.26,-0.1839,0.2784,-0.1721,0.3084,-0.1733],
+    [0.1008,-0.177,0.1159,-0.2032,0.1397,-0.2352,0.1875,-0.2413,0.2137,-0.2414,0.224,-0.2321,0.2342,-0.2229,0.2342,-0.2461,0.2323,-0.268,0.2112,-0.2745,0.138,-0.2771,0.0763,-0.2772,0.0721,-0.2708,0.0679,-0.2644,0.0001,-0.2644,-0.0677,-0.2644,-0.0737,-0.2708,-0.0796,-0.2772,-0.1406,-0.2771,-0.2132,-0.2745,-0.2343,-0.268,-0.2362,-0.2464,-0.2352,-0.2235,-0.2252,-0.2324,-0.2163,-0.2414,-0.1898,-0.2413,-0.1419,-0.2352,-0.1182,-0.2037,-0.1084,-0.1846,-0.0945,-0.1754,0.0006,-0.1723,0.1008,-0.177],
+    [-0.1252,-0.1087,-0.1563,-0.1294,-0.1797,-0.1444,-0.1066,-0.1467,-0.0396,-0.1443,-0.0323,-0.1362,-0.0304,-0.1193,-0.0286,-0.1008,-0.0748,-0.1008,-0.121,-0.1008],
+    [0.0322,-0.1142,0.0349,-0.1372,0.0376,-0.1468,0.1089,-0.1468,0.1816,-0.1445,0.1514,-0.1262,0.1273,-0.1091,0.1233,-0.1008,0.0778,-0.1008,0.0322,-0.1008],
+    [-0.4459,-0.113,-0.4431,-0.1178,-0.4463,-0.1298,-0.4535,-0.1377,-0.4663,-0.1392,-0.4906,-0.1412,-0.4994,-0.1441,-0.5,-0.1532,-0.4969,-0.1656,-0.4944,-0.162,-0.4881,-0.1489,-0.4606,-0.1448,-0.4344,-0.1437,-0.4285,-0.1586,-0.4174,-0.18,-0.4122,-0.1864,-0.4136,-0.1784,-0.4228,-0.1543,-0.4306,-0.1374,-0.4248,-0.1365,-0.4271,-0.1313,-0.4383,-0.1186,-0.4459,-0.113],
+    [0.4365,-0.1232,0.4279,-0.1315,0.4253,-0.1365,0.4311,-0.1382,0.4235,-0.1554,0.4142,-0.1785,0.4161,-0.1833,0.4274,-0.1629,0.4361,-0.1437,0.4611,-0.1456,0.4892,-0.1513,0.4941,-0.1659,0.4928,-0.1736,0.4963,-0.166,0.5,-0.1515,0.4955,-0.144,0.4702,-0.1402,0.4477,-0.1323,0.4414,-0.1276,0.438,-0.1244,0.4365,-0.1232],
+    [0.339,-0.2687,0.317,-0.3002,0.3556,-0.251,0.339,-0.2687],
+    [-0.3492,-0.2606,-0.328,-0.2874,-0.3384,-0.2708,-0.3565,-0.2486,-0.3492,-0.2606],
+    [-0.2905,-0.3238,-0.1928,-0.3389,0.1933,-0.3389,0.291,-0.3238,0.2822,-0.3214,0.1816,-0.3302,0.0003,-0.3321,-0.1811,-0.3302,-0.2817,-0.3214,-0.2905,-0.3238],
+];
+
+// === live tunables (mutated via 'param'/'params' messages) ===
+let JITTER_PX = 26;
+let SCANLINE_ALPHA = 0.42;
+let GRAIN_ALPHA = 0.46;
+let SLICE_TRIGGER = 0.065;
+let MONO_BAR_CHANCE = 1 / 8;
+let ROW_CORRUPT_AMOUNT = 2.6;
+let ONSET_THRESHOLD = 0.07;
+let MID_SLICE_TRIGGER = 0.09;
+let FLASH_TRIGGER = 0.18;
+let COLOR_LERP = 0.01;
+let KICKS_PER_COLOR_CYCLE = 64;
+let KICKS_PER_SHAPE_CYCLE = 16;
+let LATTICE_SPACING = 24;
+let FREEZE_MONO_CHANCE = 1 / 8;
+let SLICE_BURST_SCALE = 1.0;
+let FREEZE_FRAMES_MAX = 12;
+let saturation = 1.0;
+let activeSilhouette = 'car';
+
+// === silhouette helpers (mirrored from main; produce normalized polylines) ===
+function _circle(cx, cy, r, n) {
+  const o = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    o.push(cx + r * Math.cos(a), cy + r * Math.sin(a));
+  }
+  return o;
+}
+function _arc(cx, cy, r, a0, a1, n) {
+  const o = [];
+  for (let i = 0; i <= n; i++) {
+    const a = a0 + (a1 - a0) * (i / n);
+    o.push(cx + r * Math.cos(a), cy + r * Math.sin(a));
+  }
+  return o;
+}
+function _rect(x0, y0, x1, y1) {
+  return [x0, y0, x1, y0, x1, y1, x0, y1];
+}
+function _ringSeg(cx, cy, rOut, rIn, a0, a1, n) {
+  const o = [];
+  for (let i = 0; i <= n; i++) {
+    const a = a0 + (a1 - a0) * (i / n);
+    o.push(cx + rOut * Math.cos(a), cy + rOut * Math.sin(a));
+  }
+  for (let i = n; i >= 0; i--) {
+    const a = a0 + (a1 - a0) * (i / n);
+    o.push(cx + rIn * Math.cos(a), cy + rIn * Math.sin(a));
+  }
+  return o;
+}
+function _buildWalker() {
+  return {
+    aspect: 0.42,
+    subpaths: [
+      _circle(0, -0.40, 0.075, 16),
+      _rect(-0.07, -0.32, 0.07, 0.05),
+      _rect(-0.10, -0.30, -0.07, 0.10),
+      _rect( 0.07, -0.30,  0.10, 0.10),
+      _rect(-0.06, 0.05, -0.01, 0.45),
+      _rect( 0.04, 0.05,  0.09, 0.50),
+    ],
+  };
+}
+function _buildUmbrella() {
+  return {
+    aspect: 1.25,
+    subpaths: [
+      _arc(0, 0, 0.5, Math.PI, 2 * Math.PI, 20),
+      _rect(-0.018, 0, 0.018, 0.36),
+      _ringSeg(0.07, 0.36, 0.07, 0.04, Math.PI / 2, 3 * Math.PI / 2, 10),
+    ],
+  };
+}
+function _buildEye() {
+  const top = _arc(0, 0, 0.5, Math.PI, 2 * Math.PI, 16).map((v, i) => i % 2 === 1 ? v * 0.45 : v);
+  const bot = _arc(0, 0, 0.5, 0, Math.PI, 16).map((v, i) => i % 2 === 1 ? v * 0.45 : v);
+  return {
+    aspect: 2.2,
+    subpaths: [
+      top.concat(bot),
+      _circle(0, 0, 0.16, 18),
+      _circle(0, 0, 0.06, 12),
+    ],
+  };
+}
+function _buildSkyline() {
+  const heights = [0.08, 0.32, 0.18, 0.42, 0.14, 0.50, 0.22, 0.36, 0.10, 0.28, 0.16];
+  const baseY = 0.25;
+  const pts = [-0.5, baseY];
+  const n = heights.length;
+  for (let i = 0; i < n; i++) {
+    const x0 = -0.5 + i * (1 / n);
+    const x1 = -0.5 + (i + 1) * (1 / n);
+    const y = baseY - heights[i];
+    pts.push(x0, y, x1, y);
+  }
+  pts.push(0.5, baseY);
+  const subs = [pts];
+  for (let i = 0; i < n; i++) {
+    if (heights[i] < 0.18) continue;
+    const x0 = -0.5 + i * (1 / n) + 0.015;
+    const x1 = -0.5 + (i + 1) * (1 / n) - 0.015;
+    const yTop = baseY - heights[i] + 0.05;
+    const yBot = baseY - 0.05;
+    for (let row = 0; row < 2; row++) {
+      const ry0 = yTop + (yBot - yTop) * (row / 3);
+      const ry1 = ry0 + (yBot - yTop) * 0.18;
+      subs.push(_rect(x0 + 0.005, ry0, x1 - 0.005, ry1));
+    }
+  }
+  return { aspect: 2.0, subpaths: subs };
+}
+function _buildSpeaker() {
+  return {
+    aspect: 1.0,
+    subpaths: [
+      _circle(0, 0, 0.50, 28),
+      _circle(0, 0, 0.42, 24),
+      _circle(0, 0, 0.34, 24),
+      _circle(0, 0, 0.13, 16),
+    ],
+  };
+}
+const SILHOUETTES = {
+  car:      { aspect: CAR_ASPECT, subpaths: CAR_SUBPATHS },
+  walker:   _buildWalker(),
+  umbrella: _buildUmbrella(),
+  eye:      _buildEye(),
+  skyline:  _buildSkyline(),
+  speaker:  _buildSpeaker(),
+};
+const SILHOUETTE_NAMES = Object.keys(SILHOUETTES);
+// Path2D cache (built once, reused per-frame).
+for (let _i = 0; _i < SILHOUETTE_NAMES.length; _i++) {
+  const _entry = SILHOUETTES[SILHOUETTE_NAMES[_i]];
+  const _path = new Path2D();
+  const _subs = _entry.subpaths;
+  for (let _k = 0; _k < _subs.length; _k++) {
+    const _sub = _subs[_k];
+    if (_sub.length < 2) continue;
+    _path.moveTo(_sub[0], _sub[1]);
+    for (let _j = 2; _j < _sub.length; _j += 2) {
+      _path.lineTo(_sub[_j], _sub[_j + 1]);
+    }
+    _path.closePath();
+  }
+  _entry.path = _path;
+}
+
+function buildShape(name) {
+  const pts = new Float32Array(SHAPE_N * 2);
+  if (name === 'dot') {
+    for (let i = 0; i < SHAPE_N; i++) {
+      const a = (i / SHAPE_N) * Math.PI * 2;
+      pts[i * 2] = Math.cos(a);
+      pts[i * 2 + 1] = Math.sin(a);
+    }
+  } else if (name === 'square') {
+    for (let i = 0; i < SHAPE_N; i++) {
+      const arc = (i / SHAPE_N) * 8;
+      let x, y;
+      if (arc <= 1)      { x = 1;            y = arc; }
+      else if (arc <= 3) { x = 1 - (arc - 1); y = 1; }
+      else if (arc <= 5) { x = -1;           y = 1 - (arc - 3); }
+      else if (arc <= 7) { x = -1 + (arc - 5); y = -1; }
+      else               { x = 1;            y = -1 + (arc - 7); }
+      pts[i * 2] = x;
+      pts[i * 2 + 1] = y;
+    }
+  } else if (name === 'star') {
+    const PEAKS = 6;
+    for (let i = 0; i < SHAPE_N; i++) {
+      const a = (i / SHAPE_N) * Math.PI * 2;
+      const r = 0.5 + 0.5 * Math.cos(PEAKS * a);
+      pts[i * 2] = r * Math.cos(a);
+      pts[i * 2 + 1] = r * Math.sin(a);
+    }
+  } else if (name === 'octagon') {
+    for (let i = 0; i < SHAPE_N; i++) {
+      const arc = (i / SHAPE_N) * 8;
+      const edge = Math.floor(arc);
+      const local = arc - edge;
+      const a0 = edge * Math.PI / 4;
+      const a1 = (edge + 1) * Math.PI / 4;
+      pts[i * 2] = Math.cos(a0) + (Math.cos(a1) - Math.cos(a0)) * local;
+      pts[i * 2 + 1] = Math.sin(a0) + (Math.sin(a1) - Math.sin(a0)) * local;
+    }
+  } else if (name === 'crescent') {
+    const half = SHAPE_N / 2;
+    const cx = 0.5;
+    const ix = cx / 2;
+    const iy = Math.sqrt(1 - ix * ix);
+    const aOuterTop = Math.atan2(iy, ix);
+    for (let i = 0; i < half; i++) {
+      const t = i / half;
+      const a = aOuterTop + t * (2 * Math.PI - 2 * aOuterTop);
+      pts[i * 2] = Math.cos(a);
+      pts[i * 2 + 1] = Math.sin(a);
+    }
+    const aInnerBot = Math.atan2(-iy, ix - cx);
+    const aInnerTop = Math.atan2(iy, ix - cx);
+    for (let i = 0; i < half; i++) {
+      const t = i / half;
+      const a = aInnerBot + t * ((aInnerTop - 2 * Math.PI) - aInnerBot);
+      pts[(half + i) * 2] = cx + Math.cos(a);
+      pts[(half + i) * 2 + 1] = Math.sin(a);
+    }
+  }
+  return pts;
+}
+const SHAPES = SHAPE_NAMES.map(buildShape);
+const shapeBuffer = new Float32Array(SHAPE_N * 2);
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+// === render state ===
+let canvas = null, ctx = null;
+let dpr = 1, W = 0, H = 0;
+
+// === viewport scale ===
+// Linearly scales all geometric values (lattice spacing, particle/spark/
+// flyout sizes, jitter, slice thickness, scanline period, particle tile)
+// against a baseline shorter-axis dimension. Calibrated for ~900 px short-
+// axis (the original 1600×900 reference); a 1920×1080 window scales 1.2x,
+// a 600×900-tall portrait window stays at 1.0x, etc. Floor at 0.5 so a
+// tiny window doesn't make particles disappear.
+let viewportScale = 1;
+const VIEWPORT_REF = 900;
+function recomputeViewport() {
+  viewportScale = Math.max(0.5, Math.min(W, H) / VIEWPORT_REF);
+}
+
+const flyout = [];
+const sparks = [];
+const slices = [];
+const inversionRegions = [];
+const monoRegions = [];
+let currentSliceAngle = 0;
+let beatsAtOrientation = 0;
+let nextRotateBeats = 3 + Math.floor(Math.random() * 6);
+
+let smoothLevel = 0, smoothBass = 0, smoothMid = 0, smoothTreble = 0;
+let bassPulse = 0, prevBass = 0, bassBaseline = 0, sliceCool = 0;
+let midBaseline = 0, midPulse = 0, prevMid = 0, midSliceCool = 0;
+let energyAvg = 0, prevLevel = 0, onsetCool = 0;
+let flashCool = 0, pendingFlash = null;
+let pendingFreeze = false, pendingShuffle = false;
+let ditherPhaseX = 0, ditherPhaseY = 0;
+let colorIndex = 0, kickCount = 0;
+let tintR = COLOR_PALETTE[0][0];
+let tintG = COLOR_PALETTE[0][1];
+let tintB = COLOR_PALETTE[0][2];
+let freezeFrames = 0, freezeMono = false;
+let shapeIndex = 0, shapeProgress = 0;
+const lattPts = [];
+let bassAvg = 0, trebleAvg = 0;
+let bassCool = 0, trebleCool = 0;
+let bassDevDebug = 0;
+
+// audio data, snapshotted from main per-tick
+let curBass = 0, curMid = 0, curTreble = 0, curLevel = 0, curBassFast = 0;
+
+let last = 0;
+let fpsAccumStart = 0, fpsAccumCount = 0, fpsValue = 0;
+let lastDebugPost = 0;
+
+// === offscreen buffers (created in init) ===
+let particleCanvas, particleCtx;
+let noiseCanvas, noiseCtx, noiseImg;
+let scanlineTile, scanlinePattern;
+let ditherCanvas, ditherGL;
+let _ditherProg, _ditherQuad, _ditherSrcTex, _ditherBayerTex;
+let _ditherUTex, _ditherUBayer, _ditherUSize, _ditherUOffset, _ditherAPos;
+let freezeCanvas, freezeCtx;
+
+function spawnFlyout(s) {
+  s = s || {};
+  s.wx = rand(-2.5, 2.5);
+  s.wy = rand(-1.8, 1.8);
+  s.z = Z_FAR;
+  s.vz = rand(0.0006, 0.0024);
+  s.size = rand(80, 280);
+  s.rotTarget = rand(-Math.PI / 2, Math.PI / 2);
+  s.fillAlpha = rand(0.16, 0.42);
+  s.visThresh = rand(0, 0.15);
+  return s;
+}
+function initFlyout() {
+  flyout.length = 0;
+  for (let i = 0; i < FLYOUT_COUNT; i++) {
+    const s = spawnFlyout();
+    s.z = rand(Z_NEAR + 0.05, Z_FAR);
+    flyout.push(s);
+  }
+}
+function spawnSpark(intensity, kind) {
+  const cx = W * 0.5, cy = H * 0.5;
+  const count = kind === 'bass' ? Math.floor(intensity * 28) : Math.floor(intensity * 14);
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = kind === 'bass' ? rand(0.6, 2.2) * (0.6 + intensity) : rand(1.5, 4.5) * (0.6 + intensity);
+    const r = kind === 'bass' ? rand(1.2, 3.2) : rand(0.4, 1.2);
+    const ox = kind === 'bass' ? cx + rand(-40, 40) : Math.random() * W;
+    const oy = kind === 'bass' ? cy + rand(-40, 40) : Math.random() * H;
+    sparks.push({
+      x: ox, y: oy,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 1,
+      decay: kind === 'bass' ? rand(0.004, 0.010) : rand(0.012, 0.025),
+      r,
+      kind,
+    });
+  }
+}
+
+function regenNoise(density) {
+  const data = noiseImg.data;
+  const thresh = 0.04 + density * 0.20;
+  for (let i = 0; i < data.length; i += 4) {
+    let v = 0;
+    if (Math.random() < thresh) v = 160 + Math.floor(Math.random() * 95);
+    data[i] = data[i + 1] = data[i + 2] = v;
+    data[i + 3] = 255;
+  }
+  noiseCtx.putImageData(noiseImg, 0, 0);
+}
+
+function spawnSliceBurst(intensity) {
+  const base = SLICE_BURST_MIN + Math.floor(Math.random() * (SLICE_BURST_MAX - SLICE_BURST_MIN + 1));
+  const count = Math.max(0, Math.round(base * SLICE_BURST_SCALE));
+  for (let i = 0; i < count; i++) {
+    slices.push({
+      y: Math.random() * H,
+      h: 6 + Math.random() * 110,
+      dx: (Math.random() - 0.5) * W * (0.20 + intensity * 0.55),
+      life: 5 + Math.floor(Math.random() * 16),
+      angle: currentSliceAngle + (Math.random() * 2 - 1) * SLICE_ANGLE_JITTER,
+      mono: Math.random() < MONO_BAR_CHANCE,
+    });
+  }
+}
+
+function pushFilledRectPoints(out, cx, cy, width, height, spacing, rowCorrupt) {
+  const halfW = width / 2;
+  const halfH = height / 2;
+  const rowH = spacing * Math.sqrt(3) / 2;
+  const rows = Math.floor(height / rowH);
+  const yStart = -rows * rowH / 2;
+  const corrupt = rowCorrupt || 0;
+  for (let r = 0; r <= rows; r++) {
+    const ly = yStart + r * rowH;
+    if (ly < -halfH || ly > halfH) continue;
+    const xOffset = (r & 1) ? spacing / 2 : 0;
+    const cols = Math.floor((width - xOffset * 2) / spacing);
+    const xStart = -cols * spacing / 2;
+    const rowShift = corrupt > 0 ? (Math.random() - 0.5) * corrupt : 0;
+    for (let c = 0; c <= cols; c++) {
+      const lx = xStart + c * spacing + rowShift;
+      if (lx < -halfW * 1.6 || lx > halfW * 1.6) continue;
+      out.push(cx + lx, cy + ly);
+    }
+  }
+}
+
+// Rebuilt on resize. Tile size grows so the scaled shape buffer (max
+// pulseR × ~1.5 for square corners) fits, with a small margin.
+function rebuildParticleTile() {
+  const desired = Math.max(48, Math.ceil(48 * viewportScale));
+  if (!particleCanvas) return;
+  if (particleCanvas.width !== desired) {
+    particleCanvas.width = desired;
+    particleCanvas.height = desired;
+  }
+  particleTileSize = desired;
+  particleHalf = desired / 2;
+}
+
+// Rebuilt on resize. Period and dark-row thickness scale with viewportScale
+// so scanlines feel proportional on big and small viewports alike.
+function rebuildScanlineTile() {
+  if (!ctx) return;
+  const period = Math.max(2, Math.round(SCANLINE_PERIOD * viewportScale));
+  const dark = Math.max(1, Math.round(period / 2));
+  scanlineTile = new OffscreenCanvas(1, period);
+  const stCtx = scanlineTile.getContext('2d');
+  stCtx.fillStyle = '#000';
+  stCtx.fillRect(0, 0, 1, dark);
+  scanlinePattern = ctx.createPattern(scanlineTile, 'repeat');
+}
+
+function setupOffscreens() {
+  particleCanvas = new OffscreenCanvas(particleTileSize, particleTileSize);
+  particleCtx = particleCanvas.getContext('2d');
+  rebuildParticleTile();
+
+  noiseCanvas = new OffscreenCanvas(GRAIN_RES, GRAIN_RES);
+  noiseCtx = noiseCanvas.getContext('2d');
+  noiseImg = noiseCtx.createImageData(GRAIN_RES, GRAIN_RES);
+
+  rebuildScanlineTile();
+
+  freezeCanvas = new OffscreenCanvas(canvas.width, canvas.height);
+  freezeCtx = freezeCanvas.getContext('2d');
+}
+
+function setupDither() {
+  ditherCanvas = new OffscreenCanvas(Math.max(1, Math.ceil(W)), Math.max(1, Math.ceil(H)));
+  ditherGL = ditherCanvas.getContext('webgl', {
+    preserveDrawingBuffer: true,
+    premultipliedAlpha: false,
+    antialias: false,
+    alpha: false,
+    depth: false,
+    stencil: false,
+  });
+  if (!ditherGL) throw new Error('WebGL not supported in worker');
+
+  const VS_SRC =
+    'attribute vec2 aPos;' +
+    'varying vec2 vUv;' +
+    'void main() {' +
+    '  vUv = aPos * 0.5 + 0.5;' +
+    '  gl_Position = vec4(aPos, 0.0, 1.0);' +
+    '}';
+  const FS_SRC =
+    'precision highp float;' +
+    'varying vec2 vUv;' +
+    'uniform sampler2D uTex;' +
+    'uniform sampler2D uBayer;' +
+    'uniform vec2 uTexSize;' +
+    'uniform vec2 uOffset;' +
+    'void main() {' +
+    '  float lum = texture2D(uTex, vUv).r;' +
+    '  vec2 pix = vUv * uTexSize;' +
+    '  vec2 byx = mod(pix + uOffset, 8.0);' +
+    '  float thresh = texture2D(uBayer, (byx + 0.5) / 8.0).r;' +
+    '  gl_FragColor = lum > thresh ? vec4(1.0) : vec4(0.0, 0.0, 0.0, 1.0);' +
+    '}';
+  function compile(type, src) {
+    const sh = ditherGL.createShader(type);
+    ditherGL.shaderSource(sh, src);
+    ditherGL.compileShader(sh);
+    if (!ditherGL.getShaderParameter(sh, ditherGL.COMPILE_STATUS)) {
+      throw new Error('dither shader compile: ' + ditherGL.getShaderInfoLog(sh));
+    }
+    return sh;
+  }
+  _ditherProg = ditherGL.createProgram();
+  ditherGL.attachShader(_ditherProg, compile(ditherGL.VERTEX_SHADER, VS_SRC));
+  ditherGL.attachShader(_ditherProg, compile(ditherGL.FRAGMENT_SHADER, FS_SRC));
+  ditherGL.linkProgram(_ditherProg);
+  if (!ditherGL.getProgramParameter(_ditherProg, ditherGL.LINK_STATUS)) {
+    throw new Error('dither program link: ' + ditherGL.getProgramInfoLog(_ditherProg));
+  }
+  _ditherQuad = ditherGL.createBuffer();
+  ditherGL.bindBuffer(ditherGL.ARRAY_BUFFER, _ditherQuad);
+  ditherGL.bufferData(ditherGL.ARRAY_BUFFER, new Float32Array([
+    -1, -1,  1, -1, -1,  1,  1,  1,
+  ]), ditherGL.STATIC_DRAW);
+  _ditherUTex    = ditherGL.getUniformLocation(_ditherProg, 'uTex');
+  _ditherUBayer  = ditherGL.getUniformLocation(_ditherProg, 'uBayer');
+  _ditherUSize   = ditherGL.getUniformLocation(_ditherProg, 'uTexSize');
+  _ditherUOffset = ditherGL.getUniformLocation(_ditherProg, 'uOffset');
+  _ditherAPos    = ditherGL.getAttribLocation(_ditherProg, 'aPos');
+  _ditherSrcTex = ditherGL.createTexture();
+  ditherGL.bindTexture(ditherGL.TEXTURE_2D, _ditherSrcTex);
+  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_MIN_FILTER, ditherGL.LINEAR);
+  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_MAG_FILTER, ditherGL.LINEAR);
+  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_WRAP_S, ditherGL.CLAMP_TO_EDGE);
+  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_WRAP_T, ditherGL.CLAMP_TO_EDGE);
+  const bayerThresh = new Uint8Array(64);
+  for (let i = 0; i < 64; i++) bayerThresh[i] = (BAYER8[i] << 2) + 2;
+  _ditherBayerTex = ditherGL.createTexture();
+  ditherGL.bindTexture(ditherGL.TEXTURE_2D, _ditherBayerTex);
+  ditherGL.pixelStorei(ditherGL.UNPACK_ALIGNMENT, 1);
+  ditherGL.texImage2D(
+    ditherGL.TEXTURE_2D, 0,
+    ditherGL.LUMINANCE, 8, 8, 0,
+    ditherGL.LUMINANCE, ditherGL.UNSIGNED_BYTE,
+    bayerThresh
+  );
+  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_MIN_FILTER, ditherGL.NEAREST);
+  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_MAG_FILTER, ditherGL.NEAREST);
+  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_WRAP_S, ditherGL.REPEAT);
+  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_WRAP_T, ditherGL.REPEAT);
+}
+
+function applyDither(offX, offY) {
+  const dw = ditherCanvas.width;
+  const dh = ditherCanvas.height;
+  if (dw <= 0 || dh <= 0) return;
+  const gl = ditherGL;
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, _ditherSrcTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+  gl.viewport(0, 0, dw, dh);
+  gl.useProgram(_ditherProg);
+  gl.bindBuffer(gl.ARRAY_BUFFER, _ditherQuad);
+  gl.enableVertexAttribArray(_ditherAPos);
+  gl.vertexAttribPointer(_ditherAPos, 2, gl.FLOAT, false, 0, 0);
+  gl.uniform1i(_ditherUTex, 0);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, _ditherBayerTex);
+  gl.uniform1i(_ditherUBayer, 1);
+  gl.uniform2f(_ditherUSize, dw, dh);
+  gl.uniform2f(_ditherUOffset, offX & 7, offY & 7);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(ditherCanvas, 0, 0, dw, dh, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+}
+
+function captureFreeze() {
+  freezeCtx.clearRect(0, 0, freezeCanvas.width, freezeCanvas.height);
+  freezeCtx.drawImage(canvas, 0, 0);
+  const base = FREEZE_FRAMES_MIN +
+    Math.floor(Math.random() * (FREEZE_FRAMES_MAX - FREEZE_FRAMES_MIN + 1));
+  freezeFrames = base * (Math.random() < 0.5 ? 1 : 2);
+  freezeMono = Math.random() < FREEZE_MONO_CHANCE;
+}
+function restoreFreeze() {
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(freezeCanvas, 0, 0);
+  ctx.restore();
+}
+
+function applyBlockShuffle() {
+  const tilesX = 5 + Math.floor(Math.random() * 6);
+  const tilesY = 3 + Math.floor(Math.random() * 5);
+  const tileW = canvas.width / tilesX;
+  const tileH = canvas.height / tilesY;
+  const count = 4 + Math.floor(Math.random() * 6);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  for (let i = 0; i < count; i++) {
+    const ax = Math.floor(Math.random() * tilesX);
+    const ay = Math.floor(Math.random() * tilesY);
+    const bx = Math.floor(Math.random() * tilesX);
+    const by = Math.floor(Math.random() * tilesY);
+    ctx.drawImage(canvas,
+      ax * tileW, ay * tileH, tileW, tileH,
+      bx * tileW, by * tileH, tileW, tileH);
+  }
+  ctx.restore();
+}
+
+function resizeDither() {
+  ditherCanvas.width = Math.max(1, Math.ceil(W));
+  ditherCanvas.height = Math.max(1, Math.ceil(H));
+}
+function resizeFreeze() {
+  freezeCanvas.width = canvas.width;
+  freezeCanvas.height = canvas.height;
+}
+
+function frame(now) {
+  const dt = Math.min(50, now - last) / 16.67;
+  last = now;
+  inversionRegions.length = 0;
+  monoRegions.length = 0;
+
+  fpsAccumCount++;
+  if (now - fpsAccumStart >= 500) {
+    fpsValue = fpsAccumCount * 1000 / (now - fpsAccumStart);
+    fpsAccumStart = now;
+    fpsAccumCount = 0;
+  }
+
+  const b = { bass: curBass, mid: curMid, treble: curTreble, level: curLevel, bassFast: curBassFast };
+  smoothLevel += (b.level - smoothLevel) * 0.08;
+  smoothBass += (b.bass - smoothBass) * 0.15;
+  smoothMid += (b.mid - smoothMid) * 0.20;
+  smoothTreble += (b.treble - smoothTreble) * 0.30;
+
+  const tintTarget = COLOR_PALETTE[colorIndex];
+  const tintLerp = Math.min(1, COLOR_LERP * dt);
+  tintR += (tintTarget[0] - tintR) * tintLerp;
+  tintG += (tintTarget[1] - tintG) * tintLerp;
+  tintB += (tintTarget[2] - tintB) * tintLerp;
+
+  const bassRise = Math.max(0, b.bassFast - prevBass);
+  prevBass = b.bassFast;
+  bassBaseline = bassBaseline * 0.97 + b.bassFast * 0.03;
+  const bassDev = Math.max(0, b.bassFast - bassBaseline);
+  bassDevDebug = bassDev;
+
+  const bassAmp = Math.pow(Math.max(0, (b.bass - 0.5) * 2), 2);
+  bassPulse = Math.max(bassAmp, bassPulse * Math.pow(0.88, dt));
+
+  sliceCool = Math.max(0, sliceCool - dt);
+  const bassOnset = Math.max(bassRise, bassDev);
+  if (bassOnset > SLICE_TRIGGER && sliceCool <= 0) {
+    kickCount++;
+    if (kickCount >= KICKS_PER_COLOR_CYCLE) {
+      colorIndex = (colorIndex + 1) % COLOR_PALETTE.length;
+      kickCount = 0;
+    }
+    shapeProgress += 1 / KICKS_PER_SHAPE_CYCLE;
+    if (shapeProgress >= 1) {
+      shapeIndex = (shapeIndex + 1) % SHAPES.length;
+      shapeProgress = 0;
+    }
+    beatsAtOrientation++;
+    if (beatsAtOrientation >= nextRotateBeats) {
+      const rotRad = (20 + Math.random() * 25) * Math.PI / 180;
+      currentSliceAngle = (currentSliceAngle + rotRad) % (Math.PI * 2);
+      beatsAtOrientation = 0;
+      nextRotateBeats = 3 + Math.floor(Math.random() * 6);
+    }
+    spawnSliceBurst(Math.min(1, bassOnset * 4));
+    sliceCool = 3 + Math.random() * 6;
+  }
+
+  midBaseline = midBaseline * 0.97 + b.mid * 0.03;
+  const midDev = Math.max(0, b.mid - midBaseline);
+  const midRise = Math.max(0, b.mid - prevMid);
+  prevMid = b.mid;
+  const midTrigger = Math.max(midDev, midRise * 2.0);
+  midPulse = Math.max(midTrigger, midPulse * Math.pow(0.91, dt));
+
+  midSliceCool = Math.max(0, midSliceCool - dt);
+  if (midPulse > MID_SLICE_TRIGGER && midSliceCool <= 0) {
+    spawnSliceBurst(Math.min(1, midPulse * 1.6));
+    midSliceCool = 4 + Math.random() * 7;
+  }
+
+  flashCool = Math.max(0, flashCool - dt);
+  if (bassRise > FLASH_TRIGGER && flashCool <= 0) {
+    pendingFlash = Math.random() < 0.5 ? 'invert' : 'strobe';
+    flashCool = 14 + Math.random() * 28;
+  }
+
+  energyAvg = energyAvg * 0.95 + b.level * 0.05;
+  const levelRise = Math.max(0, b.level - prevLevel);
+  prevLevel = b.level;
+  onsetCool = Math.max(0, onsetCool - dt);
+  const onsetSig = Math.max(b.level - energyAvg, levelRise * 1.8);
+  if (onsetSig > ONSET_THRESHOLD && onsetCool <= 0) {
+    if (Math.random() < 0.55) pendingFreeze = true;
+    if (Math.random() < 0.55) pendingShuffle = true;
+    if (!pendingFreeze && !pendingShuffle) {
+      if (Math.random() < 0.5) pendingFreeze = true;
+      else pendingShuffle = true;
+    }
+    onsetCool = ONSET_COOLDOWN_MIN +
+      Math.random() * (ONSET_COOLDOWN_MAX - ONSET_COOLDOWN_MIN);
+  }
+
+  ditherPhaseX += dt * (0.35 + smoothTreble * 8.0);
+  ditherPhaseY += dt * (0.25 + smoothTreble * 5.5);
+
+  bassAvg = bassAvg * 0.96 + b.bass * 0.04;
+  trebleAvg = trebleAvg * 0.95 + b.treble * 0.05;
+  bassCool = Math.max(0, bassCool - dt);
+  trebleCool = Math.max(0, trebleCool - dt);
+
+  if (b.bass > bassAvg * 1.35 + 0.05 && bassCool <= 0) {
+    spawnSpark(Math.min(1, b.bass), 'bass');
+    bassCool = 6;
+  }
+  if (b.treble > trebleAvg * 1.4 + 0.04 && trebleCool <= 0) {
+    spawnSpark(Math.min(1, b.treble), 'treble');
+    trebleCool = 4;
+  }
+
+  if (freezeFrames > 0) {
+    restoreFreeze();
+    freezeFrames -= dt;
+  } else {
+    const fade = 0.06 + 0.05 * (1 - smoothLevel);
+    ctx.fillStyle = 'rgba(0,0,0,' + fade + ')';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+
+    const cx = W * 0.5, cy = H * 0.5;
+    const flyAxis = Math.min(W, H) * 0.5;
+    const speedScale = 1 + smoothMid * 5;
+    const minSc = 1 / Z_FAR;
+    const maxSc = 1 / Z_NEAR;
+    const scRange = maxSc - minSc;
+    for (let i = 0; i < flyout.length; i++) {
+      const s = flyout[i];
+      s.z -= s.vz * dt * speedScale;
+      if (s.z <= Z_NEAR) {
+        spawnFlyout(s);
+        continue;
+      }
+      const sc = 1 / s.z;
+      const sx = cx + s.wx * flyAxis * sc;
+      const sy = cy + s.wy * flyAxis * sc;
+      const sizeBoost = 1 + bassPulse * 0.45;
+      const drawScale = s.size * viewportScale * sc * sizeBoost;
+      const sizeProgress = (sc - minSc) / scRange;
+      const rotProgress = Math.min(1, sizeProgress / 0.75);
+      const rot = s.rotTarget * rotProgress;
+
+      let a;
+      if (s.z > Z_FAR * 0.65) {
+        a = (Z_FAR - s.z) / (Z_FAR * 0.35);
+      } else if (s.z < 0.18) {
+        a = s.z / 0.18;
+      } else {
+        a = 1;
+      }
+      a = Math.max(0, Math.min(1, a)) * 0.7;
+
+      const above = Math.max(0, smoothLevel - s.visThresh);
+      const energyMult = Math.min(1, above * 6);
+      if (energyMult < 0.01) continue;
+      a *= energyMult;
+      a = Math.min(1, a * (1 + bassPulse * 0.7));
+
+      const silh = SILHOUETTES[activeSilhouette] || SILHOUETTES.car;
+      const path = silh.path;
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate(rot);
+      ctx.scale(drawScale, drawScale);
+      ctx.fillStyle = 'rgba(255,255,255,' + (a * s.fillAlpha) + ')';
+      ctx.fill(path, 'evenodd');
+      const invScale = 1 / drawScale;
+      ctx.strokeStyle = 'rgba(255,255,255,' + (a * 0.35) + ')';
+      ctx.lineWidth = Math.max(2, 2.4 + sc * 1.2) * invScale;
+      ctx.stroke(path);
+      ctx.strokeStyle = 'rgba(255,255,255,' + (a * 0.95) + ')';
+      ctx.lineWidth = Math.max(1, 1 + sc * 0.3) * invScale;
+      ctx.stroke(path);
+      ctx.restore();
+    }
+
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const s = sparks[i];
+      // Position update scaled so sparks traverse a similar fraction of
+      // the viewport regardless of size.
+      s.x += s.vx * dt * viewportScale;
+      s.y += s.vy * dt * viewportScale;
+      s.vx *= s.kind === 'bass' ? 0.985 : 0.97;
+      s.vy *= s.kind === 'bass' ? 0.985 : 0.97;
+      s.life -= s.decay * dt;
+      if (s.life <= 0 || s.x < -20 || s.x > W + 20 || s.y < -20 || s.y > H + 20) {
+        sparks.splice(i, 1);
+        continue;
+      }
+      const a = Math.max(0, s.life);
+      const radius = s.r * viewportScale * (s.kind === 'bass' ? 1 + (1 - s.life) * 0.4 : 1);
+      const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, radius * 5);
+      g.addColorStop(0, 'rgba(255,255,255,' + (0.9 * a) + ')');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, radius * 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const rectW = W;
+    const rectH = H;
+    const pulseR = (PARTICLE_BASE_R + bassPulse * PARTICLE_PULSE_AMOUNT) * viewportScale;
+    const jitter = JITTER_PX * smoothTreble * viewportScale;
+    const rowCorrupt = bassPulse * rectW * ROW_CORRUPT_AMOUNT;
+    const spacing = LATTICE_SPACING * viewportScale;
+    lattPts.length = 0;
+    pushFilledRectPoints(lattPts, W * 0.5, H * 0.5, rectW, rectH, spacing, rowCorrupt);
+    const pts = lattPts;
+    const sFrom = SHAPES[shapeIndex];
+    const sTo = SHAPES[(shapeIndex + 1) % SHAPES.length];
+    const morph = shapeProgress;
+    for (let k = 0; k < SHAPE_N * 2; k++) {
+      shapeBuffer[k] = (sFrom[k] + (sTo[k] - sFrom[k]) * morph) * pulseR;
+    }
+    particleCtx.clearRect(0, 0, particleTileSize, particleTileSize);
+    particleCtx.fillStyle = 'rgba(255,255,255,0.95)';
+    particleCtx.beginPath();
+    particleCtx.moveTo(particleHalf + shapeBuffer[0], particleHalf + shapeBuffer[1]);
+    for (let k = 2; k < SHAPE_N * 2; k += 2) {
+      particleCtx.lineTo(particleHalf + shapeBuffer[k], particleHalf + shapeBuffer[k + 1]);
+    }
+    particleCtx.closePath();
+    particleCtx.fill();
+    for (let i = 0; i < pts.length; i += 2) {
+      const x = pts[i] + (Math.random() - 0.5) * jitter - particleHalf;
+      const y = pts[i + 1] + (Math.random() - 0.5) * jitter - particleHalf;
+      ctx.drawImage(particleCanvas, x, y);
+    }
+
+    if (slices.length) {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalCompositeOperation = 'lighter';
+      const cxd = canvas.width / 2;
+      const cyd = canvas.height / 2;
+      for (let i = slices.length - 1; i >= 0; i--) {
+        const s = slices[i];
+        s.life -= dt;
+        if (s.life <= 0) { slices.splice(i, 1); continue; }
+        const sy = Math.max(0, Math.min(H - 1, s.y)) * dpr;
+        const sh = Math.max(1, Math.min(H * dpr - sy, s.h * viewportScale * dpr));
+        const region = {
+          x: s.dx,
+          y: sy / dpr,
+          w: W,
+          h: sh / dpr,
+          angle: s.angle || 0,
+        };
+        (s.mono ? monoRegions : inversionRegions).push(region);
+        if (s.angle) {
+          ctx.save();
+          ctx.translate(cxd, cyd);
+          ctx.rotate(s.angle);
+          ctx.translate(-cxd, -cyd);
+          ctx.drawImage(canvas, 0, sy, W * dpr, sh, s.dx * dpr, sy, W * dpr, sh);
+          ctx.restore();
+        } else {
+          ctx.drawImage(canvas, 0, sy, W * dpr, sh, s.dx * dpr, sy, W * dpr, sh);
+        }
+      }
+      ctx.restore();
+    }
+
+    if (pendingFreeze) {
+      captureFreeze();
+      pendingFreeze = false;
+    }
+    if (pendingShuffle) {
+      applyBlockShuffle();
+      pendingShuffle = false;
+    }
+  }
+
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = SCANLINE_ALPHA;
+  ctx.fillStyle = scanlinePattern;
+  ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1;
+
+  regenNoise(0.25 + smoothTreble * 0.45);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.imageSmoothingEnabled = false;
+  ctx.globalAlpha = GRAIN_ALPHA;
+  ctx.drawImage(noiseCanvas, 0, 0, W, H);
+  ctx.globalAlpha = 1;
+  ctx.imageSmoothingEnabled = true;
+  ctx.globalCompositeOperation = 'source-over';
+
+  applyDither(Math.floor(ditherPhaseX), Math.floor(ditherPhaseY));
+
+  const tintActive = !(freezeFrames > 0 && freezeMono);
+  if (tintActive) {
+    const sat = Math.max(0, Math.min(1, saturation));
+    const effR = 255 - (255 - tintR) * sat;
+    const effG = 255 - (255 - tintG) * sat;
+    const effB = 255 - (255 - tintB) * sat;
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = 'rgb(' + (effR | 0) + ',' + (effG | 0) + ',' + (effB | 0) + ')';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'source-over';
+    if (monoRegions.length) {
+      const dw = ditherCanvas.width;
+      const dh = ditherCanvas.height;
+      for (let i = 0; i < monoRegions.length; i++) {
+        const r = monoRegions[i];
+        ctx.save();
+        if (r.angle) {
+          ctx.translate(W * 0.5, H * 0.5);
+          ctx.rotate(r.angle);
+          ctx.translate(-W * 0.5, -H * 0.5);
+        }
+        ctx.beginPath();
+        ctx.rect(r.x, r.y, r.w, r.h);
+        ctx.clip();
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(ditherCanvas, 0, 0, dw, dh, 0, 0, W, H);
+        ctx.imageSmoothingEnabled = true;
+        ctx.restore();
+      }
+    }
+  }
+  if (inversionRegions.length) {
+    ctx.globalCompositeOperation = 'difference';
+    ctx.fillStyle = '#fff';
+    for (let i = 0; i < inversionRegions.length; i++) {
+      const r = inversionRegions[i];
+      if (r.angle) {
+        ctx.save();
+        ctx.translate(W * 0.5, H * 0.5);
+        ctx.rotate(r.angle);
+        ctx.translate(-W * 0.5, -H * 0.5);
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.restore();
+      } else {
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+      }
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  if (pendingFlash) {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (pendingFlash === 'strobe') {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = 'white';
+    } else {
+      ctx.globalCompositeOperation = 'difference';
+      ctx.fillStyle = 'white';
+    }
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+    pendingFlash = null;
+  }
+
+  // periodic debug snapshot for the main-thread dev panel
+  if (now - lastDebugPost >= 100) {
+    self.postMessage({
+      type: 'debug',
+      bass: b.bass, mid: b.mid, treble: b.treble, level: b.level, bassFast: b.bassFast,
+      bassPulse, bassDev: bassDevDebug,
+      slicesLength: slices.length,
+      monoLength: monoRegions.length,
+      inversionLength: inversionRegions.length,
+      currentSliceAngle,
+      freezeFrames, freezeMono,
+      kickCount,
+      colorIndex,
+      tintR, tintG, tintB,
+      fpsValue,
+      shapeIndex,
+      shapeProgress,
+      activeSilhouette,
+      saturation,
+      FREEZE_FRAMES_MAX,
+      W, H, dpr,
+      bitmapW: canvas.width,
+      bitmapH: canvas.height,
+    });
+    lastDebugPost = now;
+  }
+
+  requestAnimationFrame(frame);
+}
+
+function applyParam(name, v) {
+  switch (name) {
+    case 'sliceTrigger': SLICE_TRIGGER = v; break;
+    case 'saturation': saturation = v; break;
+    case 'silhouette': if (SILHOUETTES[v]) activeSilhouette = v; break;
+    case 'kicksPerColorCycle': KICKS_PER_COLOR_CYCLE = Math.round(v); break;
+    case 'monoBarChance': MONO_BAR_CHANCE = v; break;
+    case 'jitterPx': JITTER_PX = v; break;
+    case 'latticeSpacing': LATTICE_SPACING = Math.round(v); break;
+    case 'rowCorruptAmount': ROW_CORRUPT_AMOUNT = v; break;
+    case 'grainAlpha': GRAIN_ALPHA = v; break;
+    case 'scanlineAlpha': SCANLINE_ALPHA = v; break;
+    case 'flashTrigger': FLASH_TRIGGER = v; break;
+    case 'onsetThreshold': ONSET_THRESHOLD = v; break;
+    case 'midSliceTrigger': MID_SLICE_TRIGGER = v; break;
+    case 'sliceBurstScale': SLICE_BURST_SCALE = v; break;
+    case 'freezeFramesMax': FREEZE_FRAMES_MAX = Math.max(FREEZE_FRAMES_MIN, Math.round(v)); break;
+    case 'colorLerp': COLOR_LERP = v; break;
+    case 'freezeMonoChance': FREEZE_MONO_CHANCE = v; break;
+    case 'kicksPerShapeCycle': KICKS_PER_SHAPE_CYCLE = Math.round(v); break;
+  }
+}
+function applyParams(p) {
+  for (const name in p) applyParam(name, p[name]);
+}
+
+self.onmessage = function (e) {
+  const msg = e.data;
+  if (msg.type === 'init') {
+    canvas = msg.canvas;
+    dpr = msg.dpr;
+    W = msg.W;
+    H = msg.H;
+    recomputeViewport();
+    ctx = canvas.getContext('2d');
+    canvas.width = Math.floor(W * dpr);
+    canvas.height = Math.floor(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (msg.params) applyParams(msg.params);
+    setupOffscreens();
+    setupDither();
+    initFlyout();
+    last = performance.now();
+    fpsAccumStart = last;
+    requestAnimationFrame(frame);
+  } else if (msg.type === 'audio') {
+    curBass = msg.bass;
+    curMid = msg.mid;
+    curTreble = msg.treble;
+    curLevel = msg.level;
+    curBassFast = msg.bassFast;
+  } else if (msg.type === 'params') {
+    applyParams(msg.values);
+  } else if (msg.type === 'param') {
+    applyParam(msg.name, msg.value);
+  } else if (msg.type === 'resize') {
+    dpr = msg.dpr;
+    W = msg.W;
+    H = msg.H;
+    recomputeViewport();
+    canvas.width = Math.floor(W * dpr);
+    canvas.height = Math.floor(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    rebuildScanlineTile();
+    rebuildParticleTile();
+    if (ditherCanvas) resizeDither();
+    if (freezeCanvas) resizeFreeze();
+    // Drop any in-flight slices: their s.y/s.dx are baked in the old
+    // viewport's coordinate system, and they'd render bars at stale
+    // positions for the next several frames. Same for any active freeze
+    // snapshot (the captured bitmap is at old dims; replaying it would
+    // show old content stretched into the new viewport).
+    slices.length = 0;
+    inversionRegions.length = 0;
+    monoRegions.length = 0;
+    freezeFrames = 0;
+  }
+};
+</script>
+
 <script>
 // ============================================================================
 // ambient_viz — single-file inline visualizer
@@ -511,7 +1644,33 @@
 // ============================================================================
 (() => {
   const canvas = document.getElementById('c');
-  const ctx = canvas.getContext('2d');
+  // Render is owned by a Worker that controls the canvas via OffscreenCanvas
+  // (see <script type="text/worker" id="worker-src"> above). Main thread
+  // keeps audio analysis, the dev panel, and the visual automation editor.
+  // We must NOT call canvas.getContext('2d') here — transferControlToOffscreen
+  // would throw if the canvas already has a 2D context attached.
+  let renderWorker = null;
+  // Latest debug snapshot from the worker (posted ~10× per second). Read by
+  // the dev-panel updateDebug() pass each main rAF.
+  let workerDebug = {
+    bass: 0, mid: 0, treble: 0, level: 0, bassFast: 0,
+    bassPulse: 0, bassDev: 0,
+    slicesLength: 0, monoLength: 0, inversionLength: 0,
+    currentSliceAngle: 0,
+    freezeFrames: 0, freezeMono: false,
+    kickCount: 0, colorIndex: 0,
+    tintR: 0, tintG: 255, tintB: 65,
+    fpsValue: 0,
+    shapeIndex: 0,
+    activeSilhouette: 'car',
+    saturation: 1.0,
+    FREEZE_FRAMES_MAX: 12,
+  };
+  // Posts a single param change to the worker (used by sliders + automation
+  // lanes via PARAMS.X.setLive). No-op until the worker is up.
+  function setParam(name, value) {
+    if (renderWorker) renderWorker.postMessage({ type: 'param', name, value });
+  }
   const fileInput = document.getElementById('file');
   const micBtn = document.getElementById('mic');
   const playBtn = document.getElementById('playpause');
@@ -544,11 +1703,12 @@
   let W = 0, H = 0;
   function resize() {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
-    W = canvas.clientWidth = window.innerWidth;
-    H = canvas.clientHeight = window.innerHeight;
-    canvas.width = Math.floor(W * dpr);
-    canvas.height = Math.floor(H * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    // CSS sizing is handled by the canvas { width: 100vw; height: 100vh }
+    // rule in <style>, which auto-tracks viewport changes. The bitmap
+    // dimensions are owned by the worker (see worker.onmessage 'resize').
+    if (renderWorker) renderWorker.postMessage({ type: 'resize', W, H, dpr });
   }
   window.addEventListener('resize', resize);
   resize();
@@ -764,827 +1924,12 @@
     return { bass, mid, treble, level, bassFast };
   }
 
-  // --- car silhouette ---
-  // Auto-generated from irocz.svg by preprocess.js. 47 subpaths of flattened
-  // polylines, normalized so the longest axis spans [-0.5, 0.5]. The flyout
-  // layer renders this with even-odd fill so the inner cutouts (windshield,
-  // headlights, grille slots) read as holes.
-  const CAR_ASPECT = 1.4755;
-  const CAR_SUBPATHS = [
-    [-0.2963,0.3389,-0.4688,0.3324,-0.4886,0.3189,-0.4932,0.3083,-0.4958,0.3032,-0.4996,0.2805,-0.4875,0.0143,-0.4827,0.0258,-0.4793,0.0465,-0.4759,0.0469,-0.4589,0.053,-0.4441,0.056,-0.4349,0.0563,-0.2669,0.0693,0.0885,0.0682,0.3704,0.0641,0.4171,0.0604,0.435,0.0541,0.4396,0.054,0.4455,0.0562,0.4779,0.038,0.4794,0.0411,0.4848,0.1498,0.4892,0.2858,0.4852,0.3091,0.4758,0.3232,0.4588,0.3329,0.4209,0.3377,-0.2963,0.3389],
-    [-0.3476,0.2975,-0.3433,0.247,-0.3462,0.2566,-0.3526,0.3009,-0.3525,0.3056,-0.3476,0.2975],
-    [0.3522,0.2901,0.348,0.2614,0.3441,0.246,0.3493,0.297,0.3532,0.3022,0.3522,0.2901],
-    [-0.3078,0.2339,-0.3151,0.2291,-0.3213,0.2351,-0.314,0.2399,-0.3078,0.2339],
-    [0.0143,0.2392,0.3263,0.2266,0.431,0.2215,0.4355,0.2239,0.4437,0.224,0.4422,0.1964,0.4406,0.1689,0.4477,0.1656,0.4532,0.1609,0.4484,0.1619,0.3124,0.1714,0.2206,0.1749,0.2146,0.1826,0.1995,0.196,0.126,0.2037,-0.1344,0.2037,-0.192,0.1988,-0.2141,0.1826,-0.2201,0.1749,-0.3106,0.1714,-0.4474,0.1623,-0.4518,0.1601,-0.4379,0.1677,-0.4292,0.1704,-0.4337,0.1733,-0.439,0.1709,-0.4402,0.1798,-0.4418,0.2067,-0.4437,0.224,-0.4352,0.2239,-0.4306,0.2214,-0.4229,0.2188,-0.2655,0.2315,-0.2328,0.2324,-0.2056,0.234,-0.1768,0.2348,-0.1416,0.2367,-0.1084,0.2386,-0.0737,0.2396,-0.0462,0.2406,0.0143,0.2392],
-    [0.4285,0.1727,0.4324,0.1703,0.4362,0.1713,0.4324,0.1737,0.4285,0.1727],
-    [0.3211,0.2367,0.3147,0.2316,0.3084,0.2353,0.3141,0.24,0.3205,0.2415,0.3211,0.2367],
-    [0.3458,0.2335,0.3446,0.2367,0.3458,0.2399,0.3458,0.2335],
-    [-0.359,0.229,-0.4011,0.2273,-0.4242,0.2275,-0.3999,0.2291,-0.3577,0.2307,-0.3398,0.2308],
-    [0.4552,0.2069,0.4532,0.1946,0.4514,0.2073,0.4508,0.2213,0.4547,0.2218,0.4552,0.2069],
-    [-0.4485,0.2195,-0.451,0.2137,-0.4535,0.2156,-0.451,0.2214,-0.4485,0.2195],
-    [-0.2171,0.1315,-0.2121,0.0998,-0.2114,0.0961,-0.2186,0.1028,-0.2211,0.1247,-0.2238,0.1351,-0.2299,0.1268,-0.2337,0.1203,-0.2351,0.115,-0.2433,0.1155,-0.2606,0.1206,-0.2646,0.1299,-0.2651,0.1362,-0.2671,0.1319,-0.2689,0.1278,-0.2686,0.1337,-0.2698,0.1407,-0.2735,0.1424,-0.3242,0.1436,-0.3775,0.1405,-0.3857,0.1324,-0.3895,0.1302,-0.3861,0.1408,-0.3761,0.1449,-0.373,0.147,-0.4027,0.1478,-0.4273,0.1467,-0.4287,0.1259,-0.4356,0.0875,-0.4412,0.07,-0.4484,0.0769,-0.4577,0.0821,-0.4625,0.0731,-0.467,0.0637,-0.4678,0.0721,-0.456,0.1101,-0.4433,0.1429,-0.4504,0.1435,-0.4557,0.1427,-0.4531,0.1462,-0.347,0.1551,-0.2324,0.1605,-0.2183,0.1605,-0.2171,0.1315],
-    [0.345,0.1552,0.4511,0.1462,0.4537,0.1427,0.4481,0.1436,0.4421,0.1406,0.4467,0.1249,0.4518,0.114,0.4669,0.064,0.4646,0.0555,0.4609,0.0649,0.4556,0.0796,0.4514,0.083,0.4446,0.0776,0.4372,0.0706,0.4313,0.0865,0.4241,0.1246,0.4227,0.1466,0.3993,0.1483,0.3696,0.1475,0.3653,0.1453,0.3715,0.1449,0.3824,0.1397,0.3848,0.1316,0.3788,0.1354,0.36,0.1421,0.3088,0.1438,0.2701,0.1455,0.2665,0.1371,0.2616,0.1322,0.26,0.1287,0.2557,0.1204,0.2387,0.1155,0.2291,0.1138,0.2289,0.1235,0.2265,0.1281,0.2242,0.1263,0.2214,0.1281,0.2189,0.1337,0.2164,0.1495,0.2149,0.1598,0.2295,0.1606,0.345,0.1552],
-    [-0.1171,0.1355,-0.1186,0.1221,-0.1186,0.1126,-0.1429,0.1119,-0.1672,0.1112,-0.1677,0.1247,-0.1681,0.1383,-0.1691,0.1247,-0.1708,0.1134,-0.1757,0.1119,-0.182,0.1262,-0.1828,0.1396,-0.1492,0.1396,-0.1171,0.1355],
-    [0.1831,0.1258,0.1831,0.112,0.1581,0.1124,0.1332,0.1127,0.1317,0.1255,0.1302,0.1383,0.1298,0.1249,0.1285,0.1135,0.123,0.1115,0.1175,0.1135,0.1166,0.1255,0.1166,0.1396,0.1498,0.1396,0.1831,0.1396],
-    [-0.2835,0.1281,-0.2899,0.1173,-0.2963,0.1141,-0.2904,0.114,-0.2853,0.1057,-0.2876,0.0985,-0.2963,0.0956,-0.3378,0.0937,-0.3719,0.0989,-0.3727,0.1083,-0.3622,0.1118,-0.3526,0.1122,-0.3628,0.1137,-0.3733,0.1191,-0.3719,0.1293,-0.3065,0.136,-0.2835,0.1357],
-    [-0.3097,0.1148,-0.302,0.1149,-0.3065,0.1161,-0.3097,0.1148],
-    [0.3569,0.1323,0.371,0.1306,0.3718,0.1134,0.3725,0.0961,0.3301,0.0961,0.2878,0.0961,0.2853,0.1027,0.2843,0.1351,0.3569,0.1323],
-    [-0.132,0.107,-0.1666,0.107,-0.1493,0.1079,-0.132,0.107],
-    [0.1671,0.107,0.1326,0.107,0.1498,0.1079,0.1671,0.107],
-    [0.0966,0.0942,-0.0977,0.0942,0.0003,0.0949,0.0966,0.0942],
-    [-0.2942,0.056,-0.328,0.0551,-0.329,0.0468,-0.33,0.0386,-0.3304,0.0469,-0.3331,0.0549,-0.3373,0.0499,-0.3478,0.0419,-0.3796,0.0399,-0.4075,0.0437,-0.4109,0.0475,-0.416,0.0455,-0.4133,0.0409,-0.4129,0.0343,-0.423,-0.0236,-0.42,-0.0607,-0.4179,-0.1123,-0.4156,-0.0784,-0.4152,-0.0292,-0.2088,-0.0285,0.2067,-0.0286,0.4157,-0.0292,0.4158,-0.0707,0.4206,-0.1314,0.423,-0.0784,0.4265,-0.0237,0.419,0.0317,0.4181,0.0409,0.4143,0.0475,0.4116,0.0434,0.3825,0.0397,0.3473,0.0439,0.3419,0.05,0.3486,0.0534,0.2871,0.0548,0.2136,0.0525,0.2103,0.0494,0.2157,0.0437,0.2209,0.0383,0.2171,0.0374,0.2088,0.0418,0.2062,0.039,0.2102,0.0277,0.2123,0.0145,0.2103,-0.008,0.2103,-0.0214,0.104,-0.0221,-0.1063,-0.0221,-0.2103,-0.0214,-0.2103,-0.0093,-0.212,0.0133,-0.2081,0.0291,-0.2043,0.04,-0.2077,0.0432,-0.2193,0.0391,-0.2142,0.0456,-0.2098,0.0528,-0.2942,0.056],
-    [0.3339,0.045,0.3314,0.0373,0.3288,0.045,0.3314,0.0526,0.3339,0.045],
-    [-0.3407,0.0296,-0.3232,0.0296,-0.3232,0.0028,-0.3232,-0.0241,-0.3679,-0.0241,-0.4127,-0.0241,-0.4127,0.0014,-0.4127,0.0269,-0.4043,0.0295,-0.3771,0.0309,-0.3407,0.0296],
-    [-0.226,0.0028,-0.226,-0.0241,-0.2708,-0.0241,-0.3155,-0.0241,-0.3155,0.0028,-0.3155,0.0296,-0.2708,0.0296,-0.226,0.0296],
-    [0.3211,0.0028,0.3211,-0.0241,0.2751,-0.0241,0.2291,-0.0241,0.2291,0.0028,0.2291,0.0296,0.2751,0.0296,0.3211,0.0296],
-    [0.4155,0.0261,0.4178,-0.0002,0.417,-0.0228,0.3723,-0.0228,0.3275,-0.0228,0.3268,0,0.3273,0.0262,0.3706,0.03,0.4155,0.0261],
-    [-0.4441,0.0269,-0.4417,0.0043,-0.4432,0.0448,-0.4441,0.0269],
-    [0.437,0.0207,0.4381,0.0124,0.438,0.0303,0.437,0.0207],
-    [-0.0061,0.0194,-0.0051,0.0108,0.0003,0.0092,0.0056,0.0108,0.0067,0.0194,0.0056,0.028,0.0003,0.0296,-0.0051,0.028,-0.0061,0.0194],
-    [-0.4793,0.0141,-0.4828,-0.0202,-0.4849,-0.0517,-0.4593,-0.0706,-0.4781,0.0192,-0.4793,0.0141],
-    [0.4774,0.016,0.4681,-0.0272,0.4598,-0.0706,0.4728,-0.0644,0.4852,-0.056,0.4835,-0.0292,0.4774,0.016],
-    [-0.2313,-0.072,-0.2468,-0.1097,-0.2591,-0.1387,-0.2697,-0.1489,-0.304,-0.1532,-0.3663,-0.1477,-0.4044,-0.1454,-0.3762,-0.2017,-0.3273,-0.2771,-0.2946,-0.3111,-0.2592,-0.318,0.024,-0.325,0.2776,-0.3154,0.3009,-0.3052,0.3268,-0.2757,0.4045,-0.1449,0.3641,-0.1477,0.2709,-0.1511,0.2574,-0.1392,0.2444,-0.1099,0.2215,-0.0602,0.2279,-0.0791,0.2444,-0.1251,0.2543,-0.1538,0.2449,-0.1554,0.176,-0.157,0.1166,-0.1597,0.1288,-0.1806,0.15,-0.1923,0.184,-0.1949,0.2207,-0.1879,0.2434,-0.1702,0.2534,-0.1591,0.2572,-0.161,0.2428,-0.1853,0.2123,-0.2042,0.1746,-0.2079,0.1406,-0.2011,0.1239,-0.188,0.1127,-0.1686,0.1082,-0.157,-0.0685,-0.1567,-0.252,-0.1548,-0.2589,-0.1532,-0.2461,-0.1199,-0.2247,-0.0598,-0.2313,-0.072],
-    [-0.243,-0.1711,-0.2223,-0.1879,-0.1936,-0.1957,-0.1472,-0.1926,-0.1199,-0.171,-0.1113,-0.16,-0.1095,-0.1663,-0.1335,-0.1992,-0.1738,-0.2099,-0.2183,-0.2028,-0.244,-0.1836,-0.2567,-0.1622,-0.243,-0.1711],
-    [-0.2951,-0.2171,-0.2669,-0.268,-0.2727,-0.2652,-0.2814,-0.261,-0.306,-0.232,-0.3258,-0.1916,-0.3308,-0.1775,-0.3357,-0.168,-0.3296,-0.1668,-0.2951,-0.2171],
-    [0.339,-0.166,0.3325,-0.1778,0.3271,-0.1894,0.3153,-0.2222,0.2833,-0.2618,0.2816,-0.2586,0.2779,-0.2615,0.304,-0.2076,0.3312,-0.1664,0.339,-0.166],
-    [0.2867,-0.2481,0.2851,-0.2531,0.2921,-0.2414,0.2867,-0.2481],
-    [-0.2731,-0.1723,-0.2594,-0.184,-0.2511,-0.1956,-0.2535,-0.2236,-0.2576,-0.2534,-0.2876,-0.211,-0.3066,-0.1729,-0.2918,-0.1707,-0.2731,-0.1723],
-    [0.3084,-0.1733,0.2625,-0.2516,0.2583,-0.2535,0.2523,-0.2107,0.26,-0.1839,0.2784,-0.1721,0.3084,-0.1733],
-    [0.1008,-0.177,0.1159,-0.2032,0.1397,-0.2352,0.1875,-0.2413,0.2137,-0.2414,0.224,-0.2321,0.2342,-0.2229,0.2342,-0.2461,0.2323,-0.268,0.2112,-0.2745,0.138,-0.2771,0.0763,-0.2772,0.0721,-0.2708,0.0679,-0.2644,0.0001,-0.2644,-0.0677,-0.2644,-0.0737,-0.2708,-0.0796,-0.2772,-0.1406,-0.2771,-0.2132,-0.2745,-0.2343,-0.268,-0.2362,-0.2464,-0.2352,-0.2235,-0.2252,-0.2324,-0.2163,-0.2414,-0.1898,-0.2413,-0.1419,-0.2352,-0.1182,-0.2037,-0.1084,-0.1846,-0.0945,-0.1754,0.0006,-0.1723,0.1008,-0.177],
-    [-0.1252,-0.1087,-0.1563,-0.1294,-0.1797,-0.1444,-0.1066,-0.1467,-0.0396,-0.1443,-0.0323,-0.1362,-0.0304,-0.1193,-0.0286,-0.1008,-0.0748,-0.1008,-0.121,-0.1008],
-    [0.0322,-0.1142,0.0349,-0.1372,0.0376,-0.1468,0.1089,-0.1468,0.1816,-0.1445,0.1514,-0.1262,0.1273,-0.1091,0.1233,-0.1008,0.0778,-0.1008,0.0322,-0.1008],
-    [-0.4459,-0.113,-0.4431,-0.1178,-0.4463,-0.1298,-0.4535,-0.1377,-0.4663,-0.1392,-0.4906,-0.1412,-0.4994,-0.1441,-0.5,-0.1532,-0.4969,-0.1656,-0.4944,-0.162,-0.4881,-0.1489,-0.4606,-0.1448,-0.4344,-0.1437,-0.4285,-0.1586,-0.4174,-0.18,-0.4122,-0.1864,-0.4136,-0.1784,-0.4228,-0.1543,-0.4306,-0.1374,-0.4248,-0.1365,-0.4271,-0.1313,-0.4383,-0.1186,-0.4459,-0.113],
-    [0.4365,-0.1232,0.4279,-0.1315,0.4253,-0.1365,0.4311,-0.1382,0.4235,-0.1554,0.4142,-0.1785,0.4161,-0.1833,0.4274,-0.1629,0.4361,-0.1437,0.4611,-0.1456,0.4892,-0.1513,0.4941,-0.1659,0.4928,-0.1736,0.4963,-0.166,0.5,-0.1515,0.4955,-0.144,0.4702,-0.1402,0.4477,-0.1323,0.4414,-0.1276,0.438,-0.1244,0.4365,-0.1232],
-    [0.339,-0.2687,0.317,-0.3002,0.3556,-0.251,0.339,-0.2687],
-    [-0.3492,-0.2606,-0.328,-0.2874,-0.3384,-0.2708,-0.3565,-0.2486,-0.3492,-0.2606],
-    [-0.2905,-0.3238,-0.1928,-0.3389,0.1933,-0.3389,0.291,-0.3238,0.2822,-0.3214,0.1816,-0.3302,0.0003,-0.3321,-0.1811,-0.3302,-0.2817,-0.3214,-0.2905,-0.3238],
-  ];
-
-  // --- silhouette registry ---
-  // Each entry is the same shape format as CAR_SUBPATHS — a list of subpaths,
-  // each a flat [x,y,...] polyline. Coordinates are normalized so the longest
-  // axis spans [-0.5, 0.5]. Fill mode is 'evenodd' so nested subpaths produce
-  // alternating fill/hole regions.
-  //
-  // The vibe brief: a paranoid, sketchy walk home through a rainy nightclub
-  // city — bass thump bleeding from the next venue, pedestrians, surveillance,
-  // car headlights. These five placeholders cover that ground until you ship
-  // the curated SVG set.
-  function _circle(cx, cy, r, n) {
-    const o = [];
-    for (let i = 0; i < n; i++) {
-      const a = (i / n) * Math.PI * 2;
-      o.push(cx + r * Math.cos(a), cy + r * Math.sin(a));
-    }
-    return o;
-  }
-  function _arc(cx, cy, r, a0, a1, n) {
-    const o = [];
-    for (let i = 0; i <= n; i++) {
-      const a = a0 + (a1 - a0) * (i / n);
-      o.push(cx + r * Math.cos(a), cy + r * Math.sin(a));
-    }
-    return o;
-  }
-  function _rect(x0, y0, x1, y1) {
-    return [x0, y0, x1, y0, x1, y1, x0, y1];
-  }
-  function _ringSeg(cx, cy, rOut, rIn, a0, a1, n) {
-    const o = [];
-    for (let i = 0; i <= n; i++) {
-      const a = a0 + (a1 - a0) * (i / n);
-      o.push(cx + rOut * Math.cos(a), cy + rOut * Math.sin(a));
-    }
-    for (let i = n; i >= 0; i--) {
-      const a = a0 + (a1 - a0) * (i / n);
-      o.push(cx + rIn * Math.cos(a), cy + rIn * Math.sin(a));
-    }
-    return o;
-  }
-  // walker — single pedestrian mid-stride. You, walking home.
-  function _buildWalker() {
-    return {
-      aspect: 0.42,
-      subpaths: [
-        _circle(0, -0.40, 0.075, 16),       // head
-        _rect(-0.07, -0.32, 0.07, 0.05),    // torso
-        _rect(-0.10, -0.30, -0.07, 0.10),   // left arm
-        _rect( 0.07, -0.30,  0.10, 0.10),   // right arm
-        _rect(-0.06, 0.05, -0.01, 0.45),    // back leg (slightly shorter)
-        _rect( 0.04, 0.05,  0.09, 0.50),    // forward leg
-      ],
-    };
-  }
-  // umbrella — the small shelter, the rain.
-  function _buildUmbrella() {
-    return {
-      aspect: 1.25,
-      subpaths: [
-        _arc(0, 0, 0.5, Math.PI, 2 * Math.PI, 20),  // dome (top arc, closes flat)
-        _rect(-0.018, 0, 0.018, 0.36),              // stem
-        _ringSeg(0.07, 0.36, 0.07, 0.04, Math.PI / 2, 3 * Math.PI / 2, 10), // hook
-      ],
-    };
-  }
-  // eye — the surveillance, the paranoid stare.
-  function _buildEye() {
-    const top = _arc(0, 0, 0.5, Math.PI, 2 * Math.PI, 16).map((v, i) => i % 2 === 1 ? v * 0.45 : v);
-    const bot = _arc(0, 0, 0.5, 0, Math.PI, 16).map((v, i) => i % 2 === 1 ? v * 0.45 : v);
-    return {
-      aspect: 2.2,
-      subpaths: [
-        top.concat(bot),                   // almond eye outline
-        _circle(0, 0, 0.16, 18),           // iris (hole via evenodd)
-        _circle(0, 0, 0.06, 12),           // pupil dot (fills back in)
-      ],
-    };
-  }
-  // skyline — the city around you, neon density.
-  function _buildSkyline() {
-    // Walk a single closed polyline left to right, dipping for each building roof.
-    const heights = [0.08, 0.32, 0.18, 0.42, 0.14, 0.50, 0.22, 0.36, 0.10, 0.28, 0.16];
-    const baseY = 0.25;
-    const pts = [-0.5, baseY];
-    const n = heights.length;
-    for (let i = 0; i < n; i++) {
-      const x0 = -0.5 + i * (1 / n);
-      const x1 = -0.5 + (i + 1) * (1 / n);
-      const y = baseY - heights[i];
-      pts.push(x0, y, x1, y);
-    }
-    pts.push(0.5, baseY);
-    // little punched windows: a few small rectangle holes
-    const subs = [pts];
-    for (let i = 0; i < n; i++) {
-      if (heights[i] < 0.18) continue;
-      const x0 = -0.5 + i * (1 / n) + 0.015;
-      const x1 = -0.5 + (i + 1) * (1 / n) - 0.015;
-      const yTop = baseY - heights[i] + 0.05;
-      const yBot = baseY - 0.05;
-      // two-row windows, evenly spaced
-      for (let row = 0; row < 2; row++) {
-        const ry0 = yTop + (yBot - yTop) * (row / 3);
-        const ry1 = ry0 + (yBot - yTop) * 0.18;
-        subs.push(_rect(x0 + 0.005, ry0, x1 - 0.005, ry1));
-      }
-    }
-    return { aspect: 2.0, subpaths: subs };
-  }
-  // speaker — the bass thump bleeding from the next club.
-  function _buildSpeaker() {
-    return {
-      aspect: 1.0,
-      subpaths: [
-        _circle(0, 0, 0.50, 28),  // outer rim
-        _circle(0, 0, 0.42, 24),  // rim hole
-        _circle(0, 0, 0.34, 24),  // cone outer
-        _circle(0, 0, 0.13, 16),  // dust cap (fills)
-      ],
-    };
-  }
-  // HOW TO ADD A NEW SILHOUETTE:
-  //   1. Either build it procedurally with the _circle/_arc/_rect/_ringSeg
-  //      helpers above, OR run `node preprocess.js your.svg` and paste its
-  //      `CAR_ASPECT` / `CAR_SUBPATHS` output into a builder here.
-  //   2. Add a key to SILHOUETTES below mapping a name → { aspect, subpaths }.
-  //   3. The PARAMS.silhouette dropdown auto-populates from SILHOUETTE_NAMES,
-  //      so no UI changes are needed.
-  // INVARIANT: activeSilhouette is always a key of SILHOUETTES. Lane
-  // playback validates discrete values via PARAMS.silhouette.options().
-  const SILHOUETTES = {
-    car:      { aspect: CAR_ASPECT, subpaths: CAR_SUBPATHS },
-    walker:   _buildWalker(),
-    umbrella: _buildUmbrella(),
-    eye:      _buildEye(),
-    skyline:  _buildSkyline(),
-    speaker:  _buildSpeaker(),
-  };
-  const SILHOUETTE_NAMES = Object.keys(SILHOUETTES);
-  let activeSilhouette = 'car';
-
-  // Build one Path2D per silhouette in normalized unit coords ([-0.5, 0.5]).
-  // Geometry is fixed; flyouts only change scale + rotation per frame, so
-  // emitting moveTo/lineTo per point per frame is wasted work. Render code
-  // applies translate/rotate/scale via the context transform and calls
-  // ctx.fill(path)/ctx.stroke(path) — strokes compensate the scaled
-  // transform by dividing pixel-space line width by drawScale.
-  for (let _i = 0; _i < SILHOUETTE_NAMES.length; _i++) {
-    const _entry = SILHOUETTES[SILHOUETTE_NAMES[_i]];
-    const _path = new Path2D();
-    const _subs = _entry.subpaths;
-    for (let _k = 0; _k < _subs.length; _k++) {
-      const _sub = _subs[_k];
-      if (_sub.length < 2) continue;
-      _path.moveTo(_sub[0], _sub[1]);
-      for (let _j = 2; _j < _sub.length; _j += 2) {
-        _path.lineTo(_sub[_j], _sub[_j + 1]);
-      }
-      _path.closePath();
-    }
-    _entry.path = _path;
-  }
-
-  // --- particles / shapes ---
-  // Two layers:
-  //   "flyout": car silhouettes that fly toward the camera from a vanishing
-  //             point, growing/rotating as they approach. Trail fade gives
-  //             them ghost echoes.
-  //   "spark":  short-lived particles spawned by transients (bass / treble).
-  const flyout = [];
-  const sparks = [];
-  const FLYOUT_COUNT = 10;
-  const Z_FAR = 2.0;                  // spawn z (deep background)
-  const Z_NEAR = 0.04;                // z at which a shape passes the camera
-
-  function rand(a, b) { return a + Math.random() * (b - a); }
-
-  function spawnFlyout(s) {
-    s = s || {};
-    // world offset from the vanishing point. Wide ranges so cars spawn
-    // distributed across the viewport rather than clustered at the center;
-    // off-center spawns will fly outward and leave the frame faster.
-    s.wx = rand(-2.5, 2.5);
-    s.wy = rand(-1.8, 1.8);
-    s.z = Z_FAR;
-    s.vz = rand(0.0006, 0.0024);      // approach speed
-    s.size = rand(80, 280);           // longest-axis size in world units
-    // rotation: each car settles to a random target angle in ±90°. The
-    // displayed rotation is interpolated from 0 to rotTarget as the car
-    // grows, reaching the target at 75% of size-progress and locking there.
-    s.rotTarget = rand(-Math.PI / 2, Math.PI / 2);
-    s.fillAlpha = rand(0.16, 0.42);   // per-shape fill density
-    s.visThresh = rand(0, 0.15);      // overall energy needed for this shape to appear
-    return s;
-  }
-
-  function initFlyout() {
-    flyout.length = 0;
-    for (let i = 0; i < FLYOUT_COUNT; i++) {
-      const s = spawnFlyout();
-      // stagger initial z so they don't all fly past at the same time
-      s.z = rand(Z_NEAR + 0.05, Z_FAR);
-      flyout.push(s);
-    }
-  }
-  initFlyout();
-
-  function spawnSpark(intensity, kind) {
-    // kind: 'bass' big slow, 'treble' small fast
-    const cx = W * 0.5, cy = H * 0.5;
-    const count = kind === 'bass'
-      ? Math.floor(intensity * 28)
-      : Math.floor(intensity * 14);
-    for (let i = 0; i < count; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = kind === 'bass' ? rand(0.6, 2.2) * (0.6 + intensity) : rand(1.5, 4.5) * (0.6 + intensity);
-      const r = kind === 'bass' ? rand(1.2, 3.2) : rand(0.4, 1.2);
-      // origin: bass from center, treble from random points (shimmer)
-      const ox = kind === 'bass' ? cx + rand(-40, 40) : Math.random() * W;
-      const oy = kind === 'bass' ? cy + rand(-40, 40) : Math.random() * H;
-      sparks.push({
-        x: ox, y: oy,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed,
-        life: 1,
-        decay: kind === 'bass' ? rand(0.004, 0.010) : rand(0.012, 0.025),
-        r,
-        kind,
-      });
-    }
-  }
-
-  // transient detection: track moving avg of bass and treble, spawn when crossing
-  let bassAvg = 0, trebleAvg = 0;
-  let bassCool = 0, trebleCool = 0;
-
-  // --- geometric lattice ---
-  // A single centered rectangle filled with a hex lattice of uniform-size
-  // particles. Particle radius pulses with bass *transients* (deviation from
-  // a slow running baseline), so steady bass doesn't pin the size at peak.
-  let LATTICE_SPACING = 24;            // px between adjacent particles. (live tunable; PARAMS may mutate)
-  // Reused per-frame lattice point buffer (x0,y0,x1,y1,…). Module-scope so
-  // the array object isn't re-allocated each frame; only its underlying
-  // capacity grows. Reset via lattPts.length = 0 in the render path.
-  const lattPts = [];
-  const PARTICLE_BASE_R = 1.0;        // baseline particle radius
-  const PARTICLE_PULSE_AMOUNT = 12;   // px added to radius at peak transient
-
-  // Lattice particles morph between basic outlines as kicks land. Each shape
-  // is a fixed-N perimeter polygon (CCW); the active shape is a per-frame
-  // lerp between SHAPES[shapeIndex] and SHAPES[shapeIndex+1] at shapeProgress.
-  // Each kick nudges progress by 1/KICKS_PER_SHAPE_CYCLE; on rollover the
-  // shape pair advances. Choosing N=24 keeps points aligned to the symmetries
-  // of square (4), star (6), octagon (8), and crescent (12+12 split).
-  // HOW TO ADD A NEW LATTICE PARTICLE SHAPE:
-  //   1. Add the name to SHAPE_NAMES (becomes one stop in the morph cycle).
-  //   2. Add a `else if (name === 'yourShape')` branch in buildShape() that
-  //      fills `pts` with SHAPE_N * 2 floats normalized to ~unit radius.
-  //      Vertex layout should align angularly across shapes (i=0 → right,
-  //      i=N/4 → top in math convention) so morphs interpolate cleanly.
-  //   3. Cycle is kick-driven; cycle length = SHAPE_NAMES.length * kicksPerShapeCycle.
-  const SHAPE_N = 24;
-  const SHAPE_NAMES = ['dot', 'square', 'star', 'octagon', 'crescent'];
-  let KICKS_PER_SHAPE_CYCLE = 16;       // (live tunable; PARAMS may mutate)
-  function buildShape(name) {
-    const pts = new Float32Array(SHAPE_N * 2);
-    if (name === 'dot') {
-      for (let i = 0; i < SHAPE_N; i++) {
-        const a = (i / SHAPE_N) * Math.PI * 2;
-        pts[i * 2] = Math.cos(a);
-        pts[i * 2 + 1] = Math.sin(a);
-      }
-    } else if (name === 'square') {
-      // Walk perimeter starting at (1, 0), CCW, equal arc-length steps.
-      // Perimeter length = 8; each of 24 steps covers 1/3 of unit length.
-      for (let i = 0; i < SHAPE_N; i++) {
-        const arc = (i / SHAPE_N) * 8;
-        let x, y;
-        if (arc <= 1)      { x = 1;            y = arc; }
-        else if (arc <= 3) { x = 1 - (arc - 1); y = 1; }
-        else if (arc <= 5) { x = -1;           y = 1 - (arc - 3); }
-        else if (arc <= 7) { x = -1 + (arc - 5); y = -1; }
-        else               { x = 1;            y = -1 + (arc - 7); }
-        pts[i * 2] = x;
-        pts[i * 2 + 1] = y;
-      }
-    } else if (name === 'star') {
-      // 6-peak smooth star: r dips to 0 at troughs (cusp), max at peaks.
-      const PEAKS = 6;
-      for (let i = 0; i < SHAPE_N; i++) {
-        const a = (i / SHAPE_N) * Math.PI * 2;
-        const r = 0.5 + 0.5 * Math.cos(PEAKS * a);
-        pts[i * 2] = r * Math.cos(a);
-        pts[i * 2 + 1] = r * Math.sin(a);
-      }
-    } else if (name === 'octagon') {
-      // Walk 8 edges, 3 vertices each. Vertices at angles k*π/4.
-      for (let i = 0; i < SHAPE_N; i++) {
-        const arc = (i / SHAPE_N) * 8;
-        const edge = Math.floor(arc);
-        const local = arc - edge;
-        const a0 = edge * Math.PI / 4;
-        const a1 = (edge + 1) * Math.PI / 4;
-        pts[i * 2] = Math.cos(a0) + (Math.cos(a1) - Math.cos(a0)) * local;
-        pts[i * 2 + 1] = Math.sin(a0) + (Math.sin(a1) - Math.sin(a0)) * local;
-      }
-    } else if (name === 'crescent') {
-      // Outer arc: left half of unit circle (top intersection CCW to bottom).
-      // Inner arc: right-shifted unit circle, traced CW through its left side
-      // back to top — produces the concave inner edge of the crescent.
-      const half = SHAPE_N / 2;
-      const cx = 0.5;
-      const ix = cx / 2;
-      const iy = Math.sqrt(1 - ix * ix);
-      const aOuterTop = Math.atan2(iy, ix);
-      for (let i = 0; i < half; i++) {
-        const t = i / half;
-        const a = aOuterTop + t * (2 * Math.PI - 2 * aOuterTop);
-        pts[i * 2] = Math.cos(a);
-        pts[i * 2 + 1] = Math.sin(a);
-      }
-      const aInnerBot = Math.atan2(-iy, ix - cx);
-      const aInnerTop = Math.atan2(iy, ix - cx);
-      for (let i = 0; i < half; i++) {
-        const t = i / half;
-        const a = aInnerBot + t * ((aInnerTop - 2 * Math.PI) - aInnerBot);
-        pts[(half + i) * 2] = cx + Math.cos(a);
-        pts[(half + i) * 2 + 1] = Math.sin(a);
-      }
-    }
-    return pts;
-  }
-  const SHAPES = SHAPE_NAMES.map(buildShape);
-  const shapeBuffer = new Float32Array(SHAPE_N * 2);
-  let shapeIndex = 0;
-  let shapeProgress = 0;
-  // Offscreen canvas containing the morphed particle shape for the current
-  // frame. Drawn ONCE per frame, then drawImage'd at each lattice point —
-  // much cheaper than emitting SHAPE_N lineTos per particle into one path.
-  // Sized for max pulseR (~13) × max shape extent (~1.5 for square corners).
-  const PARTICLE_TILE = 48;
-  const PARTICLE_HALF = PARTICLE_TILE / 2;
-  const particleCanvas = document.createElement('canvas');
-  particleCanvas.width = PARTICLE_TILE;
-  particleCanvas.height = PARTICLE_TILE;
-  const particleCtx = particleCanvas.getContext('2d');
-
-  // --- glitch / CRT constants ---
-  // Most of the values in this block were originally `const`. They were
-  // promoted to `let` so PARAMS / the dev panel / the visual editor can
-  // mutate them at runtime. The SCREAMING_SNAKE naming is preserved
-  // deliberately — they're still grep-anchors used by render code; the
-  // PARAMS entries below are what makes them tunable.
-  let JITTER_PX = 26;                 // max per-particle displacement at peak treble (live tunable)
-  let SCANLINE_ALPHA = 0.42;          // strength of dark scanline rows (live tunable)
-  const SCANLINE_PERIOD = 2;          // 1 of every N rows is darkened
-  let GRAIN_ALPHA = 0.46;             // intensity of full-canvas grain overlay (live tunable)
-  const GRAIN_RES = 320;              // noise canvas size (square); scaled to viewport
-  let SLICE_TRIGGER = 0.065;           // bass-onset threshold; live-tunable via the dev panel slider
-  const SLICE_BURST_MIN = 5;
-  const SLICE_BURST_MAX = 12;
-  // Multiplier on the per-burst slice count. 1.0 = original 5–12 range,
-  // 0 = no slices ever spawn, 3.0 ≈ 15–36 per burst. Live tunable.
-  let SLICE_BURST_SCALE = 1.0;
-  let MONO_BAR_CHANCE = 1 / 8;        // per-slice chance to desaturate (B&W) instead of invert
-  const SLICE_ANGLE_JITTER = 8 * Math.PI / 180; // ±radians of per-slice angle offset around currentSliceAngle
-  let ROW_CORRUPT_AMOUNT = 2.6;       // px of row shift per unit of bassPulse (* rectW) (live tunable)
-  let ONSET_THRESHOLD = 0.07;         // level deviation above running avg to trigger (live tunable)
-  const ONSET_COOLDOWN_MIN = 12;      // frames between onset events
-  const ONSET_COOLDOWN_MAX = 35;
-  let MID_SLICE_TRIGGER = 0.09;       // mid-pulse threshold for additional tears (live tunable)
-  let FLASH_TRIGGER = 0.18;           // bass rising-edge threshold for invert/strobe flash (live tunable)
-  const FREEZE_FRAMES_MIN = 4;
-  // Upper bound (in normalized 60fps frame units) for the freeze base
-  // duration. Final freeze length = base × (1 or 2) where base is a
-  // random integer in [FREEZE_FRAMES_MIN, FREEZE_FRAMES_MAX]. Live tunable.
-  let FREEZE_FRAMES_MAX = 12;
-  const DITHER_TILES_X = 8;           // dither pattern tile (Bayer 8x8)
-  const DITHER_TILES_Y = 8;
-  // Color overlay applied AFTER dither. The dithered image is pure B&W, so
-  // multiplying by a saturated color tints whites to that color and leaves
-  // blacks black. Slice bars then invert (`difference` with white) within
-  // their footprint, flipping the tint toward its complement and black→white.
-  //
-  // The tint cycles through this palette over time. We have no BPM detector,
-  // so we count bass leading-edge transients (the same `bassRise` trigger
-  // that fires slices) as a beat proxy. 64 transients ≈ 32 bars in 4/4 with
-  // a kick on 1 & 3; tracks with a four-on-the-floor pattern will cycle
-  // about twice as fast. Per-frame lerp toward the target slowly crossfades
-  // between palette entries (~5s to settle at COLOR_LERP=0.01).
-  const COLOR_PALETTE = [
-    [  0, 255,  65],  // matrix phosphor green
-    [255,  40,  60],  // crimson red
-    [180,  30, 255],  // electric purple
-    [ 60, 110, 255],  // electric blue
-    [255, 255, 255],  // white = identity under multiply = no tint (pure B&W)
-  ];
-  let KICKS_PER_COLOR_CYCLE = 64;
-  let COLOR_LERP = 0.01;              // per-dt lerp toward target tint (live tunable)
-
-  // pre-allocated noise canvas + image for grain overlay
-  const noiseCanvas = document.createElement('canvas');
-  noiseCanvas.width = GRAIN_RES;
-  noiseCanvas.height = GRAIN_RES;
-  const noiseCtx = noiseCanvas.getContext('2d');
-  const noiseImg = noiseCtx.createImageData(GRAIN_RES, GRAIN_RES);
-
-  // Scanline pattern: a 1 × SCANLINE_PERIOD tile with row 0 fully opaque
-  // black and remaining rows transparent. Tiled via createPattern; one
-  // fillRect per frame replaces the previous loop of ~H/SCANLINE_PERIOD
-  // fillRect calls. SCANLINE_ALPHA is applied at draw time via globalAlpha
-  // so the live tunable doesn't require re-baking the tile.
-  const scanlineTile = document.createElement('canvas');
-  scanlineTile.width = 1;
-  scanlineTile.height = SCANLINE_PERIOD;
-  const scanlineTileCtx = scanlineTile.getContext('2d');
-  scanlineTileCtx.fillStyle = '#000';
-  scanlineTileCtx.fillRect(0, 0, 1, 1);
-  const scanlinePattern = ctx.createPattern(scanlineTile, 'repeat');
-
-  function regenNoise(density) {
-    // sparse bright pixels on black — phosphor-static look. density 0..1.
-    const data = noiseImg.data;
-    const thresh = 0.04 + density * 0.20;
-    for (let i = 0; i < data.length; i += 4) {
-      let v = 0;
-      if (Math.random() < thresh) v = 160 + Math.floor(Math.random() * 95);
-      data[i] = data[i + 1] = data[i + 2] = v;
-      data[i + 3] = 255;
-    }
-    noiseCtx.putImageData(noiseImg, 0, 0);
-  }
-
-  const slices = [];
-  // Per-frame log of slice destination rects (CSS px + rotation about screen
-  // center). Populated as slices render; consumed by the post-dither overlay
-  // pass. Inversion bars flip the tint to its complement within their
-  // footprint; mono bars instead repaint the pre-tint B&W there, punching a
-  // colorless slot through the tinted field.
-  const inversionRegions = [];
-  const monoRegions = [];
-  // Slice orientation drifts clockwise. Holds for a few beats (counted by bass
-  // onsets), then advances by a random 20–45° step. New slices are spawned at
-  // the current orientation so a burst all reads as the same diagonal cut.
-  let currentSliceAngle = 0;
-  let beatsAtOrientation = 0;
-  let nextRotateBeats = 3 + Math.floor(Math.random() * 6); // 3–8 beats
-
-  function spawnSliceBurst(intensity) {
-    const base = SLICE_BURST_MIN + Math.floor(Math.random() * (SLICE_BURST_MAX - SLICE_BURST_MIN + 1));
-    const count = Math.max(0, Math.round(base * SLICE_BURST_SCALE));
-    for (let i = 0; i < count; i++) {
-      slices.push({
-        y: Math.random() * H,
-        h: 6 + Math.random() * 110,
-        dx: (Math.random() - 0.5) * W * (0.20 + intensity * 0.55),
-        life: 5 + Math.floor(Math.random() * 16), // 5-20 frames
-        angle: currentSliceAngle + (Math.random() * 2 - 1) * SLICE_ANGLE_JITTER,
-        mono: Math.random() < MONO_BAR_CHANCE,
-      });
-    }
-  }
-
-  // --- 1-bit Bayer dither ---
-  // Standard 8x8 ordered dither matrix, values 0..63.
-  const BAYER8 = new Uint8Array([
-     0, 32,  8, 40,  2, 34, 10, 42,
-    48, 16, 56, 24, 50, 18, 58, 26,
-    12, 44,  4, 36, 14, 46,  6, 38,
-    60, 28, 52, 20, 62, 30, 54, 22,
-     3, 35, 11, 43,  1, 33,  9, 41,
-    51, 19, 59, 27, 49, 17, 57, 25,
-    15, 47,  7, 39, 13, 45,  5, 37,
-    63, 31, 55, 23, 61, 29, 53, 21,
-  ]);
-
-  // Dither runs at CSS resolution (not device res) for speed and chunkier
-  // pixel-art look. Result is then nearest-neighbor scaled back to the main
-  // canvas so dither cells appear ~dpr device-pixels wide.
-  //
-  // The threshold step runs on the GPU via a WebGL fragment shader. Per
-  // frame: upload the 2D main canvas into a source texture, sample with
-  // bilinear filtering (matching the previous downsample), threshold the
-  // R channel against a Bayer 8x8 LUT (a small LUMINANCE texture), output
-  // pure black or white. The resulting WebGL canvas is then drawImage'd
-  // onto the main canvas at full device resolution with nearest-neighbor
-  // for chunky pixels — same downstream contract as the previous CPU
-  // implementation, including consumption by the mono-region pass below.
-  //
-  // Variable name `ditherCanvas` is preserved so the rest of the code
-  // (notably the mono-region repaint) needs no changes.
-  const ditherCanvas = document.createElement('canvas');
-  const ditherGL = ditherCanvas.getContext('webgl', {
-    preserveDrawingBuffer: true,  // mono-region pass reads ditherCanvas later in the same frame
-    premultipliedAlpha: false,
-    antialias: false,
-    alpha: false,
-    depth: false,
-    stencil: false,
-  });
-  if (!ditherGL) {
-    throw new Error('WebGL not supported — required for dither pass');
-  }
-  function resizeDither() {
-    ditherCanvas.width = Math.max(1, Math.ceil(W));
-    ditherCanvas.height = Math.max(1, Math.ceil(H));
-  }
-  resizeDither();
-  window.addEventListener('resize', resizeDither);
-
-  // shaders
-  const _DITHER_VS = `
-    attribute vec2 aPos;
-    varying vec2 vUv;
-    void main() {
-      // aPos is the fullscreen quad in clip space; vUv runs 0..1 across it.
-      // UNPACK_FLIP_Y_WEBGL=true is set at upload time so vUv (0,0) reads
-      // the canvas top-left and vUv (1,1) reads the bottom-right. Without
-      // that flip the dither canvas presents Y-inverted, which is invisible
-      // for the global upscale (lattice is roughly symmetric) but breaks
-      // the mono/inversion-region pass — clipped slice rects would repaint
-      // with content from the opposite Y of the canvas, reading as a
-      // high-contrast intrusion rather than a local re-tint.
-      vUv = aPos * 0.5 + 0.5;
-      gl_Position = vec4(aPos, 0.0, 1.0);
-    }
-  `;
-  const _DITHER_FS = `
-    precision highp float;
-    varying vec2 vUv;
-    uniform sampler2D uTex;
-    uniform sampler2D uBayer;
-    uniform vec2 uTexSize;
-    uniform vec2 uOffset;
-    void main() {
-      // R channel = luminance: by the time we run, the upstream pipeline
-      // has produced grayscale content in B&W aesthetic.
-      float lum = texture2D(uTex, vUv).r;
-      // Bayer threshold lookup: pre-baked into the LUT as the same value
-      // the CPU path used: (BAYER8 * 4 + 2) / 255, normalized to 0..1.
-      vec2 pix = vUv * uTexSize;
-      vec2 byx = mod(pix + uOffset, 8.0);
-      float thresh = texture2D(uBayer, (byx + 0.5) / 8.0).r;
-      gl_FragColor = lum > thresh ? vec4(1.0) : vec4(0.0, 0.0, 0.0, 1.0);
-    }
-  `;
-  function _compileDitherShader(type, src) {
-    const sh = ditherGL.createShader(type);
-    ditherGL.shaderSource(sh, src);
-    ditherGL.compileShader(sh);
-    if (!ditherGL.getShaderParameter(sh, ditherGL.COMPILE_STATUS)) {
-      throw new Error('dither shader compile: ' + ditherGL.getShaderInfoLog(sh));
-    }
-    return sh;
-  }
-  const _ditherProg = ditherGL.createProgram();
-  ditherGL.attachShader(_ditherProg, _compileDitherShader(ditherGL.VERTEX_SHADER, _DITHER_VS));
-  ditherGL.attachShader(_ditherProg, _compileDitherShader(ditherGL.FRAGMENT_SHADER, _DITHER_FS));
-  ditherGL.linkProgram(_ditherProg);
-  if (!ditherGL.getProgramParameter(_ditherProg, ditherGL.LINK_STATUS)) {
-    throw new Error('dither program link: ' + ditherGL.getProgramInfoLog(_ditherProg));
-  }
-  const _ditherQuad = ditherGL.createBuffer();
-  ditherGL.bindBuffer(ditherGL.ARRAY_BUFFER, _ditherQuad);
-  ditherGL.bufferData(ditherGL.ARRAY_BUFFER, new Float32Array([
-    -1, -1,
-     1, -1,
-    -1,  1,
-     1,  1,
-  ]), ditherGL.STATIC_DRAW);
-  const _ditherUTex    = ditherGL.getUniformLocation(_ditherProg, 'uTex');
-  const _ditherUBayer  = ditherGL.getUniformLocation(_ditherProg, 'uBayer');
-  const _ditherUSize   = ditherGL.getUniformLocation(_ditherProg, 'uTexSize');
-  const _ditherUOffset = ditherGL.getUniformLocation(_ditherProg, 'uOffset');
-  const _ditherAPos    = ditherGL.getAttribLocation(_ditherProg, 'aPos');
-  // source texture: 2D canvas content, bilinear filter (matches previous
-  // imageSmoothingEnabled=true downsample).
-  const _ditherSrcTex = ditherGL.createTexture();
-  ditherGL.bindTexture(ditherGL.TEXTURE_2D, _ditherSrcTex);
-  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_MIN_FILTER, ditherGL.LINEAR);
-  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_MAG_FILTER, ditherGL.LINEAR);
-  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_WRAP_S, ditherGL.CLAMP_TO_EDGE);
-  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_WRAP_T, ditherGL.CLAMP_TO_EDGE);
-  // Bayer LUT: 8x8 LUMINANCE, pre-baked thresholds in 0..255.
-  const _bayerThresh = new Uint8Array(64);
-  for (let _i = 0; _i < 64; _i++) _bayerThresh[_i] = (BAYER8[_i] << 2) + 2;
-  const _ditherBayerTex = ditherGL.createTexture();
-  ditherGL.bindTexture(ditherGL.TEXTURE_2D, _ditherBayerTex);
-  ditherGL.pixelStorei(ditherGL.UNPACK_ALIGNMENT, 1);
-  ditherGL.texImage2D(
-    ditherGL.TEXTURE_2D, 0,
-    ditherGL.LUMINANCE, 8, 8, 0,
-    ditherGL.LUMINANCE, ditherGL.UNSIGNED_BYTE,
-    _bayerThresh
-  );
-  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_MIN_FILTER, ditherGL.NEAREST);
-  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_MAG_FILTER, ditherGL.NEAREST);
-  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_WRAP_S, ditherGL.REPEAT);
-  ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_WRAP_T, ditherGL.REPEAT);
-
-  function applyDither(offX, offY) {
-    const dw = ditherCanvas.width;
-    const dh = ditherCanvas.height;
-    if (dw <= 0 || dh <= 0) return;
-    const gl = ditherGL;
-    // upload main canvas → source texture. Browsers have a fast path for
-    // canvas-as-texImage2D-source so this stays GPU-resident in practice.
-    // UNPACK_FLIP_Y_WEBGL=true so texture orientation matches the 2D
-    // canvas (origin top-left); needed for the mono-region pass to repaint
-    // local content under each slice rather than content from the
-    // opposite Y of the canvas.
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, _ditherSrcTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
-    // bind program + buffer + attribs
-    gl.viewport(0, 0, dw, dh);
-    gl.useProgram(_ditherProg);
-    gl.bindBuffer(gl.ARRAY_BUFFER, _ditherQuad);
-    gl.enableVertexAttribArray(_ditherAPos);
-    gl.vertexAttribPointer(_ditherAPos, 2, gl.FLOAT, false, 0, 0);
-    // uniforms: source on unit 0, Bayer LUT on unit 1
-    gl.uniform1i(_ditherUTex, 0);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, _ditherBayerTex);
-    gl.uniform1i(_ditherUBayer, 1);
-    gl.uniform2f(_ditherUSize, dw, dh);
-    gl.uniform2f(_ditherUOffset, offX & 7, offY & 7);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    // composite the dithered output onto the main canvas at full device
-    // resolution, nearest-neighbor for chunky pixels.
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.imageSmoothingEnabled = false;
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.drawImage(ditherCanvas, 0, 0, dw, dh, 0, 0, canvas.width, canvas.height);
-    ctx.restore();
-  }
-
-  // --- frame freeze ---
-  // capture a snapshot of the current canvas into an offscreen backing canvas;
-  // replay it for several frames so underlying content "sticks" while overlays
-  // (grain, dither) keep animating. drawImage is GPU-accelerated, much faster
-  // than getImageData/putImageData.
-  const freezeCanvas = document.createElement('canvas');
-  const freezeCtx = freezeCanvas.getContext('2d');
-  function resizeFreeze() {
-    freezeCanvas.width = canvas.width;
-    freezeCanvas.height = canvas.height;
-  }
-  resizeFreeze();
-  window.addEventListener('resize', resizeFreeze);
-  let freezeFrames = 0;
-  // 1/8 of freezes drop the color overlay for their duration — the world
-  // briefly returns to pure B&W, which lands as a quiet exhale against the
-  // tinted majority of the visual.
-  let freezeMono = false;
-  let FREEZE_MONO_CHANCE = 1 / 8;     // (live tunable; PARAMS may mutate)
-  function captureFreeze() {
-    freezeCtx.clearRect(0, 0, freezeCanvas.width, freezeCanvas.height);
-    freezeCtx.drawImage(canvas, 0, 0);
-    const base = FREEZE_FRAMES_MIN +
-      Math.floor(Math.random() * (FREEZE_FRAMES_MAX - FREEZE_FRAMES_MIN + 1));
-    // each freeze randomly lasts 1x or 2x the base duration
-    freezeFrames = base * (Math.random() < 0.5 ? 1 : 2);
-    freezeMono = Math.random() < FREEZE_MONO_CHANCE;
-  }
-  function restoreFreeze() {
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.drawImage(freezeCanvas, 0, 0);
-    ctx.restore();
-  }
-
-  // --- block shuffle ---
-  // chunk the canvas into a tile grid; randomly copy some tiles over others.
-  // Single-frame application; trail fade absorbs it over the next few frames.
-  function applyBlockShuffle() {
-    const tilesX = 5 + Math.floor(Math.random() * 6);  // 5..10
-    const tilesY = 3 + Math.floor(Math.random() * 5);  // 3..7
-    const tileW = (canvas.width) / tilesX;
-    const tileH = (canvas.height) / tilesY;
-    const count = 4 + Math.floor(Math.random() * 6);   // 4..9 swaps
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalCompositeOperation = 'source-over';
-    for (let i = 0; i < count; i++) {
-      const ax = Math.floor(Math.random() * tilesX);
-      const ay = Math.floor(Math.random() * tilesY);
-      const bx = Math.floor(Math.random() * tilesX);
-      const by = Math.floor(Math.random() * tilesY);
-      ctx.drawImage(canvas,
-        ax * tileW, ay * tileH, tileW, tileH,
-        bx * tileW, by * tileH, tileW, tileH);
-    }
-    ctx.restore();
-  }
-
-  function pushFilledRectPoints(out, cx, cy, width, height, spacing, rowCorrupt) {
-    const halfW = width / 2;
-    const halfH = height / 2;
-    const rowH = spacing * Math.sqrt(3) / 2;
-    const rows = Math.floor(height / rowH);
-    const yStart = -rows * rowH / 2;
-    const corrupt = rowCorrupt || 0;
-    for (let r = 0; r <= rows; r++) {
-      const ly = yStart + r * rowH;
-      if (ly < -halfH || ly > halfH) continue;
-      const xOffset = (r & 1) ? spacing / 2 : 0;
-      const cols = Math.floor((width - xOffset * 2) / spacing);
-      const xStart = -cols * spacing / 2;
-      // per-row horizontal shift — drives bass-triggered lattice corruption
-      const rowShift = corrupt > 0 ? (Math.random() - 0.5) * corrupt : 0;
-      for (let c = 0; c <= cols; c++) {
-        const lx = xStart + c * spacing + rowShift;
-        // looser bounds during corruption so rows can spill past the rectangle
-        if (lx < -halfW * 1.6 || lx > halfW * 1.6) continue;
-        out.push(cx + lx, cy + ly);
-      }
-    }
-  }
-
-  // --- render loop ---
-  let last = performance.now();
-  let smoothLevel = 0;
-  let smoothBass = 0;
-  let smoothMid = 0;
-  let smoothTreble = 0;
-  // bass amplitude envelope: peak-follower over a power-shaped bass signal.
-  // Tracks absolute loudness (silent kick = tiny pulse, thumping kick = huge
-  // pulse), with fast release so each kick clearly cycles down between hits.
-  // Discrete events (slices, flashes) use the rising-edge derivative below.
-  let bassPulse = 0;
-  let prevBass = 0;
-  let bassBaseline = 0;
-  let sliceCool = 0;
-  // mid-band envelope (independent slice trigger stream)
-  let midBaseline = 0;
-  let midPulse = 0;
-  let prevMid = 0;
-  let midSliceCool = 0;
-  // overall-energy onset detection (drives freeze + block shuffle)
-  let energyAvg = 0;
-  let prevLevel = 0;
-  let onsetCool = 0;
-  // single-frame flash (invert or strobe) on big bass pulses
-  let flashCool = 0;
-  let pendingFlash = null;            // null | 'invert' | 'strobe'
-  let pendingFreeze = false;
-  let pendingShuffle = false;
-  // dither pattern phase shifts continuously, faster on treble
-  let ditherPhaseX = 0;
-  let ditherPhaseY = 0;
-  // active color tint — lerped toward COLOR_PALETTE[colorIndex] each frame.
-  // colorIndex advances every KICKS_PER_COLOR_CYCLE bass transients.
-  let colorIndex = 0;
-  let kickCount = 0;
-  let tintR = COLOR_PALETTE[0][0];
-  let tintG = COLOR_PALETTE[0][1];
-  let tintB = COLOR_PALETTE[0][2];
-  // 0..1. Lerps the active tint toward white before the multiply pass:
-  // sat=1 → full color, sat=0 → identity (no tint, pure B&W).
-  let saturation = 1.0;
+  // --- silhouette names (for PARAMS.silhouette dropdown) ---
+  // The actual silhouette geometry, Path2D cache, and render code now live
+  // in the worker (see <script type="text/worker"> above). Main only needs
+  // the name list so the dev panel dropdown can populate. Keep in sync with
+  // SILHOUETTES in the worker.
+  const SILHOUETTE_NAMES = ['car', 'walker', 'umbrella', 'eye', 'skyline', 'speaker'];
 
   // ============================================================
   // automation runtime + PARAMS registry (single source of truth)
@@ -1629,31 +1974,31 @@
       type: 'continuous', def: 0.065,
       min: 0.005, max: 0.25, step: 0.005,
       fmt: v => v.toFixed(3), editor: true,
-      setLive: v => { SLICE_TRIGGER = v; },
+      setLive: v => setParam('sliceTrigger', v),
     },
     saturation: {
       type: 'continuous', def: 1.0,
       min: 0, max: 1, step: 0.01,
       fmt: v => v.toFixed(2), editor: true,
-      setLive: v => { saturation = v; },
+      setLive: v => setParam('saturation', v),
     },
     silhouette: {
       type: 'discrete', def: 'car',
       options: () => SILHOUETTE_NAMES,
       fmt: v => v, editor: true,
-      setLive: v => { if (SILHOUETTES[v]) activeSilhouette = v; },
+      setLive: v => setParam('silhouette', v),
     },
     kicksPerColorCycle: {
       type: 'continuous', def: 64,
       min: 4, max: 128, step: 1,
       fmt: v => v.toFixed(0), editor: true,
-      setLive: v => { KICKS_PER_COLOR_CYCLE = Math.round(v); },
+      setLive: v => setParam('kicksPerColorCycle', v),
     },
     monoBarChance: {
       type: 'continuous', def: 1 / 8,
       min: 0, max: 0.5, step: 0.005,
       fmt: v => v.toFixed(3), editor: true,
-      setLive: v => { MONO_BAR_CHANCE = v; },
+      setLive: v => setParam('monoBarChance', v),
     },
     // --- dev-panel-only (slider available, not in editor by default) ---
     // Flip `editor: true` to surface in the bottom strip when you want to
@@ -1662,79 +2007,79 @@
       type: 'continuous', def: 26,
       min: 0, max: 60, step: 1,
       fmt: v => v.toFixed(0), editor: false,
-      setLive: v => { JITTER_PX = v; },
+      setLive: v => setParam('jitterPx', v),
     },
     latticeSpacing: {
       type: 'continuous', def: 24,
       min: 8, max: 64, step: 1,
       fmt: v => v.toFixed(0), editor: false,
-      setLive: v => { LATTICE_SPACING = Math.round(v); },
+      setLive: v => setParam('latticeSpacing', v),
     },
     rowCorruptAmount: {
       type: 'continuous', def: 2.6,
       min: 0, max: 8, step: 0.1,
       fmt: v => v.toFixed(1), editor: false,
-      setLive: v => { ROW_CORRUPT_AMOUNT = v; },
+      setLive: v => setParam('rowCorruptAmount', v),
     },
     grainAlpha: {
       type: 'continuous', def: 0.46,
       min: 0, max: 1, step: 0.02,
       fmt: v => v.toFixed(2), editor: false,
-      setLive: v => { GRAIN_ALPHA = v; },
+      setLive: v => setParam('grainAlpha', v),
     },
     scanlineAlpha: {
       type: 'continuous', def: 0.42,
       min: 0, max: 1, step: 0.02,
       fmt: v => v.toFixed(2), editor: false,
-      setLive: v => { SCANLINE_ALPHA = v; },
+      setLive: v => setParam('scanlineAlpha', v),
     },
     flashTrigger: {
       type: 'continuous', def: 0.18,
       min: 0.02, max: 0.5, step: 0.01,
       fmt: v => v.toFixed(2), editor: false,
-      setLive: v => { FLASH_TRIGGER = v; },
+      setLive: v => setParam('flashTrigger', v),
     },
     onsetThreshold: {
       type: 'continuous', def: 0.07,
       min: 0.01, max: 0.3, step: 0.005,
       fmt: v => v.toFixed(3), editor: false,
-      setLive: v => { ONSET_THRESHOLD = v; },
+      setLive: v => setParam('onsetThreshold', v),
     },
     midSliceTrigger: {
       type: 'continuous', def: 0.09,
       min: 0.01, max: 0.3, step: 0.005,
       fmt: v => v.toFixed(3), editor: false,
-      setLive: v => { MID_SLICE_TRIGGER = v; },
+      setLive: v => setParam('midSliceTrigger', v),
     },
     sliceBurstScale: {
       type: 'continuous', def: 1.0,
       min: 0, max: 3, step: 0.05,
       fmt: v => v.toFixed(2), editor: false,
-      setLive: v => { SLICE_BURST_SCALE = v; },
+      setLive: v => setParam('sliceBurstScale', v),
     },
     freezeFramesMax: {
       type: 'continuous', def: 12,
       min: 4, max: 60, step: 1,
       fmt: v => v.toFixed(0), editor: false,
-      setLive: v => { FREEZE_FRAMES_MAX = Math.max(FREEZE_FRAMES_MIN, Math.round(v)); },
+      setLive: v => setParam('freezeFramesMax', v),
     },
     colorLerp: {
       type: 'continuous', def: 0.01,
       min: 0.001, max: 0.1, step: 0.001,
       fmt: v => v.toFixed(3), editor: false,
-      setLive: v => { COLOR_LERP = v; },
+      setLive: v => setParam('colorLerp', v),
     },
     freezeMonoChance: {
       type: 'continuous', def: 1 / 8,
       min: 0, max: 1, step: 0.01,
       fmt: v => v.toFixed(2), editor: false,
-      setLive: v => { FREEZE_MONO_CHANCE = v; },
+      setLive: v => setParam('freezeMonoChance', v),
     },
     kicksPerShapeCycle: {
       type: 'continuous', def: 16,
       min: 2, max: 64, step: 1,
       fmt: v => v.toFixed(0), editor: false,
-      setLive: v => { KICKS_PER_SHAPE_CYCLE = Math.round(v); },
+      setLive: v => setParam('kicksPerShapeCycle', v),
     },
   };
   const PARAM_NAMES = Object.keys(PARAMS);
@@ -1790,15 +2135,24 @@
   // when audio is loaded, so a value is written every frame — that's how
   // post-wipe snap to manual happens. Also mirrors the value into the
   // dev-panel control so the slider/dropdown visibly tracks automation.
+  // Batched param values for cross-thread posts. Reused each call so we
+  // avoid allocating an object per main rAF tick.
+  const _automationBatch = {};
   function applyAutomation(t) {
+    let dirty = false;
+    for (const k in _automationBatch) delete _automationBatch[k];
     for (const name of PARAM_NAMES) {
       const lane = lanes[name];
       const v = (lane.length > 0)
         ? evalLane(PARAMS[name].type, lane, t)
         : manual[name];
       if (v === undefined) continue;
-      PARAMS[name].setLive(v);
+      _automationBatch[name] = v;
+      dirty = true;
       if (paramCtrls[name]) paramCtrls[name].apply(v);
+    }
+    if (dirty && renderWorker) {
+      renderWorker.postMessage({ type: 'params', values: _automationBatch });
     }
   }
 
@@ -2142,44 +2496,54 @@
     if (e.key === 'd' || e.key === 'D') devOverlay.classList.toggle('hidden');
   });
 
-  // FPS: averaged over a ~500ms window so the readout doesn't flicker
-  let fpsAccumStart = performance.now();
-  let fpsAccumCount = 0;
-  let fpsValue = 0;
+  // Mirror of constants/data from the worker, used only by updateDebug for
+  // the dev panel display. Keep in sync with the worker source.
+  const SHAPE_NAMES = ['dot', 'square', 'star', 'octagon', 'crescent'];
+  const COLOR_PALETTE = [
+    [  0, 255,  65],
+    [255,  40,  60],
+    [180,  30, 255],
+    [ 60, 110, 255],
+    [255, 255, 255],
+  ];
 
-  function updateDebug(b, bassDev) {
+  function updateDebug() {
     if (devOverlay.classList.contains('hidden')) return;
-    const r = tintR | 0, g = tintG | 0, bl = tintB | 0;
+    const wd = workerDebug;
+    const r = wd.tintR | 0, g = wd.tintG | 0, bl = wd.tintB | 0;
     devEls.tintSw.style.background = `rgb(${r},${g},${bl})`;
     devEls.tint.textContent = `${r},${g},${bl}`;
-    const tgt = COLOR_PALETTE[colorIndex];
+    const tgt = COLOR_PALETTE[wd.colorIndex] || COLOR_PALETTE[0];
     devEls.targetSw.style.background = `rgb(${tgt[0]},${tgt[1]},${tgt[2]})`;
-    devEls.target.textContent = `${PALETTE_NAMES[colorIndex] || '?'} [${colorIndex}]`;
-    devEls.kicks.textContent = `${kickCount}/${KICKS_PER_COLOR_CYCLE}`;
-    const inShape = Math.round(shapeProgress * KICKS_PER_SHAPE_CYCLE);
+    devEls.target.textContent = `${PALETTE_NAMES[wd.colorIndex] || '?'} [${wd.colorIndex}]`;
+    const kpc = manual.kicksPerColorCycle | 0;
+    const kps = manual.kicksPerShapeCycle | 0;
+    devEls.kicks.textContent = `${wd.kickCount}/${kpc}`;
+    const inShape = Math.round((wd.shapeProgress || 0) * kps);
     devEls.shape.textContent =
-      `${SHAPE_NAMES[shapeIndex]}→${SHAPE_NAMES[(shapeIndex + 1) % SHAPE_NAMES.length]} ${inShape}/${KICKS_PER_SHAPE_CYCLE}`;
-    devEls.silh.textContent = activeSilhouette;
-    devEls.sat.textContent = saturation.toFixed(2);
+      `${SHAPE_NAMES[wd.shapeIndex] || '?'}→${SHAPE_NAMES[(wd.shapeIndex + 1) % SHAPE_NAMES.length] || '?'} ${inShape}/${kps}`;
+    devEls.silh.textContent = wd.activeSilhouette;
+    devEls.sat.textContent = wd.saturation.toFixed(2);
     if (currentEl && isFinite(currentEl.duration)) {
       devEls.time.textContent = `${fmtTime(currentEl.currentTime)} / ${fmtTime(currentEl.duration)}`;
     } else {
       devEls.time.textContent = '0:00 / 0:00';
     }
-    devEls.bass.textContent = b.bass.toFixed(2);
-    devEls.bf.textContent = b.bassFast.toFixed(2);
-    devEls.mid.textContent = b.mid.toFixed(2);
-    devEls.treble.textContent = b.treble.toFixed(2);
-    devEls.level.textContent = b.level.toFixed(2);
-    devEls.bp.textContent = bassPulse.toFixed(2);
-    devEls.bd.textContent = bassDev.toFixed(2);
-    devEls.slices.textContent = slices.length;
-    devEls.bars.textContent = `${inversionRegions.length}/${monoRegions.length}`;
-    devEls.sliceAng.textContent = ((currentSliceAngle * 180 / Math.PI) | 0) + '°';
-    devEls.freeze.textContent = (freezeFrames > 0
-      ? freezeFrames.toFixed(1) + (freezeMono ? ' mono' : '')
-      : '0') + ` (max=${FREEZE_FRAMES_MAX})`;
-    devEls.fps.textContent = fpsValue.toFixed(0);
+    devEls.bass.textContent = wd.bass.toFixed(2);
+    devEls.bf.textContent = wd.bassFast.toFixed(2);
+    devEls.mid.textContent = wd.mid.toFixed(2);
+    devEls.treble.textContent = wd.treble.toFixed(2);
+    devEls.level.textContent = wd.level.toFixed(2);
+    devEls.bp.textContent = wd.bassPulse.toFixed(2);
+    devEls.bd.textContent = wd.bassDev.toFixed(2);
+    devEls.slices.textContent = wd.slicesLength;
+    devEls.bars.textContent = `${wd.inversionLength}/${wd.monoLength}`;
+    devEls.sliceAng.textContent = ((wd.currentSliceAngle * 180 / Math.PI) | 0) + '°';
+    devEls.freeze.textContent = (wd.freezeFrames > 0
+      ? wd.freezeFrames.toFixed(1) + (wd.freezeMono ? ' mono' : '')
+      : '0') + ` (max=${wd.FREEZE_FRAMES_MAX})`;
+    devEls.fps.textContent = wd.fpsValue.toFixed(0)
+      + ` (${wd.W || '?'}×${wd.H || '?'} bm:${wd.bitmapW || '?'}×${wd.bitmapH || '?'})`;
   }
 
   // --- visual automation editor (bottom strip) ---
@@ -2679,454 +3043,71 @@
     if (e.key === 't' || e.key === 'T') setEditorVisible(!editorVisible);
   });
 
-  function frame(now) {
-    const dt = Math.min(50, now - last) / 16.67; // normalize to ~60fps units
-    last = now;
-    inversionRegions.length = 0;
-    monoRegions.length = 0;
+  // === worker bootstrap ===
+  // Worker source is inlined as <script type="text/worker" id="worker-src">
+  // so this stays a single self-contained file (file:// works). We Blob-URL
+  // the source, transfer the canvas to the worker via OffscreenCanvas, and
+  // hand it the current PARAMS values (post-restoreSession) as the initial
+  // state. Subsequent param changes flow through setParam → 'param' messages
+  // and applyAutomation → batched 'params' messages. Audio data flows from
+  // bands() each main rAF as 'audio' messages.
+  {
+    const _wsrc = document.getElementById('worker-src').textContent;
+    const _wblob = new Blob([_wsrc], { type: 'application/javascript' });
+    const _wurl = URL.createObjectURL(_wblob);
+    renderWorker = new Worker(_wurl);
+    renderWorker.onmessage = (e) => {
+      const msg = e.data;
+      if (msg.type === 'debug') {
+        workerDebug = msg;
+      }
+    };
+    const _initParams = {};
+    for (const name of PARAM_NAMES) _initParams[name] = manual[name];
+    const _offscreen = canvas.transferControlToOffscreen();
+    renderWorker.postMessage({
+      type: 'init',
+      canvas: _offscreen,
+      dpr, W, H,
+      params: _initParams,
+    }, [_offscreen]);
+  }
+
+  // === main render tick ===
+  // Lightweight: extract audio bands, post to worker, evaluate automation
+  // lanes, update the dev-panel readouts (from cached worker state), and
+  // render the visual editor strip (which still owns its own DOM canvas on
+  // the main thread). All visualizer rendering happens in the worker.
+  let mainFpsAccumStart = performance.now();
+  let mainFpsAccumCount = 0;
+  function frame() {
+    const now = performance.now();
+    mainFpsAccumCount++;
+    if (now - mainFpsAccumStart >= 500) {
+      mainFpsAccumStart = now;
+      mainFpsAccumCount = 0;
+    }
     if (currentEl && isFinite(currentEl.currentTime)) {
       applyAutomation(currentEl.currentTime);
     }
-    fpsAccumCount++;
-    if (now - fpsAccumStart >= 500) {
-      fpsValue = fpsAccumCount * 1000 / (now - fpsAccumStart);
-      fpsAccumStart = now;
-      fpsAccumCount = 0;
-    }
-
     const b = bands();
-    smoothLevel += (b.level - smoothLevel) * 0.08;
-    smoothBass += (b.bass - smoothBass) * 0.15;
-    smoothMid += (b.mid - smoothMid) * 0.20;
-    smoothTreble += (b.treble - smoothTreble) * 0.30;
-
-    // crossfade the active tint toward the current palette entry
-    const tintTarget = COLOR_PALETTE[colorIndex];
-    const tintLerp = Math.min(1, COLOR_LERP * dt);
-    tintR += (tintTarget[0] - tintR) * tintLerp;
-    tintG += (tintTarget[1] - tintG) * tintLerp;
-    tintB += (tintTarget[2] - tintB) * tintLerp;
-
-    // Kick detection runs on the parallel low-smoothing analyser (bassFast)
-    // rather than on the heavily-smoothed b.bass — the main analyser's 0.85
-    // smoothing flattens kick attacks below threshold during sustained loud
-    // passages. The fast signal preserves per-kick spikes so both rising
-    // edge and deviation-from-baseline behave as expected.
-    const bassRise = Math.max(0, b.bassFast - prevBass);
-    prevBass = b.bassFast;
-    bassBaseline = bassBaseline * 0.97 + b.bassFast * 0.03;
-    const bassDev = Math.max(0, b.bassFast - bassBaseline);
-
-    // bassPulse: peak follower over a hard-kneed bass curve. Bass below 0.5
-    // contributes nothing — the lattice stays at baseline. Above 0.5 the
-    // signal ramps quadratically and only reaches 1.0 (max pulse) when bass
-    // is truly thumping. Instant attack + fast release lets each kick spike
-    // up and cleanly decay between hits.
-    const bassAmp = Math.pow(Math.max(0, (b.bass - 0.5) * 2), 2);
-    bassPulse = Math.max(bassAmp, bassPulse * Math.pow(0.88, dt));
-
-    // bass-triggered slice tears — fire on either rising edge OR deviation
-    // from the slow baseline (whichever is larger). Each bass beat also
-    // counts toward the slice-orientation rotation timer and the color cycle.
-    sliceCool = Math.max(0, sliceCool - dt);
-    const bassOnset = Math.max(bassRise, bassDev);
-    if (bassOnset > SLICE_TRIGGER && sliceCool <= 0) {
-      kickCount++;
-      if (kickCount >= KICKS_PER_COLOR_CYCLE) {
-        colorIndex = (colorIndex + 1) % COLOR_PALETTE.length;
-        kickCount = 0;
-      }
-      shapeProgress += 1 / KICKS_PER_SHAPE_CYCLE;
-      if (shapeProgress >= 1) {
-        shapeIndex = (shapeIndex + 1) % SHAPES.length;
-        shapeProgress = 0;
-      }
-      beatsAtOrientation++;
-      if (beatsAtOrientation >= nextRotateBeats) {
-        const rotRad = (20 + Math.random() * 25) * Math.PI / 180; // 20–45° CW
-        currentSliceAngle = (currentSliceAngle + rotRad) % (Math.PI * 2);
-        beatsAtOrientation = 0;
-        nextRotateBeats = 3 + Math.floor(Math.random() * 6);
-      }
-      spawnSliceBurst(Math.min(1, bassOnset * 4));
-      sliceCool = 3 + Math.random() * 6;
+    if (renderWorker) {
+      renderWorker.postMessage({
+        type: 'audio',
+        bass: b.bass,
+        mid: b.mid,
+        treble: b.treble,
+        level: b.level,
+        bassFast: b.bassFast,
+      });
     }
-
-    // mid-band envelope — same derivative + baseline scheme as bass
-    midBaseline = midBaseline * 0.97 + b.mid * 0.03;
-    const midDev = Math.max(0, b.mid - midBaseline);
-    const midRise = Math.max(0, b.mid - prevMid);
-    prevMid = b.mid;
-    const midTrigger = Math.max(midDev, midRise * 2.0);
-    midPulse = Math.max(midTrigger, midPulse * Math.pow(0.91, dt));
-
-    // mid-triggered slice tears (independent stream — adds chaos density)
-    midSliceCool = Math.max(0, midSliceCool - dt);
-    if (midPulse > MID_SLICE_TRIGGER && midSliceCool <= 0) {
-      spawnSliceBurst(Math.min(1, midPulse * 1.6));
-      midSliceCool = 4 + Math.random() * 7;
-    }
-
-    // single-frame flash on very strong bass onsets (50/50 invert vs strobe)
-    flashCool = Math.max(0, flashCool - dt);
-    if (bassRise > FLASH_TRIGGER && flashCool <= 0) {
-      pendingFlash = Math.random() < 0.5 ? 'invert' : 'strobe';
-      flashCool = 14 + Math.random() * 28;
-    }
-
-    // energy onset detection — combines fast baseline deviation and rising
-    // edge so repeated transients keep firing instead of decaying out.
-    // freeze and shuffle now fire independently so they can both hit at once.
-    energyAvg = energyAvg * 0.95 + b.level * 0.05;
-    const levelRise = Math.max(0, b.level - prevLevel);
-    prevLevel = b.level;
-    onsetCool = Math.max(0, onsetCool - dt);
-    const onsetSig = Math.max(b.level - energyAvg, levelRise * 1.8);
-    if (onsetSig > ONSET_THRESHOLD && onsetCool <= 0) {
-      if (Math.random() < 0.55) pendingFreeze = true;
-      if (Math.random() < 0.55) pendingShuffle = true;
-      // guarantee at least one
-      if (!pendingFreeze && !pendingShuffle) {
-        if (Math.random() < 0.5) pendingFreeze = true;
-        else pendingShuffle = true;
-      }
-      onsetCool = ONSET_COOLDOWN_MIN +
-        Math.random() * (ONSET_COOLDOWN_MAX - ONSET_COOLDOWN_MIN);
-    }
-
-    // dither pattern phase — drifts slowly, accelerates hard on treble
-    ditherPhaseX += dt * (0.35 + smoothTreble * 8.0);
-    ditherPhaseY += dt * (0.25 + smoothTreble * 5.5);
-
-    // moving averages
-    bassAvg = bassAvg * 0.96 + b.bass * 0.04;
-    trebleAvg = trebleAvg * 0.95 + b.treble * 0.05;
-    bassCool = Math.max(0, bassCool - dt);
-    trebleCool = Math.max(0, trebleCool - dt);
-
-    if (b.bass > bassAvg * 1.35 + 0.05 && bassCool <= 0) {
-      spawnSpark(Math.min(1, b.bass), 'bass');
-      bassCool = 6;
-    }
-    if (b.treble > trebleAvg * 1.4 + 0.04 && trebleCool <= 0) {
-      spawnSpark(Math.min(1, b.treble), 'treble');
-      trebleCool = 4;
-    }
-
-    if (freezeFrames > 0) {
-      // ---- frame freeze branch: replay captured snapshot ----
-      restoreFreeze();
-      freezeFrames -= dt;
-    } else {
-      // ---- normal render branch ----
-    // motion-blur trail: paint translucent black over the canvas
-    // lighter alpha = longer trails. tie slightly to level so loud passages crisp up.
-    const fade = 0.06 + 0.05 * (1 - smoothLevel);
-    ctx.fillStyle = `rgba(0,0,0,${fade})`;
-    ctx.fillRect(0, 0, W, H);
-
-    // additive white drawing
-    ctx.globalCompositeOperation = 'lighter';
-
-    // flyout shapes — rectangles approaching the viewer from a center
-    // vanishing point. Mid energy speeds up approach + rotation.
-    // The frame's trail-fade pass gives each shape a ghost echo each frame.
-    const cx = W * 0.5, cy = H * 0.5;
-    const flyAxis = Math.min(W, H) * 0.5;
-    const speedScale = 1 + smoothMid * 5;
-    // size-progress is linear in apparent-size (1/z) over the spawn→despawn
-    // range; rotation reaches its target at 75% of this progress.
-    const minSc = 1 / Z_FAR;
-    const maxSc = 1 / Z_NEAR;
-    const scRange = maxSc - minSc;
-    for (let i = 0; i < flyout.length; i++) {
-      const s = flyout[i];
-      s.z -= s.vz * dt * speedScale;
-      if (s.z <= Z_NEAR) {
-        spawnFlyout(s);
-        continue;
-      }
-      const sc = 1 / s.z;
-      const sx = cx + s.wx * flyAxis * sc;
-      const sy = cy + s.wy * flyAxis * sc;
-      // bass throb — scale silhouette outward with bassPulse
-      const sizeBoost = 1 + bassPulse * 0.45;
-      const drawScale = s.size * sc * sizeBoost;
-      // rotation: lerp 0 → rotTarget over 0..75% of size progress, lock after
-      const sizeProgress = (sc - minSc) / scRange;
-      const rotProgress = Math.min(1, sizeProgress / 0.75);
-      const rot = s.rotTarget * rotProgress;
-
-      // alpha curve: emerge from the void, peak at mid depth, fade as it passes
-      let a;
-      if (s.z > Z_FAR * 0.65) {
-        a = (Z_FAR - s.z) / (Z_FAR * 0.35);
-      } else if (s.z < 0.18) {
-        a = s.z / 0.18;
-      } else {
-        a = 1;
-      }
-      a = Math.max(0, Math.min(1, a)) * 0.7;
-
-      // energy gating: each shape has a per-shape level threshold and ramps
-      // linearly from 0 at threshold to full at threshold+~0.17. At very low
-      // levels the always-visible shapes (thresh=0) are also faint because
-      // their above-threshold value is tiny.
-      const above = Math.max(0, smoothLevel - s.visThresh);
-      const energyMult = Math.min(1, above * 6);
-      if (energyMult < 0.01) continue;
-      a *= energyMult;
-      // bass throb — brighten alpha on each kick so shapes pulse with bass
-      a = Math.min(1, a * (1 + bassPulse * 0.7));
-
-      // Cached Path2D in normalized unit coords; we apply scale via the
-      // context transform and divide pixel-space line widths by drawScale
-      // to compensate. Avoids per-frame moveTo/lineTo emission across all
-      // subpaths × all flyouts.
-      const silh = SILHOUETTES[activeSilhouette] || SILHOUETTES.car;
-      const path = silh.path;
-      ctx.save();
-      ctx.translate(sx, sy);
-      ctx.rotate(rot);
-      ctx.scale(drawScale, drawScale);
-      // translucent fill — dither will stipple it into a density pattern.
-      // even-odd makes inner subpaths render as holes (windshield, grille).
-      ctx.fillStyle = `rgba(255,255,255,${a * s.fillAlpha})`;
-      ctx.fill(path, 'evenodd');
-      // outer glow stroke (wider, dimmer) + crisp inner stroke. lineWidth
-      // is divided by drawScale so the rendered width stays in CSS pixels
-      // despite the scaled transform.
-      const invScale = 1 / drawScale;
-      ctx.strokeStyle = `rgba(255,255,255,${a * 0.35})`;
-      ctx.lineWidth = Math.max(2, 2.4 + sc * 1.2) * invScale;
-      ctx.stroke(path);
-      ctx.strokeStyle = `rgba(255,255,255,${a * 0.95})`;
-      ctx.lineWidth = Math.max(1, 1 + sc * 0.3) * invScale;
-      ctx.stroke(path);
-      ctx.restore();
-    }
-
-    // sparks
-    for (let i = sparks.length - 1; i >= 0; i--) {
-      const s = sparks[i];
-      s.x += s.vx * dt;
-      s.y += s.vy * dt;
-      s.vx *= s.kind === 'bass' ? 0.985 : 0.97;
-      s.vy *= s.kind === 'bass' ? 0.985 : 0.97;
-      s.life -= s.decay * dt;
-      if (s.life <= 0 || s.x < -20 || s.x > W + 20 || s.y < -20 || s.y > H + 20) {
-        sparks.splice(i, 1);
-        continue;
-      }
-      const a = Math.max(0, s.life);
-      const radius = s.r * (s.kind === 'bass' ? 1 + (1 - s.life) * 0.4 : 1);
-      const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, radius * 5);
-      g.addColorStop(0, `rgba(255,255,255,${0.9 * a})`);
-      g.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, radius * 5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // viewport-filling hex-lattice of particles.
-    // particle radius pulses with the bass-transient envelope.
-    // each particle is jittered per-frame by treble (high-freq shimmer);
-    // each row is also shifted by an amount driven by the bass-pulse envelope
-    // (lattice corruption on bass hits).
-    const rectW = W;
-    const rectH = H;
-    const pulseR = PARTICLE_BASE_R + bassPulse * PARTICLE_PULSE_AMOUNT;
-    const jitter = JITTER_PX * smoothTreble;
-    const rowCorrupt = bassPulse * rectW * ROW_CORRUPT_AMOUNT;
-    // Reuse a single point buffer across frames; .length=0 keeps capacity.
-    lattPts.length = 0;
-    pushFilledRectPoints(lattPts, W * 0.5, H * 0.5, rectW, rectH, LATTICE_SPACING, rowCorrupt);
-    const pts = lattPts;
-    // Lerp current shape pair into shapeBuffer once per frame, scaled by pulseR.
-    const sFrom = SHAPES[shapeIndex];
-    const sTo = SHAPES[(shapeIndex + 1) % SHAPES.length];
-    const morph = shapeProgress;
-    for (let k = 0; k < SHAPE_N * 2; k++) {
-      shapeBuffer[k] = (sFrom[k] + (sTo[k] - sFrom[k]) * morph) * pulseR;
-    }
-    // Stamp the morphed shape once into the offscreen tile.
-    particleCtx.clearRect(0, 0, PARTICLE_TILE, PARTICLE_TILE);
-    particleCtx.fillStyle = 'rgba(255,255,255,0.95)';
-    particleCtx.beginPath();
-    particleCtx.moveTo(PARTICLE_HALF + shapeBuffer[0], PARTICLE_HALF + shapeBuffer[1]);
-    for (let k = 2; k < SHAPE_N * 2; k += 2) {
-      particleCtx.lineTo(PARTICLE_HALF + shapeBuffer[k], PARTICLE_HALF + shapeBuffer[k + 1]);
-    }
-    particleCtx.closePath();
-    particleCtx.fill();
-    // Stamp it at every lattice point. drawImage of a small bitmap is far
-    // cheaper than path-emitting per particle.
-    for (let i = 0; i < pts.length; i += 2) {
-      const x = pts[i] + (Math.random() - 0.5) * jitter - PARTICLE_HALF;
-      const y = pts[i + 1] + (Math.random() - 0.5) * jitter - PARTICLE_HALF;
-      ctx.drawImage(particleCanvas, x, y);
-    }
-
-    // --- slice tears: copy horizontal bands of the canvas to shifted x,
-    // additive composite for ghost-double-image. operate in device pixels.
-    // Each slice carries its own angle (rotated about the canvas center)
-    // so a burst can read as a diagonal tear instead of horizontal.
-    if (slices.length) {
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.globalCompositeOperation = 'lighter';
-      const cxd = canvas.width / 2;
-      const cyd = canvas.height / 2;
-      for (let i = slices.length - 1; i >= 0; i--) {
-        const s = slices[i];
-        s.life -= dt;
-        if (s.life <= 0) { slices.splice(i, 1); continue; }
-        const sy = Math.max(0, Math.min(H - 1, s.y)) * dpr;
-        const sh = Math.max(1, Math.min(H * dpr - sy, s.h * dpr));
-        const region = {
-          x: s.dx,
-          y: sy / dpr,
-          w: W,
-          h: sh / dpr,
-          angle: s.angle || 0,
-        };
-        (s.mono ? monoRegions : inversionRegions).push(region);
-        if (s.angle) {
-          ctx.save();
-          ctx.translate(cxd, cyd);
-          ctx.rotate(s.angle);
-          ctx.translate(-cxd, -cyd);
-          ctx.drawImage(canvas, 0, sy, W * dpr, sh, s.dx * dpr, sy, W * dpr, sh);
-          ctx.restore();
-        } else {
-          ctx.drawImage(canvas, 0, sy, W * dpr, sh, s.dx * dpr, sy, W * dpr, sh);
-        }
-      }
-      ctx.restore();
-    }
-
-    // capture-for-freeze happens BEFORE overlays so they keep animating
-    // while content is paused
-    if (pendingFreeze) {
-      captureFreeze();
-      pendingFreeze = false;
-    }
-    // block shuffle is a one-shot effect on the rendered scene
-    if (pendingShuffle) {
-      applyBlockShuffle();
-      pendingShuffle = false;
-    }
-    } // end normal render branch
-
-    // --- scanlines: dark rows every SCANLINE_PERIOD CSS px.
-    // Pre-baked 1×SCANLINE_PERIOD tile, repeat-tiled via createPattern;
-    // one fillRect replaces the previous per-row fillRect loop.
-    // SCANLINE_ALPHA modulates via globalAlpha so the live tunable
-    // doesn't need to re-bake the tile.
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = SCANLINE_ALPHA;
-    ctx.fillStyle = scanlinePattern;
-    ctx.fillRect(0, 0, W, H);
-    ctx.globalAlpha = 1;
-
-    // --- film grain / TV snow: regenerated every frame, additive overlay.
-    // density rises with treble for shimmery hi-hat fizz.
-    regenNoise(0.25 + smoothTreble * 0.45);
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.imageSmoothingEnabled = false;
-    ctx.globalAlpha = GRAIN_ALPHA;
-    ctx.drawImage(noiseCanvas, 0, 0, W, H);
-    ctx.globalAlpha = 1;
-    ctx.imageSmoothingEnabled = true;
-    ctx.globalCompositeOperation = 'source-over';
-
-    // --- 1-bit Bayer dither — final pass, threshold to pure B&W.
-    // pattern offset shifts continuously, accelerating with treble.
-    applyDither(Math.floor(ditherPhaseX), Math.floor(ditherPhaseY));
-
-    // --- color overlay: tint the dithered B&W to the active palette color,
-    // then invert color inside each slice-bar footprint (tint → complement,
-    // black → white). Done after dither so the tint operates on pure B&W.
-    // Skipped on monochrome freeze frames so the freeze reads as a B&W beat.
-    const tintActive = !(freezeFrames > 0 && freezeMono);
-    if (tintActive) {
-      // saturation lerps the tint toward white (multiply identity)
-      const sat = Math.max(0, Math.min(1, saturation));
-      const effR = 255 - (255 - tintR) * sat;
-      const effG = 255 - (255 - tintG) * sat;
-      const effB = 255 - (255 - tintB) * sat;
-      ctx.globalCompositeOperation = 'multiply';
-      ctx.fillStyle = `rgb(${effR | 0},${effG | 0},${effB | 0})`;
-      ctx.fillRect(0, 0, W, H);
-      ctx.globalCompositeOperation = 'source-over';
-      // mono bars: repaint the pre-tint B&W (still in ditherCanvas) inside
-      // each region, clipped to the rotated rect. Punches a colorless slot
-      // through the tinted field.
-      if (monoRegions.length) {
-        const dw = ditherCanvas.width;
-        const dh = ditherCanvas.height;
-        for (let i = 0; i < monoRegions.length; i++) {
-          const r = monoRegions[i];
-          ctx.save();
-          if (r.angle) {
-            ctx.translate(W * 0.5, H * 0.5);
-            ctx.rotate(r.angle);
-            ctx.translate(-W * 0.5, -H * 0.5);
-          }
-          ctx.beginPath();
-          ctx.rect(r.x, r.y, r.w, r.h);
-          ctx.clip();
-          ctx.imageSmoothingEnabled = false;
-          ctx.drawImage(ditherCanvas, 0, 0, dw, dh, 0, 0, W, H);
-          ctx.imageSmoothingEnabled = true;
-          ctx.restore();
-        }
-      }
-    }
-    if (inversionRegions.length) {
-      ctx.globalCompositeOperation = 'difference';
-      ctx.fillStyle = '#fff';
-      for (let i = 0; i < inversionRegions.length; i++) {
-        const r = inversionRegions[i];
-        if (r.angle) {
-          ctx.save();
-          ctx.translate(W * 0.5, H * 0.5);
-          ctx.rotate(r.angle);
-          ctx.translate(-W * 0.5, -H * 0.5);
-          ctx.fillRect(r.x, r.y, r.w, r.h);
-          ctx.restore();
-        } else {
-          ctx.fillRect(r.x, r.y, r.w, r.h);
-        }
-      }
-      ctx.globalCompositeOperation = 'source-over';
-    }
-
-    // --- single-frame flash effect after dither.
-    // 'strobe' = full white frame. 'invert' = composite difference flip.
-    if (pendingFlash) {
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      if (pendingFlash === 'strobe') {
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.fillStyle = 'white';
-      } else {
-        ctx.globalCompositeOperation = 'difference';
-        ctx.fillStyle = 'white';
-      }
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.restore();
-      pendingFlash = null;
-    }
-
-    updateDebug(b, bassDev);
+    updateDebug();
     autoCenterEditor();
     renderEditor();
-
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+
 })();
 </script>
 </body>

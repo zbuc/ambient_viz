@@ -218,12 +218,75 @@ addressing item #7 with a mirror canvas, reuse the mirror here too.
 
 ## Worth considering separately
 
-### OffscreenCanvas + worker
-`canvas.transferControlToOffscreen()` allows moving the entire render
-loop off the main thread. UI / audio analysis stay on main; render runs
-in a worker. Eliminates main-thread jank from layout, timers, and UI
-event work. Big rewrite, but it's the move if the editor and renderer
-ever need to coexist smoothly under load.
+### OffscreenCanvas + worker — `[x]` done
+
+**Diagnosis.** Even with the WebGL dither in place, the main thread still
+ran the entire render pipeline (silhouettes, lattice, sparks, slices,
+overlays, dither setup, freeze/shuffle) on every frame. Any DOM/layout/
+timer/event work on main competes with that loop, so the dev panel,
+sliders, and visual editor could induce frame drops under load.
+
+**Implementation.**
+- Worker source is inlined as `<script type="text/worker" id="worker-src">`
+  before the main `<script>`. At startup, main reads its `textContent`,
+  wraps it in a `Blob`, and instantiates a `new Worker(URL.createObjectURL(blob))`.
+  This preserves the single-file `file://`-runnable invariant — no
+  separate `worker.js`.
+- The canvas is handed to the worker via `canvas.transferControlToOffscreen()`.
+  After transfer the main thread cannot call `getContext` on the canvas;
+  all 2D/WebGL drawing happens worker-side via the `OffscreenCanvas`.
+- Worker owns: silhouette geometry + Path2D cache, lattice/shape
+  buffers, particle/noise/scanline/freeze offscreens (all
+  `OffscreenCanvas`), the WebGL dither pass, all per-frame state
+  (envelopes, smoothing, slice queue, sparks, flyouts), and the entire
+  render loop with its own `requestAnimationFrame`.
+- Main owns: audio graph + `AnalyserNode`s, file/mic/timeline UI,
+  PARAMS registry, dev panel sliders, automation lanes + visual editor
+  (still on its own DOM canvas), localStorage save/restore.
+- Cross-thread protocol:
+  - `init { canvas, dpr, W, H, params }` (canvas transferred) on startup
+  - `audio { bass, mid, treble, level, bassFast }` per main rAF
+  - `param { name, value }` on slider input (via `setParam`)
+  - `params { values }` per main rAF when automation lanes are non-empty
+    (one batched message instead of 18 individual posts)
+  - `resize { W, H, dpr }` on window resize
+  - Worker → main: `debug { ... }` ~10×/s with all fields the dev panel
+    displays (envelopes, slice/region counts, freeze state, fps,
+    `FREEZE_FRAMES_MAX`, etc.)
+- All 18 PARAMS `setLive` functions reduced to `v => setParam(name, v)`;
+  the worker holds the live tunable state and applies it inside its own
+  `applyParam(name, v)` switch.
+- `applyAutomation` no longer mutates main-side state (none exists);
+  it gathers per-frame lane/manual values into a reused `_automationBatch`
+  object and posts a single `params` message per main rAF.
+- `updateDebug` reads from a `workerDebug` cache populated by the
+  worker's periodic `debug` posts; `SHAPE_NAMES` and `COLOR_PALETTE`
+  are mirrored on main solely for display labels.
+- `resize()` on main only computes `W`/`H`/`dpr` and posts `resize`;
+  CSS sizing (`width: 100vw; height: 100vh`) handles the visible box,
+  worker resizes the underlying `OffscreenCanvas`.
+
+**Caveats.**
+- A few constants are duplicated between main and worker: `SHAPE_NAMES`
+  and `COLOR_PALETTE` (for dev panel labels), and the worker's
+  `SILHOUETTE_NAMES` is mirrored as a static array on main for the
+  `PARAMS.silhouette` dropdown. Keep them in sync if either side adds
+  shapes/colors/silhouettes.
+- The `<script type="text/worker">` block needs to be in the DOM before
+  the main `<script>` runs, since main reads it via
+  `getElementById('worker-src').textContent`.
+- WebGL initialization in the worker throws if unavailable. Same
+  posture as the in-thread version: no CPU fallback retained.
+- `transferControlToOffscreen()` is destructive — main can never use
+  the canvas's 2D/WebGL context again. Don't add code on main that
+  expects to draw to `canvas`.
+- Audio data flows from main to worker each main rAF; the worker
+  renders at its own rAF cadence and reads the most-recent audio
+  snapshot. With both threads running on the page's vsync that's the
+  same effective rate; if the main thread stalls, audio updates pause
+  but the worker keeps drawing the last snapshot.
+- `Worker` source size: ~1100 lines of inlined render code embedded as
+  `textContent`. The HTML grew, but `index.html` is still self-contained.
 
 ## Suggested order of attack
 
@@ -232,6 +295,7 @@ If picking off items one at a time:
 1. ~~**#2 (Path2D for flyouts)**~~ — done.
 2. ~~**#5 (scanline pre-bake)**~~ — done.
 3. ~~**#1 (WebGL dither)**~~ — done.
-4. **#3 (lattice integer coords + jitter branch)** — small diff, broad
+4. ~~**OffscreenCanvas + worker**~~ — done.
+5. **#3 (lattice integer coords + jitter branch)** — small diff, broad
    benefit during quiet passages.
-5. **#6 (spark gradient sprite)** — kills per-frame allocation noise.
+6. **#6 (spark gradient sprite)** — kills per-frame allocation noise.
