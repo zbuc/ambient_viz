@@ -797,6 +797,172 @@ function buildShape(name) {
 const SHAPES = SHAPE_NAMES.map(buildShape);
 const shapeBuffer = new Float32Array(SHAPE_N * 2);
 
+// === 3D mesh registry ===
+// Each entry: { vertices: [[x,y,z], ...], edges: [[i,j], ...] }. Coordinates
+// are normalized so the mesh's longest axis spans roughly [-0.5, 0.5];
+// world-space scale at projection time is driven by `s.size` (CSS pixels at
+// z=1, same convention as flyout silhouettes). The render pass projects
+// each vertex through 1/wz perspective, draws bolded white circles at
+// vertices, and thin white lines along edges.
+
+function _buildCylinder(cx, cz, radius, yBot, yTop, n, vertOffset) {
+  const verts = [];
+  const edges = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    verts.push([cx + radius * Math.cos(a), yBot, cz + radius * Math.sin(a)]);
+  }
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    verts.push([cx + radius * Math.cos(a), yTop, cz + radius * Math.sin(a)]);
+  }
+  for (let i = 0; i < n; i++) {
+    const next = (i + 1) % n;
+    edges.push([vertOffset + i, vertOffset + next]);          // bottom ring
+    edges.push([vertOffset + n + i, vertOffset + n + next]);  // top ring
+    edges.push([vertOffset + i, vertOffset + n + i]);         // vertical
+  }
+  return { verts, edges };
+}
+
+// Renaissance Center, Detroit. Five cylindrical towers: a tall central
+// (Detroit Marriott) at origin with four shorter satellite towers at the
+// corners of a square around it, all sharing a ground-level base. The two
+// later 200/300 office buildings are omitted to keep the silhouette
+// readable at low poly. 10-sided cylinders.
+function _buildRencen() {
+  const allVerts = [];
+  const allEdges = [];
+  const N = 10;
+  const towers = [
+    { cx:  0,    cz:  0,    r: 0.08, top:  0.5  },  // central, tallest (Marriott)
+    { cx:  0.20, cz:  0.20, r: 0.06, top:  0.15 },  // NE satellite
+    { cx: -0.20, cz:  0.20, r: 0.06, top:  0.15 },  // NW
+    { cx: -0.20, cz: -0.20, r: 0.06, top:  0.15 },  // SW
+    { cx:  0.20, cz: -0.20, r: 0.06, top:  0.15 },  // SE
+  ];
+  for (const t of towers) {
+    const cyl = _buildCylinder(t.cx, t.cz, t.r, -0.5, t.top, N, allVerts.length);
+    for (const v of cyl.verts) allVerts.push(v);
+    for (const e of cyl.edges) allEdges.push(e);
+  }
+  return { vertices: allVerts, edges: allEdges };
+}
+
+// Ambassador Bridge, Detroit ↔ Windsor. Two suspension towers (rectangular
+// steel trusses with X-bracing on each face), two main-cable catenaries
+// running between the tower tops on each side of the deck, vertical
+// suspenders dropping from each cable point to the deck, and a long thin
+// deck box running through the towers. Geometry normalized so length spans
+// roughly [-0.5, 0.5] in x.
+function _buildAmbassador() {
+  const allVerts = [];
+  const allEdges = [];
+
+  // Tower box helper: 8 corners indexed by bit pattern (xs|ys<<1|zs<<2),
+  // plus 12 box edges and 8 X-bracing diagonals (one X per vertical face).
+  function _tower(cx, halfX, halfZ, yBot, yTop) {
+    const v0 = allVerts.length;
+    for (let i = 0; i < 8; i++) {
+      const xs = (i & 1) ? +1 : -1;
+      const yBit = (i & 2) ? +1 : 0;
+      const zs = (i & 4) ? +1 : -1;
+      allVerts.push([
+        cx + xs * halfX,
+        yBit ? yTop : yBot,
+        zs * halfZ,
+      ]);
+    }
+    const boxEdges = [
+      [0,1],[2,3],[4,5],[6,7],   // x-axis
+      [0,2],[1,3],[4,6],[5,7],   // y-axis (vertical)
+      [0,4],[1,5],[2,6],[3,7],   // z-axis
+    ];
+    const diagEdges = [
+      [0,3],[1,2],   // -z face X
+      [4,7],[5,6],   // +z face X
+      [0,6],[2,4],   // -x face X
+      [1,7],[3,5],   // +x face X
+    ];
+    for (const [a, b] of boxEdges) allEdges.push([v0 + a, v0 + b]);
+    for (const [a, b] of diagEdges) allEdges.push([v0 + a, v0 + b]);
+  }
+
+  const towerX = 0.35;
+  const towerHalfX = 0.025;
+  const towerHalfZ = 0.04;
+  const towerYBot = -0.30;
+  const towerYTop = 0.30;
+  _tower(-towerX, towerHalfX, towerHalfZ, towerYBot, towerYTop);
+  _tower( towerX, towerHalfX, towerHalfZ, towerYBot, towerYTop);
+
+  // Main cables (parabolic-sag catenary) on each side of the deck.
+  const cableYTop = towerYTop;
+  const cableYMin = -0.04;
+  const cableN = 10;
+  const cableZSides = [-towerHalfZ, towerHalfZ];
+  const cableStarts = [];
+  for (const cz of cableZSides) {
+    const start = allVerts.length;
+    cableStarts.push(start);
+    for (let i = 0; i <= cableN; i++) {
+      const t = i / cableN;
+      const x = -towerX + (2 * towerX) * t;
+      const sag = 1 - 4 * (t - 0.5) * (t - 0.5);  // 0 at ends, 1 at middle
+      const y = cableYTop - (cableYTop - cableYMin) * sag;
+      allVerts.push([x, y, cz]);
+    }
+    for (let i = 0; i < cableN; i++) {
+      allEdges.push([start + i, start + i + 1]);
+    }
+  }
+
+  // Deck (long thin box running through the towers).
+  const deckYBot = -0.10;
+  const deckYTop = -0.06;
+  const deckHalfX = 0.45;
+  const deckHalfZ = 0.045;
+  const deckV0 = allVerts.length;
+  for (let i = 0; i < 8; i++) {
+    const xs = (i & 1) ? +1 : -1;
+    const yBit = (i & 2) ? +1 : 0;
+    const zs = (i & 4) ? +1 : -1;
+    allVerts.push([
+      xs * deckHalfX,
+      yBit ? deckYTop : deckYBot,
+      zs * deckHalfZ,
+    ]);
+  }
+  const deckEdgePairs = [
+    [0,1],[2,3],[4,5],[6,7],
+    [0,2],[1,3],[4,6],[5,7],
+    [0,4],[1,5],[2,6],[3,7],
+  ];
+  for (const [a, b] of deckEdgePairs) allEdges.push([deckV0 + a, deckV0 + b]);
+
+  // Vertical suspenders from each main-cable vertex down to the deck top.
+  for (let s = 0; s < cableZSides.length; s++) {
+    const cz = cableZSides[s];
+    const cableStart = cableStarts[s];
+    for (let i = 0; i <= cableN; i++) {
+      const cableIdx = cableStart + i;
+      const cableV = allVerts[cableIdx];
+      if (cableV[1] <= deckYTop) continue;  // skip if cable already at/below deck
+      const attachIdx = allVerts.length;
+      allVerts.push([cableV[0], deckYTop, cz]);
+      allEdges.push([cableIdx, attachIdx]);
+    }
+  }
+
+  return { vertices: allVerts, edges: allEdges };
+}
+
+const MESHES = {
+  rencen: _buildRencen(),
+  bridge: _buildAmbassador(),
+};
+const MESH_NAMES = Object.keys(MESHES);
+
 function rand(a, b) { return a + Math.random() * (b - a); }
 
 // === render state ===
@@ -898,6 +1064,55 @@ function spawnSpark(intensity, kind) {
       kind,
     });
   }
+}
+
+// === 3D mesh layer state ===
+// Same approach pattern as flyouts: meshes spawn at Z_FAR, advance toward
+// Z_NEAR scaled by mid-band energy, then respawn. Live count controlled by
+// the mesh3dCount param (0 disables the layer entirely).
+const meshes3d = [];
+let MESH3D_COUNT = 2;
+// Per-frame Y-axis rotation rate, in radians per normalized 60fps frame.
+// Each mesh accumulates this into its own s.rotY each render so they all
+// rotate in sync direction/rate but keep their individual phase offsets
+// from spawn time. Negative values reverse the spin. Live tunable.
+let MESH3D_ROT_SPEED = 0.0075;
+
+function spawnMesh3d(s) {
+  s = s || {};
+  // Prefer a mesh type not already represented in meshes3d so different
+  // meshes coexist on screen rather than two of the same. When all types
+  // are already present (count >= MESH_NAMES.length), falls back to random.
+  const present = new Set();
+  for (let i = 0; i < meshes3d.length; i++) {
+    const m = meshes3d[i];
+    if (m !== s) present.add(m.meshId);
+  }
+  const available = MESH_NAMES.filter(n => !present.has(n));
+  const pool = available.length > 0 ? available : MESH_NAMES;
+  s.meshId = pool[Math.floor(Math.random() * pool.length)] || 'rencen';
+  s.wx = rand(-1.4, 1.4);
+  s.wy = rand(-0.6, 0.6);
+  s.z = Z_FAR;
+  s.vz = rand(0.0004, 0.0014);          // slower than flyouts — these read as imposing
+  s.size = rand(180, 700);              // CSS px at z=1 (longest axis); ~4× range so meshes read as varied in scale
+  s.rotY = rand(0, Math.PI * 2);        // initial Y-axis rotation phase
+  s.visThresh = rand(0, 0.05);          // low threshold so the mesh is reliably visible
+  return s;
+}
+
+function ensureMesh3dCount() {
+  while (meshes3d.length > MESH3D_COUNT) meshes3d.pop();
+  while (meshes3d.length < MESH3D_COUNT) {
+    const s = spawnMesh3d();
+    s.z = rand(Z_NEAR + 0.05, Z_FAR);
+    meshes3d.push(s);
+  }
+}
+
+function initMeshes3d() {
+  meshes3d.length = 0;
+  ensureMesh3dCount();
 }
 
 function regenNoise(density) {
@@ -1323,6 +1538,99 @@ function frame(now) {
       ctx.restore();
     }
 
+    // 3D mesh wireframe layer — low-poly cylinder cluster (Renaissance
+    // Center). Same flyout-style depth approach: spawn at Z_FAR, advance
+    // toward camera scaled by mid energy, alpha curve + energy gating, bass
+    // throb. Each vertex is a bolded white circle, each edge a thin white
+    // line. Vertices project through 1/wz perspective so back faces of
+    // each cylinder appear smaller than front faces.
+    if (meshes3d.length) {
+      const zDepthMult = 0.5;  // tames perspective distortion at close range
+      for (let i = 0; i < meshes3d.length; i++) {
+        const s = meshes3d[i];
+        s.z -= s.vz * dt * speedScale;
+        if (s.z <= Z_NEAR) {
+          spawnMesh3d(s);
+          continue;
+        }
+        const sc = 1 / s.z;
+
+        let a;
+        if (s.z > Z_FAR * 0.65) a = (Z_FAR - s.z) / (Z_FAR * 0.35);
+        else if (s.z < 0.18) a = s.z / 0.18;
+        else a = 1;
+        a = Math.max(0, Math.min(1, a)) * 0.8;
+
+        const above = Math.max(0, smoothLevel - s.visThresh);
+        const energyMult = Math.min(1, above * 6);
+        if (energyMult < 0.01) continue;
+        a *= energyMult;
+        a = Math.min(1, a * (1 + bassPulse * 0.7));
+
+        // Continuous Y-axis rotation: each mesh accumulates the global
+        // MESH3D_ROT_SPEED into its own phase so individual meshes stay
+        // out of sync while sharing the same rotation rate.
+        s.rotY += MESH3D_ROT_SPEED * dt;
+        const cosY = Math.cos(s.rotY), sinY = Math.sin(s.rotY);
+
+        const mesh = MESHES[s.meshId] || MESHES.rencen;
+        const verts = mesh.vertices;
+        const meshScale = s.size * viewportScale;
+        const meshExtent = meshScale / flyAxis;  // mesh-units → world-units
+
+        if (!s._projX || s._projX.length < verts.length) {
+          s._projX = new Float32Array(verts.length);
+          s._projY = new Float32Array(verts.length);
+        }
+        const projX = s._projX, projY = s._projY;
+        const NEAR_SENT = -1e6;
+        for (let j = 0; j < verts.length; j++) {
+          const v = verts[j];
+          const vx = v[0], vy = v[1], vz = v[2];
+          // rotate around Y axis
+          const rx = vx * cosY + vz * sinY;
+          const rz = -vx * sinY + vz * cosY;
+          const wx = s.wx + rx * meshExtent;
+          const wy = s.wy + (-vy) * meshExtent;  // canvas y goes down
+          const wz = s.z + rz * meshExtent * zDepthMult;
+          if (wz < 0.01) {
+            projX[j] = NEAR_SENT;
+            projY[j] = NEAR_SENT;
+            continue;
+          }
+          const psc = 1 / wz;
+          projX[j] = cx + wx * flyAxis * psc;
+          projY[j] = cy + wy * flyAxis * psc;
+        }
+
+        // edges first so vertex circles render on top
+        const edges = mesh.edges;
+        ctx.strokeStyle = 'rgba(255,255,255,' + (a * 0.55) + ')';
+        ctx.lineWidth = Math.max(2.4, 2.4 + sc * 0.5) * viewportScale;
+        ctx.beginPath();
+        for (let j = 0; j < edges.length; j++) {
+          const e = edges[j];
+          const x0 = projX[e[0]], y0 = projY[e[0]];
+          const x1 = projX[e[1]], y1 = projY[e[1]];
+          if (x0 < -1e5 || x1 < -1e5) continue;
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x1, y1);
+        }
+        ctx.stroke();
+
+        // vertices
+        const vertexR = Math.max(4.4, 5.0 + sc * 1.0) * viewportScale;
+        ctx.fillStyle = 'rgba(255,255,255,' + a + ')';
+        for (let j = 0; j < verts.length; j++) {
+          const x = projX[j], y = projY[j];
+          if (x < -1e5) continue;
+          ctx.beginPath();
+          ctx.arc(x, y, vertexR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
     for (let i = sparks.length - 1; i >= 0; i--) {
       const s = sparks[i];
       // Position update scaled so sparks traverse a similar fraction of
@@ -1553,6 +1861,11 @@ function applyParam(name, v) {
     case 'colorLerp': COLOR_LERP = v; break;
     case 'freezeMonoChance': FREEZE_MONO_CHANCE = v; break;
     case 'kicksPerShapeCycle': KICKS_PER_SHAPE_CYCLE = Math.round(v); break;
+    case 'mesh3dCount':
+      MESH3D_COUNT = Math.max(0, Math.round(v));
+      ensureMesh3dCount();
+      break;
+    case 'mesh3dRotSpeed': MESH3D_ROT_SPEED = v; break;
   }
 }
 function applyParams(p) {
@@ -1575,6 +1888,7 @@ self.onmessage = function (e) {
     setupOffscreens();
     setupDither();
     initFlyout();
+    initMeshes3d();
     last = performance.now();
     fpsAccumStart = last;
     requestAnimationFrame(frame);
@@ -2080,6 +2394,18 @@ self.onmessage = function (e) {
       min: 2, max: 64, step: 1,
       fmt: v => v.toFixed(0), editor: false,
       setLive: v => setParam('kicksPerShapeCycle', v),
+    },
+    mesh3dCount: {
+      type: 'continuous', def: 2,
+      min: 0, max: 4, step: 1,
+      fmt: v => v.toFixed(0), editor: false,
+      setLive: v => setParam('mesh3dCount', v),
+    },
+    mesh3dRotSpeed: {
+      type: 'continuous', def: 0.0075,
+      min: -0.15, max: 0.15, step: 0.001,
+      fmt: v => v.toFixed(3), editor: false,
+      setLive: v => setParam('mesh3dRotSpeed', v),
     },
   };
   const PARAM_NAMES = Object.keys(PARAMS);
