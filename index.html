@@ -482,16 +482,24 @@
 
 <script type="text/worker" id="worker-src">
 // ============================================================================
-// Render worker. Owns the main canvas via transferControlToOffscreen.
-// Receives:
+// Renderer. Default path: runs in a Web Worker that owns the main canvas
+// via transferControlToOffscreen. Fallback path (iOS Safari, where Worker
+// OffscreenCanvas has incomplete path-API support): the same code is
+// evaluated on the main thread via `new Function(src)()` and runs against
+// the live DOM canvas. The body is wrapped in `runRenderer(host)` so the
+// caller can swap in either a worker host (self.postMessage / self.onmessage)
+// or a main-thread host (direct calls).
+// Receives via host.onmessage:
 //   - 'init' { canvas, dpr, W, H, params }
 //   - 'audio' { bass, mid, treble, level, bassFast } each main rAF
 //   - 'param' { name, value }   /  'params' { values }
 //   - 'resize' { W, H, dpr }
-// Posts back:
+// Posts back via host.postMessage:
 //   - 'debug' { ... } periodically for the dev panel display
 // ============================================================================
 'use strict';
+
+function runRenderer(host) {
 
 // === constants ===
 const FLYOUT_COUNT = 10;
@@ -957,9 +965,193 @@ function _buildAmbassador() {
   return { vertices: allVerts, edges: allEdges };
 }
 
+// Joe Louis Memorial ("The Fist"), Hart Plaza, Detroit. Higher-resolution
+// mesh: 4-leg pyramid frame, 3-ring tapered forearm cylinder, 3-ring
+// rounded-prism hand body (no longer a box — wider and slightly z-elongated
+// for thumb side), explicit wrist flare, 4 distinct knuckle apex bumps with
+// fan-pattern connections to the front ring, 4 finger curl lines down the
+// front face, and a proper 3D thumb segment (8-vertex box) anchored across
+// handMid + handFront on the +z side. ~70 verts, ~135 edges.
+function _buildJoeLouisFist() {
+  const allVerts = [];
+  const allEdges = [];
+
+  function _ring(x, ry, rz, yc, n) {
+    const start = allVerts.length;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      allVerts.push([x, yc + ry * Math.cos(a), rz * Math.sin(a)]);
+    }
+    return start;
+  }
+  function _ringPerim(start, n) {
+    for (let i = 0; i < n; i++) {
+      allEdges.push([start + i, start + ((i + 1) % n)]);
+    }
+  }
+  function _ringConnect(a, b, n) {
+    for (let i = 0; i < n; i++) allEdges.push([a + i, b + i]);
+  }
+
+  // === Pillar frame: 4 slanted thick pillars converging at the apex ===
+  // Each pillar is a slanted rectangular column with a square cross-section
+  // (so they have visible thickness rather than reading as single edges).
+  // All 4 pillars share a small "apex square" at the top, giving the frame
+  // a pyramid silhouette with proper structural depth.
+  const baseY = -0.5;
+  const apexY = 0.45;
+  const pyrHX = 0.4;
+  const pyrHZ = 0.4;
+  const pillarBaseR = 0.04;   // pillar cross-section half-extent at base
+  const pillarApexR = 0.025;  // half-extent at apex (slight taper)
+
+  // Apex square (4 verts shared by all pillars)
+  const apexV = [];
+  for (let i = 0; i < 4; i++) {
+    const xs = (i & 1) ? +1 : -1;
+    const zs = (i & 2) ? +1 : -1;
+    apexV.push(allVerts.length);
+    allVerts.push([xs * pillarApexR, apexY, zs * pillarApexR]);
+  }
+  // Apex square perimeter
+  allEdges.push([apexV[0], apexV[1]]);
+  allEdges.push([apexV[2], apexV[3]]);
+  allEdges.push([apexV[0], apexV[2]]);
+  allEdges.push([apexV[1], apexV[3]]);
+
+  // 4 pillars at the 4 base corners. Each pillar gets its own 4 base verts;
+  // lengthwise edges connect base corners to corresponding apex corners.
+  const pillarSigns = [[-1, -1], [+1, -1], [-1, +1], [+1, +1]];
+  for (const [bx, bz] of pillarSigns) {
+    const baseCx = bx * pyrHX;
+    const baseCz = bz * pyrHZ;
+    const baseStart = allVerts.length;
+    for (let i = 0; i < 4; i++) {
+      const xs = (i & 1) ? +1 : -1;
+      const zs = (i & 2) ? +1 : -1;
+      allVerts.push([baseCx + xs * pillarBaseR, baseY, baseCz + zs * pillarBaseR]);
+    }
+    // Base square perimeter
+    allEdges.push([baseStart + 0, baseStart + 1]);
+    allEdges.push([baseStart + 2, baseStart + 3]);
+    allEdges.push([baseStart + 0, baseStart + 2]);
+    allEdges.push([baseStart + 1, baseStart + 3]);
+    // Lengthwise edges from base corners to their apex counterparts
+    for (let i = 0; i < 4; i++) {
+      allEdges.push([baseStart + i, apexV[i]]);
+    }
+  }
+
+  // === Forearm: 3-ring 8-sided cylinder, slight taper at the wrist ===
+  const N = 8;
+  // Shifted down so the suspended fist sits at ~50% of the pyramid height
+  // (pyramid spans y ∈ [-0.5, 0.45], midpoint = -0.025; fist center ends up
+  // at ≈ -0.02 with armY = -0.05).
+  const armY = -0.05;
+  const elbowRing = _ring(-0.10, 0.060, 0.060, armY, N);
+  const midArmRing = _ring(0.04, 0.058, 0.058, armY, N);
+  const armWristRing = _ring(0.16, 0.050, 0.050, armY, N);
+  _ringPerim(elbowRing, N);
+  _ringPerim(midArmRing, N);
+  _ringPerim(armWristRing, N);
+  _ringConnect(elbowRing, midArmRing, N);
+  _ringConnect(midArmRing, armWristRing, N);
+
+  // === Hand body: 3-ring 8-sided rounded prism (oblong cross-section)
+  // ry = palm ↔ back-of-hand; rz = thumb-side ↔ pinky-side (slightly wider).
+  // Mid ring is the widest; back-of-hand sits slightly above arm centerline.
+  const handWristRing = _ring(0.18, 0.07, 0.07, armY, N);
+  const handMidRing = _ring(0.27, 0.095, 0.105, armY + 0.005, N);
+  const handFrontRing = _ring(0.36, 0.085, 0.10, armY, N);
+  _ringPerim(handWristRing, N);
+  _ringPerim(handMidRing, N);
+  _ringPerim(handFrontRing, N);
+  _ringConnect(handWristRing, handMidRing, N);
+  _ringConnect(handMidRing, handFrontRing, N);
+
+  // === Wrist flare (forearm wrist → hand wrist; wider on hand side) ===
+  _ringConnect(armWristRing, handWristRing, N);
+
+  // === Knuckles: 4 apex bumps above the front of the hand ===
+  // Each knuckle bulges up (+y) and forward (+x) from the top of handFront.
+  // Top-arc verts on an 8-side ring are indices 7 (z<0), 0 (z=0), 1 (z>0).
+  const knuckleY = armY + 0.13;
+  const knuckleX = 0.41;
+  const knuckleStart = allVerts.length;
+  for (let k = 0; k < 4; k++) {
+    const z = -0.06 + (k / 3) * 0.12;     // -0.06, -0.02, 0.02, 0.06
+    allVerts.push([knuckleX, knuckleY, z]);
+  }
+  // Ridge between adjacent knuckles
+  for (let k = 0; k < 3; k++) allEdges.push([knuckleStart + k, knuckleStart + k + 1]);
+  // Fan connections to the top arc of handFront (each knuckle to its 2 nearest top verts)
+  allEdges.push([knuckleStart + 0, handFrontRing + 7]);
+  allEdges.push([knuckleStart + 0, handFrontRing + 0]);
+  allEdges.push([knuckleStart + 1, handFrontRing + 0]);
+  allEdges.push([knuckleStart + 1, handFrontRing + 7]);
+  allEdges.push([knuckleStart + 2, handFrontRing + 0]);
+  allEdges.push([knuckleStart + 2, handFrontRing + 1]);
+  allEdges.push([knuckleStart + 3, handFrontRing + 1]);
+  allEdges.push([knuckleStart + 3, handFrontRing + 0]);
+  // Outer knuckles also anchor back to handMid for back-slope of the bumps
+  allEdges.push([knuckleStart + 0, handMidRing + 7]);
+  allEdges.push([knuckleStart + 3, handMidRing + 1]);
+
+  // === Finger curl lines: 4 lines from each knuckle down to the front-bottom ===
+  const fingertipY = armY - 0.07;
+  const fingertipStart = allVerts.length;
+  for (let k = 0; k < 4; k++) {
+    const z = -0.06 + (k / 3) * 0.12;
+    allVerts.push([0.36, fingertipY, z]);
+  }
+  for (let k = 0; k < 4; k++) {
+    allEdges.push([knuckleStart + k, fingertipStart + k]);
+  }
+  for (let k = 0; k < 3; k++) {
+    allEdges.push([fingertipStart + k, fingertipStart + k + 1]);
+  }
+  // Anchor outermost fingertips to the bottom-side of handFront ring
+  allEdges.push([fingertipStart + 0, handFrontRing + 5]);
+  allEdges.push([fingertipStart + 3, handFrontRing + 3]);
+
+  // === Thumb: 8-vertex 3D segment (small box) protruding on +z side ===
+  const thumbStart = allVerts.length;
+  const tBaseX = 0.27, tTipX = 0.32;
+  const tBaseZ = 0.105, tTipZ = 0.18;
+  const tR = 0.04, tTipR = 0.028;
+  allVerts.push([tBaseX - tR, armY - tR, tBaseZ]);     // 0: base low-back
+  allVerts.push([tBaseX + tR, armY - tR, tBaseZ]);     // 1: base low-front
+  allVerts.push([tBaseX - tR, armY + tR, tBaseZ]);     // 2: base high-back
+  allVerts.push([tBaseX + tR, armY + tR, tBaseZ]);     // 3: base high-front
+  allVerts.push([tTipX - tTipR, armY - tTipR, tTipZ]); // 4: tip low-back
+  allVerts.push([tTipX + tTipR, armY - tTipR, tTipZ]); // 5: tip low-front
+  allVerts.push([tTipX - tTipR, armY + tTipR, tTipZ]); // 6: tip high-back
+  allVerts.push([tTipX + tTipR, armY + tTipR, tTipZ]); // 7: tip high-front
+  const thumbBoxEdges = [
+    [0,1],[2,3],[4,5],[6,7],
+    [0,2],[1,3],[4,6],[5,7],
+    [0,4],[1,5],[2,6],[3,7],
+  ];
+  for (const [a, b] of thumbBoxEdges) allEdges.push([thumbStart + a, thumbStart + b]);
+  // Anchor thumb base to hand body's +z side, spanning handMid → handFront
+  allEdges.push([thumbStart + 0, handMidRing + 3]);   // base low-back  → handMid lower-+z
+  allEdges.push([thumbStart + 2, handMidRing + 1]);   // base high-back → handMid upper-+z
+  allEdges.push([thumbStart + 1, handFrontRing + 3]); // base low-front → handFront lower-+z
+  allEdges.push([thumbStart + 3, handFrontRing + 1]); // base high-front → handFront upper-+z
+
+  // === Suspension cables (apex corners → top and bottom of elbow ring) ===
+  // Two cables drop from opposite corners of the apex square, X-bracing
+  // through the suspended elbow.
+  allEdges.push([apexV[0], elbowRing + 0]);
+  allEdges.push([apexV[3], elbowRing + Math.floor(N / 2)]);
+
+  return { vertices: allVerts, edges: allEdges };
+}
+
 const MESHES = {
   rencen: _buildRencen(),
   bridge: _buildAmbassador(),
+  fist:   _buildJoeLouisFist(),
 };
 const MESH_NAMES = Object.keys(MESHES);
 
@@ -1362,7 +1554,16 @@ function resizeFreeze() {
   freezeCanvas.height = canvas.height;
 }
 
+let _diagFrameCount = 0;
+let _diagLastLog = 0;
 function frame(now) {
+  // Once per ~2s, log that frame() is alive — confirms the rAF loop is
+  // running on iOS (cleared by removing this block once stable).
+  _diagFrameCount++;
+  if (now - _diagLastLog > 2000) {
+    try { console.log('[ambient_viz/render] frames=' + _diagFrameCount + ' W=' + W + ' H=' + H + ' canvas=' + (canvas && canvas.width) + 'x' + (canvas && canvas.height) + ' flyouts=' + flyout.length + ' meshes3d=' + meshes3d.length + ' slices=' + slices.length); } catch (_) {}
+    _diagLastLog = now;
+  }
   const dt = Math.min(50, now - last) / 16.67;
   last = now;
   inversionRegions.length = 0;
@@ -1813,7 +2014,7 @@ function frame(now) {
 
   // periodic debug snapshot for the main-thread dev panel
   if (now - lastDebugPost >= 100) {
-    self.postMessage({
+    host.postMessage({
       type: 'debug',
       bass: b.bass, mid: b.mid, treble: b.treble, level: b.level, bassFast: b.bassFast,
       bassPulse, bassDev: bassDevDebug,
@@ -1872,7 +2073,7 @@ function applyParams(p) {
   for (const name in p) applyParam(name, p[name]);
 }
 
-self.onmessage = function (e) {
+host.onmessage = function (e) {
   const msg = e.data;
   if (msg.type === 'init') {
     canvas = msg.canvas;
@@ -1925,6 +2126,22 @@ self.onmessage = function (e) {
     freezeFrames = 0;
   }
 };
+
+}  // end of runRenderer
+
+// Bootstrap: pick the right host based on context. Inside a Worker, wire
+// host.onmessage / postMessage to the worker's globals. On main thread
+// (iOS fallback), expose runRenderer for the page-level bootstrap to call.
+if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
+    typeof self !== 'undefined' && self instanceof DedicatedWorkerGlobalScope) {
+  const workerHost = {
+    set onmessage(h) { self.onmessage = h; },
+    postMessage(m) { self.postMessage(m); },
+  };
+  runRenderer(workerHost);
+} else if (typeof globalThis !== 'undefined') {
+  globalThis._workerRunRenderer = runRenderer;
+}
 </script>
 
 <script>
@@ -1957,6 +2174,32 @@ self.onmessage = function (e) {
 // To add a new particle morph shape: see HOW TO ADD A NEW LATTICE PARTICLE SHAPE.
 // ============================================================================
 (() => {
+  // Capture any uncaught error from the main IIFE so it's visible from the
+  // device — title bar, console, and (when visible) the status panel.
+  window.addEventListener('error', (ev) => {
+    console.error('[ambient_viz] window.error:', ev.message, ev.filename, ev.lineno);
+    document.title = 'ERR: ' + (ev.message || 'unknown');
+  });
+  window.addEventListener('unhandledrejection', (ev) => {
+    console.error('[ambient_viz] unhandledrejection:', ev.reason);
+    document.title = 'PROMISE ERR: ' + (ev.reason && (ev.reason.message || ev.reason.name) || 'unknown');
+  });
+  console.log('[ambient_viz] IIFE entered, ready=' + document.readyState);
+
+  // iOS / iPadOS detection — used by both the audio path (iOS Safari has a
+  // long-standing bug where MediaElementSource doesn't pipe through to the
+  // Web Audio graph; the audio plays through system audio but the analyser
+  // sees zeros, so we use AudioBufferSource instead) and the renderer
+  // bootstrap (worker OffscreenCanvas has incomplete path-API support on
+  // iOS WebKit, so we run the renderer on main).
+  const _ua = (navigator.userAgent || '');
+  const isiOS = /iPad|iPhone|iPod|CriOS|FxiOS/.test(_ua) ||
+    (typeof navigator !== 'undefined' &&
+     navigator.platform === 'MacIntel' &&
+     navigator.maxTouchPoints > 1) ||
+    (typeof DedicatedWorkerGlobalScope === 'undefined' &&
+      typeof OffscreenCanvas === 'undefined');
+
   const canvas = document.getElementById('c');
   // Render is owned by a Worker that controls the canvas via OffscreenCanvas
   // (see <script type="text/worker" id="worker-src"> above). Main thread
@@ -2042,25 +2285,57 @@ self.onmessage = function (e) {
   let currentEl = null;         // HTMLAudioElement when in file mode
   let micStream = null;
 
+  let audioUnlocked = false;
+  // Create the AudioContext + analysers eagerly at page load so the context
+  // starts in the "suspended" state (no user gesture yet). This matches the
+  // pattern of the manual-load flow (file picker change event is async, so
+  // the context gets created out-of-gesture there too) — and on iOS that
+  // pattern is what causes the audio session to allocate to the device
+  // speaker at first play(). Creating the context inside a gesture, on iOS,
+  // routes audio to whatever output happens to be "primed" at that moment
+  // and won't fall back to the built-in speaker. Chrome may log an
+  // AudioContext-not-allowed warning here; it's informational, not blocking.
+  function initAudioGraph() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.85;
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    timeData = new Uint8Array(analyser.fftSize);
+    transientAnalyser = audioCtx.createAnalyser();
+    transientAnalyser.fftSize = 1024;          // smaller window = faster response
+    transientAnalyser.smoothingTimeConstant = 0.3;
+    transientFreqData = new Uint8Array(transientAnalyser.frequencyBinCount);
+  }
+  initAudioGraph();
+
   function ensureCtx() {
-    if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.85;
-      freqData = new Uint8Array(analyser.frequencyBinCount);
-      timeData = new Uint8Array(analyser.fftSize);
-      transientAnalyser = audioCtx.createAnalyser();
-      transientAnalyser.fftSize = 1024;          // smaller window = faster response
-      transientAnalyser.smoothingTimeConstant = 0.3;
-      transientFreqData = new Uint8Array(transientAnalyser.frequencyBinCount);
-    }
+    if (!audioCtx) initAudioGraph();
     if (audioCtx.state === 'suspended') audioCtx.resume();
+    // iOS Safari "silent buffer" unlock. Only fires inside the gesture so
+    // we don't trip the autoplay-policy warning at page load.
+    if (!audioUnlocked) {
+      try {
+        const buf = audioCtx.createBuffer(1, 1, 22050);
+        const src = audioCtx.createBufferSource();
+        src.buffer = buf;
+        src.connect(audioCtx.destination);
+        if (typeof src.start === 'function') src.start(0);
+        else if (typeof src.noteOn === 'function') src.noteOn(0); // Safari legacy
+        audioUnlocked = true;
+      } catch (_) { /* not fatal */ }
+    }
   }
 
   function teardownSource() {
     if (currentSource) { try { currentSource.disconnect(); } catch(e){} currentSource = null; }
-    if (currentEl) { currentEl.pause(); currentEl.src = ''; currentEl = null; }
+    if (currentEl) {
+      currentEl.pause();
+      currentEl.src = '';
+      if (currentEl.parentNode) currentEl.parentNode.removeChild(currentEl);
+      currentEl = null;
+    }
     if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     playBtn.disabled = true;
     playBtn.textContent = 'play';
@@ -2071,20 +2346,164 @@ self.onmessage = function (e) {
   }
 
   function loadFile(file) {
+    loadFromUrl(URL.createObjectURL(file), file.name);
+  }
+
+  // Buffer-source-backed audio player. Mimics the slice of the
+  // HTMLAudioElement interface our code relies on (play/pause/paused/
+  // duration/currentTime/addEventListener for play/pause/ended/
+  // loadedmetadata/timeupdate). Used on iOS where MediaElementSource has
+  // a known WebKit bug: the audio plays through system audio but doesn't
+  // pipe through the Web Audio graph, so the analyser reads zeros. With
+  // a decoded AudioBuffer fed into AudioBufferSourceNode, the audio goes
+  // through the graph properly.
+  function createBufferAudioPlayer(url) {
+    const _listeners = { play: [], pause: [], ended: [], loadedmetadata: [], timeupdate: [], _bufferReady: [] };
+    let _buffer = null;
+    let _node = null;
+    let _startCtxTime = 0;
+    let _startOffset = 0;
+    let _paused = true;
+    let _tickInterval = null;
+
+    function _fire(event) {
+      const lst = _listeners[event];
+      if (!lst) return;
+      for (const fn of lst.slice()) { try { fn(); } catch (_) {} }
+    }
+    function _start() {
+      if (!_buffer) return;
+      _node = audioCtx.createBufferSource();
+      _node.buffer = _buffer;
+      _node.connect(analyser);
+      _node.connect(transientAnalyser);
+      analyser.connect(audioCtx.destination);
+      _node.start(0, _startOffset);
+      _startCtxTime = audioCtx.currentTime;
+      const myNode = _node;
+      _node.onended = function () {
+        // Distinguish a natural end-of-buffer from an explicit pause/seek
+        // (we null out _node before stop() in those cases).
+        if (_node === myNode) {
+          _node = null;
+          _paused = true;
+          _startOffset = _buffer ? _buffer.duration : 0;
+          if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
+          _fire('ended');
+        }
+      };
+      _paused = false;
+      if (!_tickInterval) _tickInterval = setInterval(() => _fire('timeupdate'), 250);
+      _fire('play');
+    }
+    function _stop() {
+      if (!_node) { _paused = true; return; }
+      const elapsed = audioCtx.currentTime - _startCtxTime;
+      _startOffset = Math.min(audio.duration || 0, _startOffset + Math.max(0, elapsed));
+      const dyingNode = _node;
+      _node = null;
+      try { dyingNode.stop(); } catch (_) {}
+      try { dyingNode.disconnect(); } catch (_) {}
+      _paused = true;
+      if (_tickInterval) { clearInterval(_tickInterval); _tickInterval = null; }
+    }
+
+    const audio = {
+      src: url,
+      duration: 0,
+      parentNode: null,            // not in DOM; teardownSource skips removeChild
+      addEventListener(event, fn) {
+        if (_listeners[event]) _listeners[event].push(fn);
+      },
+      removeEventListener(event, fn) {
+        const lst = _listeners[event];
+        if (!lst) return;
+        const i = lst.indexOf(fn);
+        if (i >= 0) lst.splice(i, 1);
+      },
+      play() {
+        return new Promise((resolve, reject) => {
+          if (_buffer) {
+            if (_paused) _start();
+            resolve();
+          } else {
+            _listeners._bufferReady.push(() => { if (_paused) _start(); resolve(); });
+          }
+        });
+      },
+      pause() {
+        if (_paused) return;
+        _stop();
+        _fire('pause');
+      },
+    };
+    Object.defineProperty(audio, 'paused', { get: () => _paused });
+    Object.defineProperty(audio, 'currentTime', {
+      get() {
+        if (_paused || !_node) return _startOffset;
+        return Math.min(audio.duration || 0, _startOffset + (audioCtx.currentTime - _startCtxTime));
+      },
+      set(t) {
+        const wasPlaying = !_paused;
+        if (wasPlaying) _stop();
+        _startOffset = Math.max(0, Math.min(audio.duration || 0, +t || 0));
+        if (wasPlaying) _start();
+        _fire('timeupdate');
+      },
+    });
+
+    fetch(url)
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+      .then(arr => audioCtx.decodeAudioData(arr))
+      .then(buffer => {
+        _buffer = buffer;
+        audio.duration = buffer.duration;
+        _fire('loadedmetadata');
+        const queued = _listeners._bufferReady.slice();
+        _listeners._bufferReady.length = 0;
+        for (const fn of queued) fn();
+      })
+      .catch(err => {
+        console.error('[ambient_viz] decode err:', err);
+        statusEl.textContent = 'decode err: ' + (err && (err.message || err.name) || 'unknown');
+      });
+
+    return audio;
+  }
+
+  // Load + wire up an audio source by URL (same-origin or blob:). Used by
+  // loadFile (drag/drop + file picker via URL.createObjectURL) and by the
+  // initial autoload from a same-origin path next to index.html.
+  // On iOS we route through createBufferAudioPlayer (decodeAudioData +
+  // AudioBufferSourceNode) because MediaElementSource on iOS WebKit doesn't
+  // pipe data through the Web Audio graph — analyser reads zeros even when
+  // audio is audible. On other browsers, MediaElementSource is preferred:
+  // streaming, no full-decode memory cost.
+  function loadFromUrl(url, displayName) {
     ensureCtx();
     teardownSource();
-    const url = URL.createObjectURL(file);
-    const audio = new Audio();
-    audio.src = url;
-    audio.crossOrigin = 'anonymous';
-    audio.loop = false;
+
+    let audio;
+    if (isiOS) {
+      audio = createBufferAudioPlayer(url);
+    } else {
+      audio = new Audio();
+      audio.src = url;
+      audio.loop = false;
+      audio.preload = 'auto';
+      audio.playsInline = true;
+      audio.setAttribute('playsinline', '');
+      audio.setAttribute('webkit-playsinline', '');
+      audio.style.display = 'none';
+      document.body.appendChild(audio);
+      const src = audioCtx.createMediaElementSource(audio);
+      src.connect(analyser);
+      src.connect(transientAnalyser);
+      analyser.connect(audioCtx.destination);
+      currentSource = src;
+    }
     currentEl = audio;
-    const src = audioCtx.createMediaElementSource(audio);
-    src.connect(analyser);
-    src.connect(transientAnalyser);
-    analyser.connect(audioCtx.destination);
-    currentSource = src;
-    statusEl.textContent = file.name;
+    statusEl.textContent = displayName;
     playBtn.disabled = false;
     audio.addEventListener('play', () => playBtn.textContent = 'pause');
     audio.addEventListener('pause', () => playBtn.textContent = 'play');
@@ -3369,27 +3788,85 @@ self.onmessage = function (e) {
     if (e.key === 't' || e.key === 'T') setEditorVisible(!editorVisible);
   });
 
-  // === worker bootstrap ===
-  // Worker source is inlined as <script type="text/worker" id="worker-src">
-  // so this stays a single self-contained file (file:// works). We Blob-URL
-  // the source, transfer the canvas to the worker via OffscreenCanvas, and
-  // hand it the current PARAMS values (post-restoreSession) as the initial
-  // state. Subsequent param changes flow through setParam → 'param' messages
-  // and applyAutomation → batched 'params' messages. Audio data flows from
+  // === renderer bootstrap ===
+  // Two paths:
+  //   - Default (desktop, Android): a Web Worker owns the canvas via
+  //     transferControlToOffscreen and runs the renderer there. Main posts
+  //     audio + param messages each frame; worker posts back a debug snapshot
+  //     periodically.
+  //   - iOS Safari (and other WebKit-on-iOS browsers): Worker OffscreenCanvas
+  //     has incomplete path-API support — flyouts/lattice/sparks/3D meshes
+  //     don't render. So we instead `new Function(...)` the worker source on
+  //     the main thread (which exposes runRenderer) and call it directly with
+  //     the live DOM canvas. The renderer uses its own rAF; we route messages
+  //     via a host stub. Audio still works fine on main either way.
+  // Subsequent param changes flow through setParam → 'param' messages and
+  // applyAutomation → batched 'params' messages. Audio data flows from
   // bands() each main rAF as 'audio' messages.
-  {
-    const _wsrc = document.getElementById('worker-src').textContent;
+  const _wsrc = document.getElementById('worker-src').textContent;
+  // iOS detection — covers iPhone/iPad/iPod, "iPad as Mac" (iPadOS 13+
+  // identifies as Macintosh but reports touch points), and Chrome/Firefox
+  // on iOS (which use WebKit and identify as CriOS/FxiOS). Errs on the
+  // permissive side: false positives for "iOS" just route Android/desktop
+  // through main-thread render, which works fine — the only cost is losing
+  // worker offload. (`isiOS` is declared near the top of the IIFE so audio
+  // code can also branch on it.)
+  const _initParams = {};
+  for (const name of PARAM_NAMES) _initParams[name] = manual[name];
+
+  // Surface the active render path in the status text so it's debuggable
+  // from the device itself (iOS inspector requires a Mac + USB cable).
+  // Cleared once an audio source is loaded.
+  statusEl.textContent = isiOS ? '[main render]' : '[worker render]';
+  // Console-level diagnostics (visible via Mac Safari → Develop → [device]):
+  console.log('[ambient_viz] ua=' + _ua);
+  console.log('[ambient_viz] platform=' + navigator.platform +
+    ', maxTouchPoints=' + navigator.maxTouchPoints +
+    ', isiOS=' + isiOS +
+    ', hasOffscreenCanvas=' + (typeof OffscreenCanvas !== 'undefined') +
+    ', hasWorker=' + (typeof Worker !== 'undefined'));
+
+  function bootstrapMainRenderer() {
+    console.log('[ambient_viz] bootstrapping main renderer');
+    new Function(_wsrc)();
+    if (typeof globalThis._workerRunRenderer !== 'function') {
+      throw new Error('renderer fn missing after eval');
+    }
+    console.log('[ambient_viz] runRenderer fn present, invoking with main host');
+    let mainHandler = null;
+    const mainHost = {
+      set onmessage(h) { mainHandler = h; },
+      postMessage(msg) {
+        if (msg && msg.type === 'debug') workerDebug = msg;
+      },
+    };
+    globalThis._workerRunRenderer(mainHost);
+    if (!mainHandler) {
+      throw new Error('renderer did not register host.onmessage');
+    }
+    renderWorker = {
+      postMessage(msg) {
+        if (mainHandler) mainHandler({ data: msg });
+      },
+    };
+    console.log('[ambient_viz] posting init', { dpr, W, H });
+    renderWorker.postMessage({
+      type: 'init',
+      canvas: canvas,
+      dpr, W, H,
+      params: _initParams,
+    });
+    console.log('[ambient_viz] main renderer init complete');
+  }
+
+  function bootstrapWorkerRenderer() {
     const _wblob = new Blob([_wsrc], { type: 'application/javascript' });
     const _wurl = URL.createObjectURL(_wblob);
     renderWorker = new Worker(_wurl);
     renderWorker.onmessage = (e) => {
       const msg = e.data;
-      if (msg.type === 'debug') {
-        workerDebug = msg;
-      }
+      if (msg.type === 'debug') workerDebug = msg;
     };
-    const _initParams = {};
-    for (const name of PARAM_NAMES) _initParams[name] = manual[name];
     const _offscreen = canvas.transferControlToOffscreen();
     renderWorker.postMessage({
       type: 'init',
@@ -3397,6 +3874,21 @@ self.onmessage = function (e) {
       dpr, W, H,
       params: _initParams,
     }, [_offscreen]);
+  }
+
+  if (isiOS) {
+    try {
+      bootstrapMainRenderer();
+    } catch (e) {
+      // Surface the error so it's diagnosable on the device.
+      statusEl.textContent = '[main render err: ' + (e && (e.message || e.name)) + ']';
+      // Fall back to worker path so SOMETHING renders.
+      try { bootstrapWorkerRenderer(); } catch (e2) {
+        statusEl.textContent += ' [worker err: ' + (e2 && (e2.message || e2.name)) + ']';
+      }
+    }
+  } else {
+    bootstrapWorkerRenderer();
   }
 
   // === main render tick ===
@@ -3433,6 +3925,71 @@ self.onmessage = function (e) {
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+
+  // === Autoload default track ===
+  // Modern browsers block AudioContext creation/resume without a user
+  // gesture (especially on https), so we defer the entire audio-graph
+  // setup — including the AudioContext — until the first click/keypress.
+  // The timeline JSON is fetched eagerly in the background since it's a
+  // plain HTTP fetch with no audio dependency.
+  //
+  // iOS Safari/Chrome are stricter than desktop: audio.play() must be
+  // invoked SYNCHRONOUSLY inside the gesture handler. Any await between
+  // the gesture and the play call breaks the user-activation chain and
+  // the play promise gets rejected. So play() runs immediately after
+  // loadFromUrl, and the timeline JSON is applied via .then() afterward
+  // (lanes are read each frame, so applying them slightly late is fine).
+  //
+  // Drag-and-drop and the file picker still replace the source via loadFile.
+  (function tryAutoload() {
+    const audioUrl = '20251006_arrangement_1.mp3';
+    const timelineUrl = '20251006_arrangement_1.timeline.json';
+    const timelinePromise = fetch(timelineUrl)
+      .then(r => r.ok ? r.json() : null)
+      .catch(() => null);
+    let started = false;
+    const startOnGesture = (e) => {
+      if (started) return;
+      started = true;
+      console.log('[ambient_viz] first gesture, starting audio. event=' + (e && e.type) + ' target=' + (e && e.target && e.target.tagName));
+      window.removeEventListener('pointerdown', startOnGesture, true);
+      window.removeEventListener('keydown', startOnGesture, true);
+      window.removeEventListener('touchstart', startOnGesture, true);
+      try {
+        loadFromUrl(audioUrl, audioUrl);
+        console.log('[ambient_viz] audio loaded, audioCtx.state=' + (audioCtx && audioCtx.state));
+        // If the gesture was on the play button, its own click handler
+        // will toggle playback — don't double-fire here (would pause the
+        // freshly-started track on the same click).
+        const onPlayBtn = e && e.target && playBtn &&
+          (e.target === playBtn || (playBtn.contains && playBtn.contains(e.target)));
+        if (!onPlayBtn && currentEl) {
+          console.log('[ambient_viz] calling currentEl.play()');
+          // Synchronous within the gesture — required for iOS.
+          currentEl.play().then(() => {
+            console.log('[ambient_viz] play() resolved');
+          }).catch(err => {
+            // Surface play errors on the device (e.g. iOS NotAllowedError).
+            console.error('[ambient_viz] play() rejected:', err);
+            statusEl.textContent = 'play err: ' + (err && (err.message || err.name) || 'unknown');
+          });
+        }
+      } catch (e2) {
+        console.error('[ambient_viz] startOnGesture threw:', e2);
+        statusEl.textContent = 'load err: ' + (e2 && (e2.message || e2.name) || 'unknown');
+      }
+      // Apply timeline asynchronously after play() has been initiated;
+      // lanes are evaluated each frame so a small delay is harmless.
+      timelinePromise.then(timelineObj => {
+        if (timelineObj) {
+          try { loadFromObject(timelineObj); } catch (_) {}
+        }
+      });
+    };
+    window.addEventListener('pointerdown', startOnGesture, true);
+    window.addEventListener('keydown', startOnGesture, true);
+    window.addEventListener('touchstart', startOnGesture, true);
+  })();
 
 })();
 </script>
