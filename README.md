@@ -18,13 +18,34 @@ Venetian Snares.
     `static/index.html` is a copy of this file's data. Regenerate via
     `node tools/preprocess.js`, then paste into `static/index.html`.
   - `verify.js` — renders `silhouette.js` to `/tmp/verify.png` for sanity checks.
-- `server/` — Node SSE server (Pi GPIO → browser); see `server/README.md`.
+- `server/` — Node SSE bridge: serves `static/` over HTTP and relays kiosk
+  sensor events to the browser via SSE. Pure Node stdlib. See `server/README.md`.
+- `python/` — Python sensor sidecar for the kiosk build. Reads GPIO/I²C on
+  a Pi, POSTs events to the Node bridge. See `python/README.md`.
+- `hardware-handoff.md` — canonical hardware spec for the kiosk build
+  (sensors, pin map, wiring, tuning).
 
-To run: open `static/index.html` directly in a browser (no server needed for
-the visualizer itself), or run the Node server and visit `http://localhost:8080/`
-to also get GPIO input over SSE. File loading is via the file input or
-drag-drop. Mic input is supported but doesn't play audio out (avoids
-feedback).
+## Two ways to run
+
+**Standalone visualizer** — open `static/index.html` directly in a
+browser. No server, no Python, no hardware. File loading is via the file
+input or drag-drop; mic input is supported but doesn't play audio out
+(avoids feedback).
+
+**Kiosk mode** — three-process pipeline on a Raspberry Pi:
+
+```
+[Pi sensors] ──► [python/ sidecar] ── POST /ingest ──► [server/] ── /events ──► [Chromium]
+   AM312 PIR        gpiozero          JSON {name,value}  Node SSE   EventSource    visualizer
+   VL53L1X ToF      pigpio                                bridge     window.AMBIENT_INPUTS
+   HR202+TLC555     CircuitPython
+   MPR121
+```
+
+CPU budget on a Pi 4: visualizer takes 2–3 cores under load; Node bridge
+< 0.1% of one core; Python sidecar 1–3%; `pigpiod` 1–3%. The kiosk
+pipeline does not measurably affect the visualizer's frame budget — see
+`PI_PERFORMANCE.md` for the levers that actually move the needle.
 
 ## High-level architecture
 

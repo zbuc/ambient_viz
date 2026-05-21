@@ -222,3 +222,30 @@ Both can still be overridden live from the dev panel after load.
 To go further on a Pi, the next levers worth pulling (in order) are:
 `mesh3dCount` → 0, `grainAlpha` → 0.2, `FLYOUT_COUNT` → 5
 (code change), `sliceBurstScale` → 0.5.
+
+---
+
+## Kiosk pipeline overhead
+
+When running with the Node SSE bridge (`server/`) and Python sensor
+sidecar (`python/`), the additional steady-state cost on a Pi 4 is:
+
+| Process | CPU (1 core) | Memory |
+|---|---|---|
+| Node bridge | < 0.1% | ~50 MB |
+| Python sidecar | 1–3% | ~60 MB |
+| `pigpiod` daemon | 1–3% | small |
+
+Together: ~5% of one core, ~110 MB. The Pi 4's 4 cores easily absorb
+this — Chromium continues to spread its renderer/compositor/raster/GPU
+processes across 2–3 cores, with the 4th left over for the sensor stack
+and OS. Sensor I/O is 50 Hz of I²C reads and a handful of edges; against
+~2 million Canvas2D pixel ops per frame it's rounding error.
+
+**Footgun to avoid in the breath driver** — `BreathDriver` registers
+the pigpio rising-edge callback once and samples a running counter
+every 200 ms. Do not rewrite it to the per-window setup/teardown
+pattern shown in `hardware-handoff.md`'s example: at the worst-case
+~10 kHz edge rate, callback setup/teardown churn becomes a meaningful
+fraction of one core. The current implementation comment in
+`python/ambient_kiosk/sensors/breath.py` flags this; preserve it.
