@@ -1462,7 +1462,8 @@ let particleCanvas, particleCtx;
 // drawImage). Per-frame intensity (was: threshold-driven sparse vs.
 // dense pixels) is approximated via globalAlpha modulation.
 const NOISE_RING = 24;
-let noiseRing = [];      // OffscreenCanvas[NOISE_RING]
+let noiseRing = null;    // legacy (per-tile OffscreenCanvas[]); nulled after atlas build
+let noiseAtlas = null;   // single OffscreenCanvas holding all NOISE_RING tiles
 let noiseRingIdx = 0;
 let scanlineTile, scanlinePattern;
 let ditherCanvas, ditherGL;
@@ -1480,6 +1481,7 @@ let ditherCanvas, ditherGL;
 let _ditherProg, _ditherQuad, _ditherSrcTex, _ditherBayerTex;
 let _ditherUTex, _ditherUBayer, _ditherUSize, _ditherUOffset, _ditherAPos;
 let _ditherUGrain, _ditherUGrainAlpha, _ditherUScanlineAlpha, _ditherUScanlinePeriod;
+let _ditherUGrainTile;  // vec4: (offsetX, offsetY, scaleX, scaleY) for grain atlas tile
 let _ditherTwistProg, _ditherTwistUTex, _ditherTwistURes;
 let _ditherTwistUTwist, _ditherTwistUPinch, _ditherTwistAPos;
 let _ditherFbo, _ditherIntermediateTex, _ditherGrainTex;
@@ -1557,6 +1559,14 @@ const MESH_VERT_STRIDE = 4;
 let _blitProg, _blitAPos, _blitUDest, _blitUSrc, _blitURes;
 let _blitUCenter, _blitUAngle, _blitUTex;
 let _blitQuadBuf;
+// Particle sprite FBO. Replaces the per-frame texImage2D(particleCanvas)
+// upload: the morphing shape now draws directly into _lattSpriteTex via
+// an FBO. _particleProg renders the polygon as a TRIANGLE_FAN; _particleVbo
+// holds the per-frame vertex positions in particle-tile-pixel coords.
+let _particleFbo;
+let _particleProg, _particleAPos, _particleURes;
+let _particleVbo;
+let _particleVboData = null;  // Float32Array of (SHAPE_N + 2) * 2 floats
 let freezeCanvas, freezeCtx;
 
 // Probability that a freshly-spawned flyout uses some silhouette other
@@ -1684,13 +1694,21 @@ function initMeshes3d() {
 // "dense vs sparse" character is lost, replaced by "brighter vs dimmer
 // at uniform density." Acceptable for ambient grain.
 const _NOISE_BAKE_DENSITY = 0.45;  // midpoint of the original 0.25..0.70 range
+// Grain atlas: all NOISE_RING tiles are packed into a single OffscreenCanvas
+// of NOISE_ATLAS_COLS × NOISE_ATLAS_ROWS tiles, uploaded ONCE to
+// _ditherGrainTex (see uploadGrainAtlas). Per frame the dither shader
+// samples the atlas with a uTileOffset uniform; no per-frame texImage2D
+// upload. Atlas size = (cols·GRAIN_RES) × (rows·GRAIN_RES) pixels.
+const NOISE_ATLAS_COLS = 6;
+const NOISE_ATLAS_ROWS = 4;  // 6 × 4 = 24 == NOISE_RING
 function setupNoiseRing() {
-  noiseRing = [];
   const thresh = 0.04 + _NOISE_BAKE_DENSITY * 0.20;
+  const atlasW = NOISE_ATLAS_COLS * GRAIN_RES;
+  const atlasH = NOISE_ATLAS_ROWS * GRAIN_RES;
+  noiseAtlas = new OffscreenCanvas(atlasW, atlasH);
+  const atlasCtx = noiseAtlas.getContext('2d');
   for (let n = 0; n < NOISE_RING; n++) {
-    const oc = new OffscreenCanvas(GRAIN_RES, GRAIN_RES);
-    const octx = oc.getContext('2d');
-    const img = octx.createImageData(GRAIN_RES, GRAIN_RES);
+    const img = atlasCtx.createImageData(GRAIN_RES, GRAIN_RES);
     const data = img.data;
     for (let i = 0; i < data.length; i += 4) {
       let v = 0;
@@ -1698,10 +1716,13 @@ function setupNoiseRing() {
       data[i] = data[i + 1] = data[i + 2] = v;
       data[i + 3] = 255;
     }
-    octx.putImageData(img, 0, 0);
-    noiseRing.push(oc);
+    const col = n % NOISE_ATLAS_COLS;
+    const row = Math.floor(n / NOISE_ATLAS_COLS);
+    atlasCtx.putImageData(img, col * GRAIN_RES, row * GRAIN_RES);
   }
   noiseRingIdx = 0;
+  // Drop the legacy per-tile array — atlas is the only source now.
+  noiseRing = null;
 }
 
 function spawnSliceBurst(intensity) {
@@ -1851,6 +1872,11 @@ function setupDither() {
     'uniform float uGrainAlpha;' +
     'uniform float uScanlineAlpha;' +
     'uniform float uScanlinePeriod;' +
+    // Grain atlas tile selector: (offsetX, offsetY, scaleX, scaleY). The
+    // grain texture is an atlas of NOISE_RING tiles; per-frame we set the
+    // offset to point at the active tile. Scale is constant once the
+    // atlas dimensions are known.
+    'uniform vec4 uGrainTile;' +
     'void main() {' +
     '  float lum = texture2D(uTex, vUv).r;' +
     '  vec2 pix = vUv * uTexSize;' +
@@ -1863,8 +1889,10 @@ function setupDither() {
     '  lum *= scanlineMul;' +
     // Additive grain (matches the original Canvas2D \'lighter\' composite
     // semantics — the noise tile is grayscale, alpha=1; globalAlpha
-    // modulated brightness).
-    '  vec3 grainSample = texture2D(uGrain, vUv).rgb;' +
+    // modulated brightness). Sample the atlas tile at uGrainTile.xy with
+    // per-tile size uGrainTile.zw.
+    '  vec2 grainUv = vUv * uGrainTile.zw + uGrainTile.xy;' +
+    '  vec3 grainSample = texture2D(uGrain, grainUv).rgb;' +
     '  lum = clamp(lum + grainSample.r * uGrainAlpha, 0.0, 1.0);' +
     // Bayer threshold for binary dither.
     '  vec2 byx = mod(pix + uOffset, 8.0);' +
@@ -1906,6 +1934,7 @@ function setupDither() {
   _ditherUGrainAlpha     = ditherGL.getUniformLocation(_ditherProg, 'uGrainAlpha');
   _ditherUScanlineAlpha  = ditherGL.getUniformLocation(_ditherProg, 'uScanlineAlpha');
   _ditherUScanlinePeriod = ditherGL.getUniformLocation(_ditherProg, 'uScanlinePeriod');
+  _ditherUGrainTile      = ditherGL.getUniformLocation(_ditherProg, 'uGrainTile');
   _ditherAPos            = ditherGL.getAttribLocation(_ditherProg, 'aPos');
 
   _ditherQuad = ditherGL.createBuffer();
@@ -1978,9 +2007,21 @@ function setupDither() {
   ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_MAG_FILTER, ditherGL.LINEAR);
   ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_WRAP_S, ditherGL.CLAMP_TO_EDGE);
   ditherGL.texParameteri(ditherGL.TEXTURE_2D, ditherGL.TEXTURE_WRAP_T, ditherGL.CLAMP_TO_EDGE);
+  // Upload the full grain atlas ONCE. Per-frame the dither shader picks
+  // a tile via uGrainTile (uniform vec4 = offsetXY, scaleXY). setupDither
+  // depends on setupNoiseRing having already built noiseAtlas (call
+  // order in init: setupOffscreens → setupDither).
+  if (noiseAtlas) {
+    ditherGL.pixelStorei(ditherGL.UNPACK_FLIP_Y_WEBGL, true);
+    ditherGL.pixelStorei(ditherGL.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    ditherGL.texImage2D(
+      ditherGL.TEXTURE_2D, 0, ditherGL.RGBA,
+      ditherGL.RGBA, ditherGL.UNSIGNED_BYTE, noiseAtlas
+    );
+  }
 }
 
-function applyDither(offX, offY, twist, pinch, grainTile, grainAlpha, scanlineAlpha, scanlinePeriod) {
+function applyDither(offX, offY, twist, pinch, grainTileIdx, grainAlpha, scanlineAlpha, scanlinePeriod) {
   if (noGL) return;
   const dw = ditherCanvas.width;
   const dh = ditherCanvas.height;
@@ -2003,12 +2044,8 @@ function applyDither(offX, offY, twist, pinch, grainTile, grainAlpha, scanlineAl
     srcTex = _ditherSrcTex;
   }
 
-  // ----- Pass 0b: upload the current noise-ring tile (~12 KB; small).
-  if (grainTile) {
-    gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_2D, _ditherGrainTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, grainTile);
-  }
+  // Grain atlas is uploaded ONCE at setup; per-frame we just pick the
+  // tile via the uGrainTile uniform set in pass 2 below.
 
   // ----- Pass 1: warp source into the intermediate FBO texture.
   gl.bindFramebuffer(gl.FRAMEBUFFER, _ditherFbo);
@@ -2048,6 +2085,16 @@ function applyDither(offX, offY, twist, pinch, grainTile, grainAlpha, scanlineAl
   gl.uniform1f(_ditherUGrainAlpha, grainAlpha || 0);
   gl.uniform1f(_ditherUScanlineAlpha, scanlineAlpha || 0);
   gl.uniform1f(_ditherUScanlinePeriod, scanlinePeriod || 2);
+  // Grain atlas tile selector: scale is constant (one tile = 1/cols ×
+  // 1/rows of the atlas), offset selects the current tile in the ring.
+  const _gtIdx = grainTileIdx | 0;
+  const _gtCol = _gtIdx % NOISE_ATLAS_COLS;
+  const _gtRow = (_gtIdx / NOISE_ATLAS_COLS) | 0;
+  gl.uniform4f(
+    _ditherUGrainTile,
+    _gtCol / NOISE_ATLAS_COLS, _gtRow / NOISE_ATLAS_ROWS,
+    1 / NOISE_ATLAS_COLS, 1 / NOISE_ATLAS_ROWS
+  );
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
   // Composite to main canvas.
@@ -2193,14 +2240,63 @@ function setupLattice() {
 
     _lattInstBuf = lattGL.createBuffer();
 
+    // _lattSpriteTex is now the color attachment of a particle FBO: the
+    // morphing shape renders into it each frame via _particleProg, then
+    // the lattice fragment samples it as before. Eliminates the
+    // per-frame texImage2D(particleCanvas) upload (Phase 3 follow-up).
     _lattSpriteTex = lattGL.createTexture();
     lattGL.bindTexture(lattGL.TEXTURE_2D, _lattSpriteTex);
+    lattGL.texImage2D(
+      lattGL.TEXTURE_2D, 0, lattGL.RGBA,
+      particleTileSize, particleTileSize, 0,
+      lattGL.RGBA, lattGL.UNSIGNED_BYTE, null
+    );
     // LINEAR matches Canvas2D's bilinear drawImage filtering — important
     // for sub-pixel positions (jitter). NEAREST would visibly pixelate.
     lattGL.texParameteri(lattGL.TEXTURE_2D, lattGL.TEXTURE_MIN_FILTER, lattGL.LINEAR);
     lattGL.texParameteri(lattGL.TEXTURE_2D, lattGL.TEXTURE_MAG_FILTER, lattGL.LINEAR);
     lattGL.texParameteri(lattGL.TEXTURE_2D, lattGL.TEXTURE_WRAP_S, lattGL.CLAMP_TO_EDGE);
     lattGL.texParameteri(lattGL.TEXTURE_2D, lattGL.TEXTURE_WRAP_T, lattGL.CLAMP_TO_EDGE);
+
+    _particleFbo = lattGL.createFramebuffer();
+    lattGL.bindFramebuffer(lattGL.FRAMEBUFFER, _particleFbo);
+    lattGL.framebufferTexture2D(
+      lattGL.FRAMEBUFFER, lattGL.COLOR_ATTACHMENT0,
+      lattGL.TEXTURE_2D, _lattSpriteTex, 0
+    );
+    const pFbStatus = lattGL.checkFramebufferStatus(lattGL.FRAMEBUFFER);
+    if (pFbStatus !== lattGL.FRAMEBUFFER_COMPLETE) {
+      throw new Error('particle FBO incomplete: 0x' + pFbStatus.toString(16));
+    }
+    lattGL.bindFramebuffer(lattGL.FRAMEBUFFER, null);
+
+    // Particle program: maps per-vertex (px, py) in particle-tile-pixel
+    // coords (0..particleTileSize) to NDC with the standard y-flip so the
+    // texture orientation matches the legacy FLIP_Y=true upload (lattice
+    // shader's vUv math is unchanged). Fragment outputs premultiplied
+    // white at alpha 0.95, equivalent to the original 'rgba(255,255,255,
+    // 0.95)' fillStyle + PREMULTIPLY_ALPHA=true upload.
+    const PARTICLE_VS_SRC =
+      'attribute vec2 aPos;' +
+      'uniform vec2 uResolution;' +
+      'void main() {' +
+      '  vec2 ndc = (aPos / uResolution) * 2.0 - 1.0;' +
+      '  gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);' +
+      '}';
+    const PARTICLE_FS_SRC =
+      'precision mediump float;' +
+      'void main() { gl_FragColor = vec4(0.95, 0.95, 0.95, 0.95); }';
+    _particleProg = lattGL.createProgram();
+    lattGL.attachShader(_particleProg, compile(lattGL.VERTEX_SHADER, PARTICLE_VS_SRC));
+    lattGL.attachShader(_particleProg, compile(lattGL.FRAGMENT_SHADER, PARTICLE_FS_SRC));
+    lattGL.linkProgram(_particleProg);
+    if (!lattGL.getProgramParameter(_particleProg, lattGL.LINK_STATUS)) {
+      throw new Error('particle program link: ' + lattGL.getProgramInfoLog(_particleProg));
+    }
+    _particleAPos = lattGL.getAttribLocation(_particleProg, 'aPos');
+    _particleURes = lattGL.getUniformLocation(_particleProg, 'uResolution');
+    _particleVbo = lattGL.createBuffer();
+    _particleVboData = new Float32Array((SHAPE_N + 2) * 2);
 
     // ----- Spark program (shares this GL context with lattice).
     // Radial falloff computed in the fragment shader from corner UV; no
@@ -2562,13 +2658,11 @@ function applyLattice(instancePos, instanceCount) {
   if (!_lattUseGL || instanceCount <= 0) return false;
   const gl = lattGL;
 
-  // Sprite upload. particleCanvas is the small (~48-80 px) shape canvas
-  // that's redrawn per frame in the existing lattice block.
+  // The sprite texture is populated by renderParticleSprite() earlier in
+  // the frame (FBO render). No per-frame texImage2D upload from
+  // particleCanvas — that path is the Canvas2D-fallback only now.
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, _lattSpriteTex);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, particleCanvas);
 
   // Instance buffer upload.
   gl.bindBuffer(gl.ARRAY_BUFFER, _lattInstBuf);
@@ -2801,6 +2895,47 @@ function applyFlyouts() {
   _lattInstExt.vertexAttribDivisorANGLE(_flyAInst0, 0);
   _lattInstExt.vertexAttribDivisorANGLE(_flyAInst1, 0);
   return true;
+}
+
+// Render the morphing shape into _lattSpriteTex via _particleFbo. Replaces
+// the Canvas2D path (particleCtx.fill + texImage2D upload) on the GL path.
+// Called once per frame in the lattice section, before applyLattice. After
+// it returns, _contentFbo is rebound and the additive blend is restored so
+// the rest of the content section can keep accumulating into the FBO.
+function renderParticleSprite() {
+  if (!_lattUseGL) return;
+  const gl = lattGL;
+  // Pack the polygon: center + SHAPE_N outer vertices + closing vertex
+  // (= first outer, so TRIANGLE_FAN closes the loop without a seam).
+  _particleVboData[0] = particleHalf;
+  _particleVboData[1] = particleHalf;
+  for (let k = 0; k < SHAPE_N * 2; k += 2) {
+    _particleVboData[2 + k]     = particleHalf + shapeBuffer[k];
+    _particleVboData[2 + k + 1] = particleHalf + shapeBuffer[k + 1];
+  }
+  _particleVboData[2 + SHAPE_N * 2]     = particleHalf + shapeBuffer[0];
+  _particleVboData[2 + SHAPE_N * 2 + 1] = particleHalf + shapeBuffer[1];
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, _particleFbo);
+  gl.viewport(0, 0, particleTileSize, particleTileSize);
+  gl.disable(gl.BLEND);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  gl.useProgram(_particleProg);
+  gl.bindBuffer(gl.ARRAY_BUFFER, _particleVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, _particleVboData, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(_particleAPos);
+  gl.vertexAttribPointer(_particleAPos, 2, gl.FLOAT, false, 0, 0);
+  gl.uniform2f(_particleURes, particleTileSize, particleTileSize);
+  gl.drawArrays(gl.TRIANGLE_FAN, 0, SHAPE_N + 2);
+
+  // Restore: rebind content FBO, viewport, additive blend for the rest
+  // of the content section.
+  gl.bindFramebuffer(gl.FRAMEBUFFER, _contentFbo);
+  gl.viewport(0, 0, ditherCanvas.width, ditherCanvas.height);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
 }
 
 // Per-frame fade darken. Equivalent to the legacy
@@ -3510,15 +3645,23 @@ function frame(now) {
     for (let k = 0; k < SHAPE_N * 2; k++) {
       shapeBuffer[k] = (sFrom[k] + (sTo[k] - sFrom[k]) * morph) * pulseR;
     }
-    particleCtx.clearRect(0, 0, particleTileSize, particleTileSize);
-    particleCtx.fillStyle = 'rgba(255,255,255,0.95)';
-    particleCtx.beginPath();
-    particleCtx.moveTo(particleHalf + shapeBuffer[0], particleHalf + shapeBuffer[1]);
-    for (let k = 2; k < SHAPE_N * 2; k += 2) {
-      particleCtx.lineTo(particleHalf + shapeBuffer[k], particleHalf + shapeBuffer[k + 1]);
+    if (_lattUseGL) {
+      // Render the morphing polygon directly into _lattSpriteTex (via the
+      // particle FBO). No Canvas2D fill, no texImage2D upload.
+      renderParticleSprite();
+    } else {
+      // Canvas2D fallback path uses the OffscreenCanvas particleCanvas
+      // for per-stamp drawImage in the lattice loop below.
+      particleCtx.clearRect(0, 0, particleTileSize, particleTileSize);
+      particleCtx.fillStyle = 'rgba(255,255,255,0.95)';
+      particleCtx.beginPath();
+      particleCtx.moveTo(particleHalf + shapeBuffer[0], particleHalf + shapeBuffer[1]);
+      for (let k = 2; k < SHAPE_N * 2; k += 2) {
+        particleCtx.lineTo(particleHalf + shapeBuffer[k], particleHalf + shapeBuffer[k + 1]);
+      }
+      particleCtx.closePath();
+      particleCtx.fill();
     }
-    particleCtx.closePath();
-    particleCtx.fill();
     if (_lattUseGL) {
       // GL path: one instanced draw, accumulates into the shared content
       // GL canvas alongside sparks (and flyouts, when phase 2b lands).
@@ -3611,7 +3754,9 @@ function frame(now) {
   // Advance the grain ring index here so the per-frame tile selection
   // and treble-driven envelope match the prior behavior.
   _pmark('grn');
-  const grainTile = noiseRing[noiseRingIdx];
+  // Grain tile is picked by INDEX into the atlas now — no per-frame canvas
+  // upload. The atlas was uploaded once at setupDither.
+  const grainTileIdx = noiseRingIdx;
   noiseRingIdx = (noiseRingIdx + 1) % NOISE_RING;
   const grainDensity = 0.25 + smoothTreble * 0.45;
   const grainAlpha = Math.min(1, GRAIN_ALPHA * (grainDensity / _NOISE_BAKE_DENSITY));
@@ -3622,7 +3767,7 @@ function frame(now) {
     Math.floor(ditherPhaseY),
     currentTwist,
     currentPinch,
-    grainTile,
+    grainTileIdx,
     grainAlpha,
     SCANLINE_ALPHA,
     SCANLINE_PERIOD
