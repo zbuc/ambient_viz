@@ -4873,6 +4873,7 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
     kicksPerTwist: {
       type: 'continuous', def: 8,
       min: 1, max: 64, step: 1,
+      defaultCurve: 'step',
       fmt: v => v.toFixed(0), editor: true,
       setLive: v => setParam('kicksPerTwist', v),
     },
@@ -4903,7 +4904,6 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
       type: 'continuous', def: 80,
       min: 30, max: 200, step: 1,
       fmt: v => v.toFixed(0) + ' BPM', editor: true,
-      defaultCurve: 'step',
       setLive: v => setParam('bpm', v),
     },
   };
