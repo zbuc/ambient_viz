@@ -640,7 +640,11 @@ let FLASH_TRIGGER = 0.18;
 let COLOR_LERP = 0.01;
 let KICKS_PER_COLOR_CYCLE = 64;
 let KICKS_PER_SHAPE_CYCLE = 16;
+// Now interpreted as BEATS per twist half-cycle (wind-up or unwind),
+// driven by the authored `bpm` lane via beatClock. Kept under the old
+// `kicksPerTwist` name for save-file compatibility.
 let KICKS_PER_TWIST = 8;
+let CURRENT_BPM = 80;
 let MAX_TWIST_DEG = 720;
 let TWIST_PINCH = 0.3;
 // Critically-damped spring frequency for the twist/pinch easing. Settling
@@ -1366,13 +1370,15 @@ let flashCool = 0, pendingFlash = null;
 let pendingFreeze = false, pendingShuffle = false;
 let ditherPhaseX = 0, ditherPhaseY = 0;
 let colorIndex = 0, kickCount = 0;
-// twistKickCount runs a triangle wave 0..2·KICKS_PER_TWIST-1; progress is
-// `phase` where phase = twistKickCount/KICKS_PER_TWIST and progress =
-// (phase <= 1 ? phase : 2 - phase). So the first K kicks wind the twist
-// up to MAX_TWIST_DEG, the next K kicks unwind it back to zero, then the
-// cycle repeats. (Previously it snapped from peak to zero in one kick,
-// making the unwind much faster than the wind-up.)
-let twistKickCount = 0;
+// beatClock accumulates total elapsed beats at the authored BPM (set by
+// the `bpm` lane via CURRENT_BPM). The twist is driven by a triangle
+// wave over beatClock: phase = (beatClock / KICKS_PER_TWIST) % 2, and
+// progress = (phase <= 1 ? phase : 2 - phase). So the first K beats
+// wind the twist up to MAX_TWIST_DEG, the next K beats unwind it back
+// to zero, then the cycle repeats. (Previously this was driven by
+// detected kicks; now it's tempo-driven so authored BPM controls the
+// twist rhythm regardless of whether kicks are detected.)
+let beatClock = 0;
 let currentTwist = 0;
 let currentPinch = 0;
 // Spring-damper velocity state for the twist/pinch easing. Updated each
@@ -3299,8 +3305,6 @@ function frame(now) {
       shapeIndex = (shapeIndex + 1) % SHAPES.length;
       shapeProgress = 0;
     }
-    twistKickCount++;
-    if (twistKickCount >= 2 * KICKS_PER_TWIST) twistKickCount = 0;
     beatsAtOrientation++;
     if (beatsAtOrientation >= nextRotateBeats) {
       const rotRad = (20 + Math.random() * 25) * Math.PI / 180;
@@ -3312,13 +3316,18 @@ function frame(now) {
     sliceCool = 3 + Math.random() * 6;
   }
 
-  // Ease the rendered twist toward the kick-driven target. The kick
-  // counter runs a triangle wave: progress climbs 0→1 over the first
-  // KICKS_PER_TWIST kicks (wind up), then falls 1→0 over the next
-  // KICKS_PER_TWIST kicks (unwind), then repeats. Wind-up and unwind
-  // take the same number of kicks.
+  // Advance the beat clock at the authored BPM. `dt` here is in
+  // 60fps-frames (see top of frame()), so beats/frame = BPM/60 * dt/60
+  // = BPM*dt/3600. beatClock is unbounded (intentionally — downstream
+  // consumers can take it mod whatever cycle length they want).
+  beatClock += CURRENT_BPM * dt / 3600;
+
+  // Ease the rendered twist toward a beat-driven target. The clock
+  // produces a triangle wave: progress climbs 0→1 over KICKS_PER_TWIST
+  // beats (wind up), then falls 1→0 over the next KICKS_PER_TWIST
+  // beats (unwind), then repeats.
   const _twistDenom = Math.max(1, KICKS_PER_TWIST);
-  const _twistPhase = twistKickCount / _twistDenom;
+  const _twistPhase = (beatClock / _twistDenom) % 2.0;
   const _twistProgress = _twistPhase <= 1.0 ? _twistPhase : (2.0 - _twistPhase);
   const _twistTargetRad = _twistProgress * MAX_TWIST_DEG * Math.PI / 180;
   const _twistPinchTarget = _twistProgress * TWIST_PINCH;
@@ -3935,13 +3944,11 @@ function applyParam(name, v) {
     case 'mesh3dRotSpeed': MESH3D_ROT_SPEED = v; break;
     case 'kicksPerTwist':
       KICKS_PER_TWIST = Math.max(1, Math.round(v));
-      // Counter range is now 2·K (triangle wave); clamp if changing K
-      // shrank the range below the current count.
-      if (twistKickCount >= 2 * KICKS_PER_TWIST) twistKickCount = 0;
       break;
     case 'maxTwistDeg': MAX_TWIST_DEG = v; break;
     case 'twistPinch': TWIST_PINCH = v; break;
     case 'twistSpringHz': TWIST_SPRING_HZ = Math.max(0.05, v); break;
+    case 'bpm': CURRENT_BPM = Math.max(1, v); break;
   }
 }
 function applyParams(p) {
@@ -4886,6 +4893,18 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
       fmt: v => v.toFixed(1), editor: true,
       setLive: v => setParam('twistSpringHz', v),
     },
+    // BPM is authored on the timeline like other params, then consumed
+    // by the worker's beatClock to drive tempo-locked visuals (currently
+    // the twist cycle). New keypoints default to `step` curve so dragging
+    // 80 → 120 holds 80 until the next key, instead of linearly ramping
+    // tempo across the span (almost never musically correct).
+    bpm: {
+      type: 'continuous', def: 80,
+      min: 30, max: 200, step: 1,
+      fmt: v => v.toFixed(0) + ' BPM', editor: true,
+      defaultCurve: 'step',
+      setLive: v => setParam('bpm', v),
+    },
   };
   const PARAM_NAMES = Object.keys(PARAMS);
   // PANEL_ORDER drives the dev-panel slider list (every PARAMS entry, in
@@ -4969,14 +4988,15 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   const KEY_MERGE_DT = 0.25; // seconds
   function recordKey(name, t, v) {
     const lane = lanes[name];
+    const newKeyCurve = PARAMS[name].defaultCurve || 'linear';
     let i = 0;
     while (i < lane.length && lane[i].t < t - KEY_MERGE_DT) i++;
     if (i < lane.length && Math.abs(lane[i].t - t) <= KEY_MERGE_DT) {
-      lane[i] = { t, v, curve: lane[i].curve || 'linear' };
+      lane[i] = { t, v, curve: lane[i].curve || newKeyCurve };
     } else {
       let j = 0;
       while (j < lane.length && lane[j].t <= t) j++;
-      lane.splice(j, 0, { t, v, curve: 'linear' });
+      lane.splice(j, 0, { t, v, curve: newKeyCurve });
     }
     onLanesMutated();
   }
