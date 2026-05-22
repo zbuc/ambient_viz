@@ -1360,11 +1360,12 @@ let flashCool = 0, pendingFlash = null;
 let pendingFreeze = false, pendingShuffle = false;
 let ditherPhaseX = 0, ditherPhaseY = 0;
 let colorIndex = 0, kickCount = 0;
-// twistKickCount accumulates 0..KICKS_PER_TWIST-1; targetTwist is derived
-// from twistKickCount/KICKS_PER_TWIST and currentTwist eases toward it.
-// On each KICKS_PER_TWIST'th kick the counter snaps back to 0, so the
-// twist winds up to MAX_TWIST_DEG and rhythmically releases — producing
-// a nested-spiral / seashell deformation that builds and collapses.
+// twistKickCount runs a triangle wave 0..2·KICKS_PER_TWIST-1; progress is
+// `phase` where phase = twistKickCount/KICKS_PER_TWIST and progress =
+// (phase <= 1 ? phase : 2 - phase). So the first K kicks wind the twist
+// up to MAX_TWIST_DEG, the next K kicks unwind it back to zero, then the
+// cycle repeats. (Previously it snapped from peak to zero in one kick,
+// making the unwind much faster than the wind-up.)
 let twistKickCount = 0;
 let currentTwist = 0;
 let currentPinch = 0;
@@ -3289,7 +3290,7 @@ function frame(now) {
       shapeProgress = 0;
     }
     twistKickCount++;
-    if (twistKickCount >= KICKS_PER_TWIST) twistKickCount = 0;
+    if (twistKickCount >= 2 * KICKS_PER_TWIST) twistKickCount = 0;
     beatsAtOrientation++;
     if (beatsAtOrientation >= nextRotateBeats) {
       const rotRad = (20 + Math.random() * 25) * Math.PI / 180;
@@ -3301,13 +3302,14 @@ function frame(now) {
     sliceCool = 3 + Math.random() * 6;
   }
 
-  // Ease the rendered twist toward the kick-driven target. Targets are
-  // (twistKickCount / KICKS_PER_TWIST) scaled by max twist / max pinch.
-  // Because twistKickCount snaps from KICKS_PER_TWIST-1 back to 0 on the
-  // "release" kick, the eased current values fall back through zero,
-  // unwinding the spiral before the next wind-up begins.
+  // Ease the rendered twist toward the kick-driven target. The kick
+  // counter runs a triangle wave: progress climbs 0→1 over the first
+  // KICKS_PER_TWIST kicks (wind up), then falls 1→0 over the next
+  // KICKS_PER_TWIST kicks (unwind), then repeats. Wind-up and unwind
+  // take the same number of kicks.
   const _twistDenom = Math.max(1, KICKS_PER_TWIST);
-  const _twistProgress = twistKickCount / _twistDenom;
+  const _twistPhase = twistKickCount / _twistDenom;
+  const _twistProgress = _twistPhase <= 1.0 ? _twistPhase : (2.0 - _twistPhase);
   const _twistTargetRad = _twistProgress * MAX_TWIST_DEG * Math.PI / 180;
   const _twistPinchTarget = _twistProgress * TWIST_PINCH;
   const _twistLerp = Math.min(1, 0.16 * dt);
@@ -3912,7 +3914,9 @@ function applyParam(name, v) {
     case 'mesh3dRotSpeed': MESH3D_ROT_SPEED = v; break;
     case 'kicksPerTwist':
       KICKS_PER_TWIST = Math.max(1, Math.round(v));
-      if (twistKickCount >= KICKS_PER_TWIST) twistKickCount = 0;
+      // Counter range is now 2·K (triangle wave); clamp if changing K
+      // shrank the range below the current count.
+      if (twistKickCount >= 2 * KICKS_PER_TWIST) twistKickCount = 0;
       break;
     case 'maxTwistDeg': MAX_TWIST_DEG = v; break;
     case 'twistPinch': TWIST_PINCH = v; break;
