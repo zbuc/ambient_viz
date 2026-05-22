@@ -1829,6 +1829,16 @@ function setupDither() {
     '}';
   // Pass 1 fragment: circular pinch+twist UV warp. Samples uTex at the
   // warped position; writes to the FBO-attached intermediate texture.
+  //
+  // All intermediate math is in aspect-corrected normalized coords (≤ ~1.5
+  // in magnitude). This gives precision headroom on drivers that silently
+  // fall back to mediump in fragment shaders (e.g. Pi 4 / VideoCore VI);
+  // pixel-space math with values up to W·H made the near-corner banding
+  // from the previous pow(1-t, 0.6) falloff into visible "wormholes."
+  //
+  // Falloff uses smoothstep (= u²(3-2u) with u=1-t): zero derivative at
+  // both ends, so a single quantization step in `t` no longer produces a
+  // large jump in twist angle near the corner.
   const TWIST_FS_SRC =
     'precision highp float;' +
     'varying vec2 vUv;' +
@@ -1837,20 +1847,20 @@ function setupDither() {
     'uniform float uTwist;' +
     'uniform float uPinch;' +
     'void main() {' +
-    '  vec2 c = uResolution * 0.5;' +
-    '  vec2 px = vUv * uResolution;' +
-    '  vec2 d = px - c;' +
+    '  vec2 aspect = vec2(uResolution.x / uResolution.y, 1.0);' +
+    '  vec2 d = (vUv - 0.5) * aspect;' +
     '  float r = length(d);' +
-    '  float maxR = length(c);' +
+    '  float maxR = length(aspect * 0.5);' +
     '  float t = clamp(r / maxR, 0.0, 1.0);' +
-    '  float falloff = pow(1.0 - t, 0.6);' +
+    '  float u = 1.0 - t;' +
+    '  float falloff = u * u * (3.0 - 2.0 * u);' +
     '  float twistA = uTwist * falloff;' +
     '  float pinchA = uPinch * falloff;' +
     '  float cs = cos(twistA);' +
     '  float sn = sin(twistA);' +
     '  vec2 td = vec2(d.x * cs - d.y * sn, d.x * sn + d.y * cs);' +
     '  td *= (1.0 - pinchA * 0.55);' +
-    '  vec2 srcUv = (c + td) / uResolution;' +
+    '  vec2 srcUv = 0.5 + td / aspect;' +
     '  gl_FragColor = texture2D(uTex, srcUv);' +
     '}';
   // Pass 2 fragment: bayer-threshold dither, sampled at display UV, with
