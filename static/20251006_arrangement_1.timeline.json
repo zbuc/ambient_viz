@@ -1192,8 +1192,45 @@
         "curve": "linear"
       }
     ],
-    "kicksPerTwist": [],
-    "maxTwistDeg": [],
+    "kicksPerTwist": [
+      {
+        "t": 0,
+        "v": 64,
+        "curve": "step"
+      },
+      {
+        "t": 41.15708341167509,
+        "v": 32,
+        "curve": "step"
+      },
+      {
+        "t": 74.74692467411454,
+        "v": 16,
+        "curve": "step"
+      }
+    ],
+    "maxTwistDeg": [
+      {
+        "t": 0,
+        "v": 10,
+        "curve": "linear"
+      },
+      {
+        "t": 41.11890672651148,
+        "v": 180,
+        "curve": "linear"
+      },
+      {
+        "t": 74.78559473434447,
+        "v": 720,
+        "curve": "linear"
+      },
+      {
+        "t": 91.12118658774746,
+        "v": 50,
+        "curve": "linear"
+      }
+    ],
     "twistPinch": [],
     "twistSpringHz": [],
     "bpm": [
