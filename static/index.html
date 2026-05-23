@@ -684,8 +684,10 @@ const TOUCH_COLORS = [
   [255, 255, 255],  // E11 white
 ];
 const TOUCH_ENV = new Float32Array(12);
-const TOUCH_RISE_S = 96.0;
-const TOUCH_FALL_S = 224.0;
+// Time constants in real seconds (not 60fps-frames — keep this in mind
+// when comparing to other smoothing constants in this file).
+const TOUCH_RISE_S = 1.6;
+const TOUCH_FALL_S = 3.7;
 let TOUCH_MASK = 0;
 // Palette-driven baseline tint (existing slow drift). The final tintR/G/B
 // is a mix of this and the touch overlay, recomputed each frame.
@@ -3328,12 +3330,14 @@ function frame(now) {
 
   // MPR121 touch envelopes: rise while bit set, decay when cleared.
   // Weighted-average their colors, then mix with the palette baseline by
-  // the total envelope weight (capped at 1).
+  // the total envelope weight (capped at 1). `dt` in this file is in
+  // 60fps-frames, so convert to seconds for the (seconds-based) taus.
+  const dtSec = dt / 60;
   let _tR = 0, _tG = 0, _tB = 0, _tW = 0;
   for (let i = 0; i < 12; i++) {
     const target = (TOUCH_MASK >> i) & 1;
     const tau = target ? TOUCH_RISE_S : TOUCH_FALL_S;
-    TOUCH_ENV[i] += (target - TOUCH_ENV[i]) * (1 - Math.exp(-dt / tau));
+    TOUCH_ENV[i] += (target - TOUCH_ENV[i]) * (1 - Math.exp(-dtSec / tau));
     const e = TOUCH_ENV[i];
     if (e > 0.001) {
       const c = TOUCH_COLORS[i];
