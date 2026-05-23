@@ -128,7 +128,7 @@ function safeJoin(root, urlPath) {
 }
 
 function serveStatic(req, res) {
-  let urlPath = req.url || '/';
+  let urlPath = (req.url || '/').split('?')[0].split('#')[0];
   if (urlPath === '/' || urlPath === '') urlPath = '/index.html';
   const filePath = safeJoin(STATIC_ROOT, urlPath);
   if (!filePath) { res.writeHead(403); res.end('forbidden'); return; }
