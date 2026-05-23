@@ -660,6 +660,10 @@ let SLICE_BURST_SCALE = 1.0;
 let FREEZE_FRAMES_MAX = 12;
 let saturation = 1.0;
 let activeSilhouette = 'car';
+// 1.0 = full 1-bit Bayer dither (original look). Below 1.0 mixes the
+// dithered output back toward the underlying grayscale, softening the
+// chunky on/off pattern. 0.0 = no dither pattern visible.
+let DITHER_AMOUNT = 1.0;
 
 // === MPR121 touch → color overlay ===
 // One color per electrode E0..E11. While an electrode is touched its
@@ -1537,6 +1541,7 @@ let ditherCanvas, ditherGL;
 let _ditherProg, _ditherQuad, _ditherSrcTex, _ditherBayerTex;
 let _ditherUTex, _ditherUBayer, _ditherUSize, _ditherUOffset, _ditherAPos;
 let _ditherUGrain, _ditherUGrainAlpha, _ditherUScanlineAlpha, _ditherUScanlinePeriod;
+let _ditherUDitherAmount;
 let _ditherUGrainTile;  // vec4: (offsetX, offsetY, scaleX, scaleY) for grain atlas tile
 let _ditherTwistProg, _ditherTwistUTex, _ditherTwistURes;
 let _ditherTwistUTwist, _ditherTwistUPinch, _ditherTwistAPos;
@@ -1938,6 +1943,7 @@ function setupDither() {
     'uniform float uGrainAlpha;' +
     'uniform float uScanlineAlpha;' +
     'uniform float uScanlinePeriod;' +
+    'uniform float uDitherAmount;' +
     // Grain atlas tile selector: (offsetX, offsetY, scaleX, scaleY). The
     // grain texture is an atlas of NOISE_RING tiles; per-frame we set the
     // offset to point at the active tile. Scale is constant once the
@@ -1960,10 +1966,14 @@ function setupDither() {
     '  vec2 grainUv = vUv * uGrainTile.zw + uGrainTile.xy;' +
     '  vec3 grainSample = texture2D(uGrain, grainUv).rgb;' +
     '  lum = clamp(lum + grainSample.r * uGrainAlpha, 0.0, 1.0);' +
-    // Bayer threshold for binary dither.
+    // Bayer threshold for binary dither, then mix back toward the
+    // underlying grayscale by (1 - uDitherAmount). At 1.0 = original
+    // 1-bit binary look; at 0.0 = pure grayscale with no pattern.
     '  vec2 byx = mod(pix + uOffset, 8.0);' +
     '  float thresh = texture2D(uBayer, (byx + 0.5) / 8.0).r;' +
-    '  gl_FragColor = lum > thresh ? vec4(1.0) : vec4(0.0, 0.0, 0.0, 1.0);' +
+    '  float dithered = lum > thresh ? 1.0 : 0.0;' +
+    '  float outLum = mix(lum, dithered, uDitherAmount);' +
+    '  gl_FragColor = vec4(vec3(outLum), 1.0);' +
     '}';
   function compile(type, src) {
     const sh = ditherGL.createShader(type);
@@ -2000,6 +2010,7 @@ function setupDither() {
   _ditherUGrainAlpha     = ditherGL.getUniformLocation(_ditherProg, 'uGrainAlpha');
   _ditherUScanlineAlpha  = ditherGL.getUniformLocation(_ditherProg, 'uScanlineAlpha');
   _ditherUScanlinePeriod = ditherGL.getUniformLocation(_ditherProg, 'uScanlinePeriod');
+  _ditherUDitherAmount   = ditherGL.getUniformLocation(_ditherProg, 'uDitherAmount');
   _ditherUGrainTile      = ditherGL.getUniformLocation(_ditherProg, 'uGrainTile');
   _ditherAPos            = ditherGL.getAttribLocation(_ditherProg, 'aPos');
 
@@ -2151,6 +2162,7 @@ function applyDither(offX, offY, twist, pinch, grainTileIdx, grainAlpha, scanlin
   gl.uniform1f(_ditherUGrainAlpha, grainAlpha || 0);
   gl.uniform1f(_ditherUScanlineAlpha, scanlineAlpha || 0);
   gl.uniform1f(_ditherUScanlinePeriod, scanlinePeriod || 2);
+  gl.uniform1f(_ditherUDitherAmount, DITHER_AMOUNT);
   // Grain atlas tile selector: scale is constant (one tile = 1/cols ×
   // 1/rows of the atlas), offset selects the current tile in the ring.
   const _gtIdx = grainTileIdx | 0;
@@ -4021,6 +4033,7 @@ function applyParam(name, v) {
     case 'twistPinch': TWIST_PINCH = v; break;
     case 'twistSpringHz': TWIST_SPRING_HZ = Math.max(0.05, v); break;
     case 'bpm': CURRENT_BPM = Math.max(1, v); break;
+    case 'ditherAmount': DITHER_AMOUNT = Math.max(0, Math.min(1, v)); break;
   }
 }
 function applyParams(p) {
@@ -4875,6 +4888,12 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
       min: 0, max: 1, step: 0.02,
       fmt: v => v.toFixed(2), editor: true,
       setLive: v => setParam('grainAlpha', v),
+    },
+    ditherAmount: {
+      type: 'continuous', def: 1.0,
+      min: 0, max: 1, step: 0.01,
+      fmt: v => v.toFixed(2), editor: true,
+      setLive: v => setParam('ditherAmount', v),
     },
     scanlineAlpha: {
       type: 'continuous', def: 0.42,
