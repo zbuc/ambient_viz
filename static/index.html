@@ -4255,7 +4255,9 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   // — browser upscales the smaller bitmap. Visual: chunkier dither, more
   // CRT-y. Set N=0 to disable. Reasonable values: 360, 480, 540, 720.
   const _bitmapMatch = location.search.match(/[?&]bitmap=(\d+)/);
-  const bitmapHeight = _bitmapMatch ? Math.max(0, parseInt(_bitmapMatch[1], 10)) : 0;
+  // `let` (not const) so the bitmapHeight slider in PARAMS can mutate it
+  // at runtime; resize() then re-derives dpr and re-allocates buffers.
+  let bitmapHeight = _bitmapMatch ? Math.max(0, parseInt(_bitmapMatch[1], 10)) : 0;
 
   // ?profile=1: enable per-section render timing inside the worker. The
   // worker posts a formatted "total:Xms latt:1.2 grn:0.8 ..." breakdown
@@ -5019,6 +5021,17 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
       min: 30, max: 200, step: 1,
       fmt: v => v.toFixed(0) + ' BPM', editor: true,
       setLive: v => setParam('bpm', v),
+    },
+    // Render-bitmap height cap. Mutates main-thread `bitmapHeight`, then
+    // calls resize() so computeDpr() re-derives dpr and the worker
+    // reallocates canvas/FBO/dither/freeze buffers. Each change drops
+    // in-flight slices (see worker's resize handler). Low values
+    // (~120-240) coarsen the dither/scanline look heavily.
+    bitmapHeight: {
+      type: 'continuous', def: bitmapHeight || 1080,
+      min: 16, max: 1440, step: 10,
+      fmt: v => v.toFixed(0) + ' px', editor: true,
+      setLive: v => { bitmapHeight = v; resize(); },
     },
   };
   const PARAM_NAMES = Object.keys(PARAMS);
