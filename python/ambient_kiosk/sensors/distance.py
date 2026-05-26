@@ -16,6 +16,13 @@ log = logging.getLogger(__name__)
 
 
 class DistanceDriver:
+    # Seconds with no valid read before we start decaying the smoothed
+    # value toward VL53_FAR_CM. Below this, the value is held so that
+    # intermittent None reads (which happen constantly on a real sensor)
+    # don't bias the published value toward "far" while a target is
+    # genuinely present.
+    NO_TARGET_TIMEOUT_S = 2.0
+
     def __init__(self, ingest, mock: bool = False):
         self.ingest = ingest
         self.mock = mock
@@ -71,6 +78,10 @@ class DistanceDriver:
         cycle_start = time.monotonic()
         CYCLE = 25.0
 
+        # Wall-clock of the last valid (non-None) read. Stays 0.0 until the
+        # first one arrives, so initial published value is FAR (idle).
+        last_valid_t = 0.0
+
         while not self._stop.wait(period):
             if self.mock:
                 t = ((time.monotonic() - cycle_start) % CYCLE) / CYCLE
@@ -85,19 +96,25 @@ class DistanceDriver:
             else:
                 raw = self._read_raw()
 
-            # Smoothing — None ⇒ decay toward "far"
-            target = raw if raw is not None else config.VL53_FAR_CM
-            if self._smoothed is None:
-                self._smoothed = target
-            else:
-                a = config.VL53_SMOOTH_ALPHA
-                self._smoothed = a * target + (1 - a) * self._smoothed
+            now = time.monotonic()
+            a = config.VL53_SMOOTH_ALPHA
+            if raw is not None:
+                # Valid read — smooth into existing trace.
+                last_valid_t = now
+                self._smoothed = raw if self._smoothed is None else (a * raw + (1 - a) * self._smoothed)
+            elif last_valid_t == 0.0 or (now - last_valid_t) > self.NO_TARGET_TIMEOUT_S:
+                # Sustained no-target — decay toward FAR so the visualizer
+                # eventually idles when nobody is in the cone.
+                target = config.VL53_FAR_CM
+                self._smoothed = target if self._smoothed is None else (a * target + (1 - a) * self._smoothed)
+            # else: brief None during a known-present target — hold value.
 
             # Quantize publication to 0.1 cm to suppress trivial JSON noise
-            v = round(self._smoothed, 1)
-            if v != self._last_published:
-                self.ingest.publish("distance_cm", v)
-                self._last_published = v
+            if self._smoothed is not None:
+                v = round(self._smoothed, 1)
+                if v != self._last_published:
+                    self.ingest.publish("distance_cm", v)
+                    self._last_published = v
 
     def stop(self) -> None:
         self._stop.set()
