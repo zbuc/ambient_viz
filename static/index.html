@@ -5128,6 +5128,21 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   let _smoothedDistance = null;
   let _lastDistanceSmoothT = 0;
 
+  // Visible debug overlay (top-right) when URL has ?debug=1. Created here
+  // before applyAutomation so the function's closure binding resolves at
+  // call time. Survives lite mode (CSS hides body.lite-kiosk overlays but
+  // this element isn't matched by those selectors).
+  let _distbmDbgEl = null;
+  if (/[?&]debug=1\b/.test(location.search)) {
+    _distbmDbgEl = document.createElement('div');
+    _distbmDbgEl.style.cssText =
+      'position:fixed;top:8px;right:8px;z-index:99999;' +
+      'background:rgba(0,0,0,0.7);color:#0f0;font:11px/1.3 monospace;' +
+      'padding:4px 6px;pointer-events:none;border:1px solid #0a0;';
+    _distbmDbgEl.textContent = 'distbm: (waiting for applyAutomation)';
+    document.body.appendChild(_distbmDbgEl);
+  }
+
   // Resolve every parameter's live value for the current playback time.
   // Lane-driven if keys exist; falls back to manual otherwise. Always called
   // when audio is loaded, so a value is written every frame — that's how
@@ -5222,6 +5237,18 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
       bitmapHeightVar: bitmapHeight,
       twistGain: twistGain,
     };
+    // Visible overlay when ?debug=1. Survives lite mode (which hides
+    // every other DOM overlay) — so a kiosk run can show state without
+    // remote-debugging the browser.
+    if (_distbmDbgEl) {
+      _distbmDbgEl.textContent =
+        'toggle=' + manual.distanceToBitmap +
+        ' d=' + (typeof _smoothedDistance === 'number' ? _smoothedDistance.toFixed(1) : '-') +
+        ' ceil=' + (resolvedBitmap !== null ? resolvedBitmap : '-') +
+        ' eff=' + (_dbgEffective !== null ? _dbgEffective : '-') +
+        ' bh=' + bitmapHeight +
+        ' tg=' + twistGain.toFixed(2);
+    }
   }
 
   // Insert/replace a keypoint in the lane. If a key exists within MERGE_DT of
