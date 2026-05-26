@@ -5033,6 +5033,22 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
       fmt: v => v.toFixed(0) + ' px', editor: true,
       setLive: v => { bitmapHeight = v; resize(); },
     },
+    // Toggle that lets the VL53L1X distance sensor drive bitmapHeight.
+    // When 'on', applyAutomation each frame interpolates the authored
+    // bitmapHeight (manual/lane) down to DISTANCE_BITMAP_MIN as someone
+    // approaches. When flipped back to 'off', the manual ceiling is
+    // restored immediately so the kiosk doesn't get stuck low-res.
+    distanceToBitmap: {
+      type: 'discrete', def: 'off',
+      options: () => ['off', 'on'],
+      fmt: v => v, editor: false,
+      setLive: v => {
+        if (v === 'off' && typeof manual.bitmapHeight === 'number') {
+          PARAMS.bitmapHeight.setLive(manual.bitmapHeight);
+          _lastEffectiveBitmap = manual.bitmapHeight;
+        }
+      },
+    },
   };
   const PARAM_NAMES = Object.keys(PARAMS);
   // PANEL_ORDER drives the dev-panel slider list (every PARAMS entry, in
@@ -5089,6 +5105,18 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   const DISTANCE_TWIST_NEAR_CM = 25;
   const DISTANCE_TWIST_FAR_CM = 100;
 
+  // Distance→bitmapHeight (opt-in via the distanceToBitmap toggle). At/below
+  // NEAR_CM the effective bitmap is locked to MIN; at/above FAR_CM it equals
+  // the authored ceiling. Curve eases-in so the low-res "dissociation" state
+  // is sticky when close, then recovers quickly as someone walks away.
+  // QUANTIZE rounds the effective value before applying so we don't trigger a
+  // GPU buffer realloc on every micro-change.
+  const DISTANCE_BITMAP_NEAR_CM = 25;
+  const DISTANCE_BITMAP_FAR_CM = 100;
+  const DISTANCE_BITMAP_MIN = 64;
+  const DISTANCE_BITMAP_QUANTIZE = 10;
+  let _lastEffectiveBitmap = null;
+
   // Resolve every parameter's live value for the current playback time.
   // Lane-driven if keys exist; falls back to manual otherwise. Always called
   // when audio is loaded, so a value is written every frame — that's how
@@ -5118,6 +5146,7 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
         twistGain = 1 - x * x;
       }
     }
+    let resolvedBitmap = null;
     for (const name of PARAM_NAMES) {
       const lane = lanes[name];
       const v = (lane.length > 0)
@@ -5125,6 +5154,7 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
         : manual[name];
       if (v === undefined) continue;
       if (paramCtrls[name]) paramCtrls[name].apply(v);
+      if (name === 'bitmapHeight' && typeof v === 'number') resolvedBitmap = v;
       _automationBatch[name] = (name === 'maxTwistDeg' && typeof v === 'number')
         ? v * twistGain
         : v;
@@ -5132,6 +5162,26 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
     }
     if (dirty && renderWorker) {
       renderWorker.postMessage({ type: 'params', values: _automationBatch });
+    }
+    // Distance→bitmap (opt-in). Goes through setLive (the only path that
+    // actually triggers resize()/GPU buffer realloc); the worker's params
+    // dispatch ignores bitmapHeight. Quantized so the realloc rate is bounded.
+    if (manual.distanceToBitmap === 'on' && resolvedBitmap !== null) {
+      let effective = resolvedBitmap;
+      if (typeof d === 'number') {
+        let x;
+        if (d <= DISTANCE_BITMAP_NEAR_CM) x = 0;
+        else if (d >= DISTANCE_BITMAP_FAR_CM) x = 1;
+        else x = (d - DISTANCE_BITMAP_NEAR_CM) /
+                (DISTANCE_BITMAP_FAR_CM - DISTANCE_BITMAP_NEAR_CM);
+        const ease = x * x;
+        effective = DISTANCE_BITMAP_MIN + (resolvedBitmap - DISTANCE_BITMAP_MIN) * ease;
+      }
+      effective = Math.round(effective / DISTANCE_BITMAP_QUANTIZE) * DISTANCE_BITMAP_QUANTIZE;
+      if (effective !== _lastEffectiveBitmap) {
+        _lastEffectiveBitmap = effective;
+        PARAMS.bitmapHeight.setLive(effective);
+      }
     }
   }
 
