@@ -5193,6 +5193,7 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
     // Distance→bitmap (opt-in). Goes through setLive (the only path that
     // actually triggers resize()/GPU buffer realloc); the worker's params
     // dispatch ignores bitmapHeight. Quantized so the realloc rate is bounded.
+    let _dbgEffective = null;
     if (manual.distanceToBitmap === 'on' && resolvedBitmap !== null) {
       let effective = resolvedBitmap;
       if (typeof d === 'number') {
@@ -5205,11 +5206,22 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
         effective = DISTANCE_BITMAP_MIN + (resolvedBitmap - DISTANCE_BITMAP_MIN) * ease;
       }
       effective = Math.round(effective / DISTANCE_BITMAP_QUANTIZE) * DISTANCE_BITMAP_QUANTIZE;
+      _dbgEffective = effective;
       if (effective !== _lastEffectiveBitmap) {
         _lastEffectiveBitmap = effective;
         PARAMS.bitmapHeight.setLive(effective);
       }
     }
+    // Diagnostic — read from JS console as window.__distbm
+    window.__distbm = {
+      toggle: manual.distanceToBitmap,
+      smoothedDistance: _smoothedDistance,
+      resolvedBitmap: resolvedBitmap,
+      effective: _dbgEffective,
+      lastApplied: _lastEffectiveBitmap,
+      bitmapHeightVar: bitmapHeight,
+      twistGain: twistGain,
+    };
   }
 
   // Insert/replace a keypoint in the lane. If a key exists within MERGE_DT of
