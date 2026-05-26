@@ -5117,14 +5117,12 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   const DISTANCE_BITMAP_QUANTIZE = 20;
   let _lastEffectiveBitmap = null;
 
-  // Browser-side EMA on the SSE distance value. Python publishes at 50 Hz
-  // with its own α=0.25 EMA (~80 ms time constant), which is too responsive
-  // for bitmap: every quantized step is a full GPU realloc + slice reset,
-  // so micro-jitter reads as a glitchy wipe. Smoothing here adds a ~0.6 s
-  // tau so small wobble stays inside one quantization bucket. Used by both
-  // the twist and bitmap paths; the twist mapping doesn't strictly need it
-  // but the resulting motion feels more in-keeping with the aesthetic.
-  const DISTANCE_SMOOTH_TAU_S = 0.6;
+  // Browser-side EMA on the SSE distance value. Python smoothes valid
+  // reads (α=0.25 at 50 Hz, ~80 ms tau) and the bitmap path quantizes to
+  // 20-px buckets, so most micro-jitter is already filtered before it
+  // reaches the resize path. Keep a light browser-side smoothing so the
+  // "walk away" → FAR snap doesn't read as a hard cut.
+  const DISTANCE_SMOOTH_TAU_S = 0.25;
   let _smoothedDistance = null;
   let _lastDistanceSmoothT = 0;
 

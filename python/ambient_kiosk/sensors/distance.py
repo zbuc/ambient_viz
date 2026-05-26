@@ -16,12 +16,13 @@ log = logging.getLogger(__name__)
 
 
 class DistanceDriver:
-    # Seconds with no valid read before we start decaying the smoothed
-    # value toward VL53_FAR_CM. Below this, the value is held so that
-    # intermittent None reads (which happen constantly on a real sensor)
-    # don't bias the published value toward "far" while a target is
-    # genuinely present.
-    NO_TARGET_TIMEOUT_S = 2.0
+    # Seconds with no valid read before we snap to VL53_FAR_CM. Long
+    # enough to ride out the typical multi-frame dropouts on a real
+    # target (a moving hand drops 1-3 frames at a time), short enough
+    # that walking out of the cone shows up as "idle" within a beat
+    # rather than holding the user's last close-range position for
+    # multiple seconds.
+    NO_TARGET_TIMEOUT_S = 0.6
 
     def __init__(self, ingest, mock: bool = False):
         self.ingest = ingest
@@ -103,10 +104,11 @@ class DistanceDriver:
                 last_valid_t = now
                 self._smoothed = raw if self._smoothed is None else (a * raw + (1 - a) * self._smoothed)
             elif last_valid_t == 0.0 or (now - last_valid_t) > self.NO_TARGET_TIMEOUT_S:
-                # Sustained no-target — decay toward FAR so the visualizer
-                # eventually idles when nobody is in the cone.
-                target = config.VL53_FAR_CM
-                self._smoothed = target if self._smoothed is None else (a * target + (1 - a) * self._smoothed)
+                # Sustained no-target — snap to FAR. Gradual decay would
+                # leave the smoothed value stuck near the user's last
+                # close-range position for ~150 ms after the hold expires,
+                # which reads as "kiosk thinks I'm still here" lag.
+                self._smoothed = config.VL53_FAR_CM
             # else: brief None during a known-present target — hold value.
 
             # Quantize publication to 0.1 cm to suppress trivial JSON noise
