@@ -14,8 +14,22 @@ MPR121_ADDR = 0x5A
 PIR_BOOT_SUPPRESS_S = 60.0  # ignore output for the first 60s post-process-start
 
 # VL53L1X
-VL53_DISTANCE_MODE = 1     # 1 = short, 2 = long
+VL53_DISTANCE_MODE = 1     # 1 = short, 2 = long. Fallback when auto-select
+                           # is off or can't read ambient (see below).
 VL53_TIMING_BUDGET_MS = 20
+
+# Auto distance-mode select. The projector at the install is curator-supplied
+# and unknown: a bright lamp engine throws real 940 nm IR onto the wall the
+# sensor faces, which raises the SPAD noise floor and wrecks long-mode reach.
+# At boot we sample the sensor's ambient IR rate and pick long mode only when
+# the scene is dark enough to support it; otherwise short mode, which is far
+# more ambient-tolerant. VL53_AMBIENT_LONG_MAX is in ST ULD units and MUST be
+# tuned on-site: run test_vl53l1x.py with the projector ON, on the real wall,
+# read the printed ambient rate, and set this just above the dark baseline.
+VL53_AUTO_MODE = True
+VL53_AMBIENT_CAL_S = 1.0       # how long to sample ambient before deciding
+VL53_AMBIENT_LONG_MAX = 1500   # ambient at/below this -> long; above -> short
+
 VL53_PUBLISH_HZ = 50
 VL53_SMOOTH_ALPHA = 0.25
 VL53_FAR_CM = 100.0

@@ -24,6 +24,12 @@ class DistanceDriver:
     # multiple seconds.
     NO_TARGET_TIMEOUT_S = 0.6
 
+    # VL53L1X result register holding the per-measurement ambient IR count
+    # rate (ST ULD name: VL53L1_RESULT__AMBIENT_COUNT_RATE_MCPS_SD0). The
+    # Adafruit CircuitPython lib doesn't surface this, so we read it raw.
+    # Only valid after a completed measurement (data_ready).
+    _REG_AMBIENT_RATE = 0x0090
+
     def __init__(self, ingest, mock: bool = False):
         self.ingest = ingest
         self.mock = mock
@@ -45,15 +51,78 @@ class DistanceDriver:
             import adafruit_vl53l1x
             self._i2c = busio.I2C(board.SCL, board.SDA)
             self._sensor = adafruit_vl53l1x.VL53L1X(self._i2c, address=config.VL53L1X_ADDR)
-            self._sensor.distance_mode = config.VL53_DISTANCE_MODE
+            # Start in short mode for the ambient sample: it's the ambient-safe
+            # fallback we stay in if auto-select decides the scene is too bright,
+            # so there's no glitch if we don't switch.
+            mode = 1 if config.VL53_AUTO_MODE else config.VL53_DISTANCE_MODE
+            self._sensor.distance_mode = mode
             self._sensor.timing_budget = config.VL53_TIMING_BUDGET_MS
             self._sensor.start_ranging()
+            if config.VL53_AUTO_MODE:
+                mode = self._calibrate_distance_mode(mode)
             log.info("distance: VL53L1X ready (mode=%d, budget=%dms)",
-                     config.VL53_DISTANCE_MODE, config.VL53_TIMING_BUDGET_MS)
+                     mode, config.VL53_TIMING_BUDGET_MS)
             return True
         except Exception as e:
             log.error("distance: VL53L1X init failed: %s", e)
             return False
+
+    def _read_ambient_rate(self) -> Optional[int]:
+        """Raw ambient IR count rate from the last measurement, or None.
+
+        Units follow ST's ULD convention (register word * 8). The absolute
+        scale is only meaningful relative to an on-site dark baseline — which
+        is the point: we log it so VL53_AMBIENT_LONG_MAX can be tuned for the
+        real room + projector. Reaches past the Adafruit API via its private
+        register helper, so it degrades gracefully if that ever changes.
+        """
+        try:
+            raw = self._sensor._read_register(self._REG_AMBIENT_RATE, 2)
+            return ((raw[0] << 8) | raw[1]) * 8
+        except Exception as e:
+            log.debug("distance: ambient read unavailable: %s", e)
+            return None
+
+    def _calibrate_distance_mode(self, current_mode: int) -> int:
+        """Sample ambient IR for VL53_AMBIENT_CAL_S, return the chosen mode.
+
+        Low ambient -> long mode (reach to ~4 m). High ambient (a bright lamp
+        projector throwing 940 nm onto the scene the sensor faces) -> short
+        mode, which tolerates ambient far better. Keeps current_mode if the
+        sensor never yields a usable ambient sample.
+        """
+        samples = []
+        deadline = time.monotonic() + config.VL53_AMBIENT_CAL_S
+        while time.monotonic() < deadline:
+            try:
+                if self._sensor.data_ready:
+                    amb = self._read_ambient_rate()
+                    self._sensor.clear_interrupt()
+                    if amb is not None:
+                        samples.append(amb)
+            except Exception:
+                pass
+            time.sleep(0.01)
+
+        if not samples:
+            log.warning("distance: ambient calibration got no samples; "
+                        "keeping mode=%d", current_mode)
+            return current_mode
+
+        samples.sort()
+        median = samples[len(samples) // 2]
+        chosen = 2 if median <= config.VL53_AMBIENT_LONG_MAX else 1
+        log.info("distance: ambient median=%d over %d samples (long_max=%d) -> %s mode",
+                 median, len(samples), config.VL53_AMBIENT_LONG_MAX,
+                 "long" if chosen == 2 else "short")
+        if chosen != current_mode:
+            # Mode switch must bracket a ranging stop; re-assert the timing
+            # budget afterward since valid budgets are mode-dependent.
+            self._sensor.stop_ranging()
+            self._sensor.distance_mode = chosen
+            self._sensor.timing_budget = config.VL53_TIMING_BUDGET_MS
+            self._sensor.start_ranging()
+        return chosen
 
     def _read_raw(self) -> Optional[float]:
         """Returns distance in cm, or None for no-target / invalid."""
