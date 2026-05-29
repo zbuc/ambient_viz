@@ -18,6 +18,7 @@ use infinitedsp_core::effects::time::ping_pong_delay::PingPongDelay;
 use infinitedsp_core::effects::time::reverb::Reverb;
 
 pub mod analog_bass_drum;
+pub mod bass;
 pub mod bloom;
 pub mod chord;
 pub mod fm_stab;
@@ -30,6 +31,7 @@ pub mod tape;
 pub mod timeline;
 
 pub use analog_bass_drum::AnalogBassDrum;
+pub use bass::{BassPatch, RumbleBass};
 pub use fm_stab::{FmPatch, FmStab, Shaper};
 pub use hihat::HiHat;
 pub use midi::MidiMessage;
@@ -70,6 +72,12 @@ pub struct Engine {
     stab_delay: PingPongDelay,
     /// How much of the delay's wet echoes to fold into the master (0..1).
     stab_delay_wet: f32,
+    /// Monophonic subtractive "rumble bass" — detuned saws + sub sine through a
+    /// resonant LPF, gate-driven by the sequencer's bass lane. Rendered dry and
+    /// centred (no ping-pong / minimal reverb) so the low end stays tight.
+    bass: bass::RumbleBass,
+    /// Mono scratch buffer for the bass output.
+    bass_buf: Vec<f32>,
     /// Gain multiplier applied to the kick's output. Set per-trigger from
     /// MIDI velocity (0..1), so soft pad hits play a quieter kick.
     kick_velocity: f32,
@@ -120,10 +128,10 @@ impl Engine {
         // firmware heap — like the reverb, these buffers belong in SDRAM once
         // the firmware audio path is wired. On the host it's free.
         let mut stab_delay = PingPongDelay::new(
-            1.0,                          // max delay buffer, seconds
-            AudioParam::seconds(0.375),   // dotted-8th-ish at techno tempo
-            AudioParam::linear(0.45),     // feedback → a few repeats
-            AudioParam::linear(1.0),      // mix = wet-only output
+            1.0,                        // max delay buffer, seconds
+            AudioParam::seconds(0.375), // dotted-8th-ish at techno tempo
+            AudioParam::linear(0.45),   // feedback → a few repeats
+            AudioParam::linear(1.0),    // mix = wet-only output
         );
         stab_delay.set_sample_rate(sample_rate);
 
@@ -160,13 +168,17 @@ impl Engine {
                 // operator feedback, hard-clipped. Swap with `stabs_mut()
                 // .load_patch(FmPatch::default())` for the clean DX stab.
                 let mut s = fm_stab::FmStab::new(sample_rate);
-                s.load_patch(fm_stab::FmPatch::industrial());
+                // s.load_patch(fm_stab::FmPatch::industrial());
+                // temp: patch to default to see how it sounds
+                s.load_patch(fm_stab::FmPatch::default());
                 s
             },
             stab_buf: Vec::new(),
             stab_send: Vec::new(),
             stab_delay,
             stab_delay_wet: 0.5,
+            bass: bass::RumbleBass::new(sample_rate),
+            bass_buf: Vec::new(),
             kick_velocity: 1.0,
             kick_trigger_note: 60,
             midi_map: MidiMap::new(),
@@ -250,6 +262,11 @@ impl Engine {
     /// Mutable access to the reverb (room size, damping).
     pub fn reverb_mut(&mut self) -> &mut Reverb {
         &mut self.reverb
+    }
+
+    /// Mutable access to the rumble-bass voice (cutoff, resonance, patch, gain).
+    pub fn bass_mut(&mut self) -> &mut bass::RumbleBass {
+        &mut self.bass
     }
 
     /// Configure MIDI CC bindings. Call from the host at startup.
@@ -360,6 +377,10 @@ impl Engine {
             Param::StabDelayTime => self
                 .stab_delay
                 .set_delay_time(AudioParam::seconds(value.max(0.0))),
+            Param::BassCutoff => self.bass.set_cutoff(value),
+            Param::BassRes => self.bass.set_resonance(value),
+            Param::BassEnvMod => self.bass.set_env_mod(value),
+            Param::BassGain => self.bass.set_gain(value),
         }
     }
 
@@ -384,6 +405,7 @@ impl Engine {
         self.hihat_buf.resize(n_frames, 0.0);
         self.stab_buf.resize(n_frames, 0.0);
         self.stab_send.resize(output.len(), 0.0);
+        self.bass_buf.resize(n_frames, 0.0);
         for i in 0..n_frames {
             // When disabled, freeze the sequencer clock and fire nothing; the
             // voices still tick (with no trigger) so any ringing tail decays.
@@ -403,7 +425,8 @@ impl Engine {
                 self.hihat_closed.process(evt.closed_hat) + self.hihat_open.process(evt.open_hat);
 
             if let Some(hit) = evt.stab {
-                self.stabs.play_chord(hit.chord.notes(), hit.velocity);
+                self.stabs
+                    .play_chord_toned(hit.chord.notes(), hit.velocity, hit.tone);
             }
             let st = self.stabs.tick();
             self.stab_buf[i] = st;
@@ -411,6 +434,14 @@ impl Engine {
             // the echoes ping-pong across the stereo field.
             self.stab_send[2 * i] = st;
             self.stab_send[2 * i + 1] = 0.0;
+
+            // Rumble bass — gate events drive the mono voice's envelope.
+            match evt.bass {
+                sequencer::BassEvent::NoteOn { note, vel } => self.bass.note_on(note, vel),
+                sequencer::BassEvent::NoteOff => self.bass.note_off(),
+                sequencer::BassEvent::None => {}
+            }
+            self.bass_buf[i] = self.bass.tick();
         }
         self.kick_dist
             .process(&mut self.kick_buf, self.sample_index);
@@ -433,7 +464,8 @@ impl Engine {
         // 2b. Ping-pong delay on the stab send (wet-only) — fold the bouncing
         //     echoes into the master *before* the reverb so each repeat trails
         //     off into the room. Cybotron in a box.
-        self.stab_delay.process(&mut self.stab_send, self.sample_index);
+        self.stab_delay
+            .process(&mut self.stab_send, self.sample_index);
         let delay_wet = self.stab_delay_wet;
         for (out, &w) in output.iter_mut().zip(self.stab_send.iter()) {
             *out += w * delay_wet;
@@ -465,6 +497,14 @@ impl Engine {
                 frame[0] += b;
                 frame[1] += b;
             }
+        }
+
+        // 5c. Rumble bass — summed dry and centred *after* reverb + bloom so
+        //     the sub stays tight and uncoloured, but *before* tape so it
+        //     shares the master's tape glue. Mono → both channels.
+        for (frame, &b) in output.chunks_exact_mut(2).zip(self.bass_buf.iter()) {
+            frame[0] += b;
+            frame[1] += b;
         }
 
         // 6. Tape emulation — final stage on the master bus. Currently

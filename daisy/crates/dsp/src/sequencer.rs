@@ -65,6 +65,43 @@ pub fn res_to_steps_per_beat(res: usize) -> Option<usize> {
 pub struct StabHit {
     pub chord: Chord,
     pub velocity: f32,
+    /// Optional per-hit "tone" (0..1) from the `stabtone:` lane: low = dark /
+    /// short / filtered, high = bright / long / open. `None` (lane absent or a
+    /// `.` cell) plays the pristine patch with no filter.
+    pub tone: Option<f32>,
+}
+
+/// Gate event for the monophonic bass voice. Unlike the fire-and-forget stab,
+/// the bass needs an explicit note-off so its envelope can sustain-then-release
+/// — the note's *duration* is the number of steps the gate is held open, which
+/// (being a step count) stays locked to the tempo curve with zero drift.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum BassEvent {
+    /// No bass change this sample.
+    #[default]
+    None,
+    /// Strike (or re-strike) a note. `note` is pre-octave-offset MIDI.
+    NoteOn { note: u8, vel: f32 },
+    /// Release the held note (begin its envelope tail).
+    NoteOff,
+}
+
+/// One cell of the `bass:` lane. `Hold` (`_`) keeps the gate open across steps
+/// without retriggering — this is how note duration is written in the grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BassCell {
+    /// Gate off (`.`/`-`).
+    Rest,
+    /// Sustain the current note, no retrigger (`_`).
+    Hold,
+    /// Strike a new note at this velocity (`X`/`x`/`1`-`9`).
+    Strike(f32),
+}
+
+impl Default for BassCell {
+    fn default() -> Self {
+        BassCell::Rest
+    }
 }
 
 /// One sample's worth of trigger output from [`Sequencer::advance`].
@@ -76,6 +113,8 @@ pub struct StepEvent {
     pub open_hat: bool,
     /// `Some(hit)` = trigger an FM stab chord this sample.
     pub stab: Option<StabHit>,
+    /// Gate event for the monophonic rumble-bass voice.
+    pub bass: BassEvent,
 }
 
 pub struct Sequencer {
@@ -102,6 +141,13 @@ pub struct Sequencer {
     ohat_pattern: [f32; MAX_GRID_STEPS],
     /// Per-step velocity for the stab lane (when a chord fires).
     stab_pattern: [f32; MAX_GRID_STEPS],
+    /// Per-step stab "tone" (0..1), or `< 0` for "none" (pristine). Sentinel
+    /// avoids an `Option` array so it copies like the other lanes.
+    stabtone_pattern: [f32; MAX_GRID_STEPS],
+    /// Per-step bass-lane cells (strike / hold / rest).
+    bass_pattern: [BassCell; MAX_GRID_STEPS],
+    /// Whether the bass gate is currently open (a note is sounding/sustaining).
+    bass_gate_open: bool,
     /// Key context for resolving roman-numeral chords.
     key: Key,
     /// Base octave for named/roman chords (notes without their own octave).
@@ -110,6 +156,11 @@ pub struct Sequencer {
     prog: Vec<Chord, MAX_PROG>,
     /// Cursor into `prog`; advances per stab hit, resets each loop.
     prog_cursor: usize,
+    /// The bass progression (lowest note of each chord is played). Consumed one
+    /// per bass *strike* (wraps); restarts each loop alongside `prog`.
+    bassprog: Vec<Chord, MAX_PROG>,
+    /// Cursor into `bassprog`; advances per bass strike, resets each loop.
+    bassprog_cursor: usize,
     /// If false, [`Sequencer::advance`] always returns a default (empty) event.
     enabled: bool,
 
@@ -118,6 +169,7 @@ pub struct Sequencer {
     closed_hat_count: u64,
     open_hat_count: u64,
     stab_count: u64,
+    bass_count: u64,
 }
 
 /// Built-in default: matches the user's pre-grid hand-coded sequence.
@@ -160,15 +212,21 @@ impl Sequencer {
             chat_pattern: widen(&DEFAULT_CHAT),
             ohat_pattern: widen(&DEFAULT_OHAT),
             stab_pattern: [0.0; MAX_GRID_STEPS], // stabs opt in via stab:/prog:
+            stabtone_pattern: [-1.0; MAX_GRID_STEPS], // -1 = none → pristine pluck
+            bass_pattern: [BassCell::Rest; MAX_GRID_STEPS], // bass opts in via bass:/bassprog:
+            bass_gate_open: false,
             key: Key::default(),
             base_octave: chord::DEFAULT_OCTAVE,
             prog: Vec::new(),
             prog_cursor: 0,
+            bassprog: Vec::new(),
+            bassprog_cursor: 0,
             enabled: false,
             kick_count: 0,
             closed_hat_count: 0,
             open_hat_count: 0,
             stab_count: 0,
+            bass_count: 0,
         }
     }
 
@@ -183,6 +241,10 @@ impl Sequencer {
     }
     pub fn stab_count(&self) -> u64 {
         self.stab_count
+    }
+    /// Number of bass *strikes* fired (note-ons, not holds).
+    pub fn bass_count(&self) -> u64 {
+        self.bass_count
     }
     /// Active loop length in steps.
     pub fn steps_per_loop(&self) -> usize {
@@ -295,10 +357,14 @@ impl Sequencer {
         self.chat_pattern = [0.0; MAX_GRID_STEPS];
         self.ohat_pattern = [0.0; MAX_GRID_STEPS];
         self.stab_pattern = [0.0; MAX_GRID_STEPS];
+        self.stabtone_pattern = [-1.0; MAX_GRID_STEPS]; // -1 = none (pristine)
+        self.bass_pattern = [BassCell::Rest; MAX_GRID_STEPS];
         self.kick_pattern[..grid.steps].copy_from_slice(&grid.kick);
         self.chat_pattern[..grid.steps].copy_from_slice(&grid.chat);
         self.ohat_pattern[..grid.steps].copy_from_slice(&grid.ohat);
         self.stab_pattern[..grid.steps].copy_from_slice(&grid.stab);
+        self.stabtone_pattern[..grid.steps].copy_from_slice(&grid.stabtone);
+        self.bass_pattern[..grid.steps].copy_from_slice(&grid.bass);
 
         // Harmony: key (default C minor if absent), base octave, then resolve
         // each progression token into a chord in that key.
@@ -315,6 +381,22 @@ impl Sequencer {
             }
         }
         self.prog_cursor = 0;
+        // Bass progression: same chord syntax, lowest note played per strike.
+        // Falls back to `prog` if no dedicated `bassprog:` was given, so a
+        // bass lane can ride the stab harmony without restating it.
+        self.bassprog.clear();
+        let bass_src = if grid.bassprog.is_empty() {
+            &grid.prog
+        } else {
+            &grid.bassprog
+        };
+        for tok in bass_src.iter() {
+            if let Some(c) = parse_chord(tok, &self.key, self.base_octave) {
+                let _ = self.bassprog.push(c);
+            }
+        }
+        self.bassprog_cursor = 0;
+        self.bass_gate_open = false;
         // Restart cleanly on the new grid.
         self.step = 0;
         self.step_phase = 1.0;
@@ -341,6 +423,8 @@ impl Sequencer {
         self.step = 0;
         self.step_phase = 1.0;
         self.prog_cursor = 0;
+        self.bassprog_cursor = 0;
+        self.bass_gate_open = false;
     }
 
     /// Advance one audio sample. Returns a [`StepEvent`] describing any
@@ -356,8 +440,13 @@ impl Sequencer {
             self.time_seconds -= self.loop_seconds;
             self.step = 0;
             self.step_phase = 1.0;
-            // Restart the progression so every loop iteration is identical.
+            // Restart the progressions so every loop iteration is identical.
+            // NOTE: we deliberately do *not* touch `bass_gate_open` here — a
+            // bass note whose hold cells run to the end of the loop keeps its
+            // gate open across the wrap, so sustain is seamless between loops
+            // (the next loop's first cell decides whether to re-strike/release).
             self.prog_cursor = 0;
+            self.bassprog_cursor = 0;
         }
 
         let bpm = bpm_at(&self.bpm_keypoints, self.time_seconds);
@@ -388,12 +477,42 @@ impl Sequencer {
             }
             if sv > 0.0 && !self.prog.is_empty() {
                 let chord = self.prog[self.prog_cursor % self.prog.len()];
+                let tv = self.stabtone_pattern[idx];
                 evt.stab = Some(StabHit {
                     chord,
                     velocity: sv,
+                    tone: if tv >= 0.0 { Some(tv) } else { None },
                 });
                 self.prog_cursor = self.prog_cursor.wrapping_add(1);
                 self.stab_count += 1;
+            }
+
+            // Bass lane → gated note events for the monophonic voice.
+            match self.bass_pattern[idx] {
+                BassCell::Strike(vel) => {
+                    // Lowest note of the next bassprog chord (mono sub-bass).
+                    if let Some(note) = self
+                        .bassprog
+                        .get(self.bassprog_cursor % self.bassprog.len().max(1))
+                        .and_then(|c| c.notes().iter().min().copied())
+                    {
+                        evt.bass = BassEvent::NoteOn { note, vel };
+                        self.bass_gate_open = true;
+                        self.bass_count += 1;
+                    }
+                    // Advance the cursor on every strike, even if bassprog is
+                    // empty (no-op via the max(1) guard above → get None).
+                    self.bassprog_cursor = self.bassprog_cursor.wrapping_add(1);
+                }
+                BassCell::Hold => {
+                    // Sustain: keep the gate as-is, emit nothing.
+                }
+                BassCell::Rest => {
+                    if self.bass_gate_open {
+                        evt.bass = BassEvent::NoteOff;
+                        self.bass_gate_open = false;
+                    }
+                }
             }
 
             self.step = (self.step + 1) % self.steps_per_loop as u32;
@@ -425,12 +544,18 @@ pub struct PatternGrid {
     pub chat: Vec<f32, MAX_GRID_STEPS>,
     pub ohat: Vec<f32, MAX_GRID_STEPS>,
     pub stab: Vec<f32, MAX_GRID_STEPS>,
+    /// Per-step stab tone (0..1), `-1` = none. Empty if no `stabtone:` row.
+    pub stabtone: Vec<f32, MAX_GRID_STEPS>,
+    /// Bass lane cells (strike / hold / rest). Empty if no `bass:` row.
+    pub bass: Vec<BassCell, MAX_GRID_STEPS>,
     /// Raw `key:` value (e.g. "C minor"); empty if absent.
     pub key: heapless::String<32>,
     /// `octave:` header — base octave for named/roman chords.
     pub octave: Option<i32>,
     /// Raw `prog:` chord tokens, in order. Resolved against the key on load.
     pub prog: Vec<heapless::String<24>, MAX_PROG>,
+    /// Raw `bassprog:` chord tokens. If empty, the bass rides `prog`.
+    pub bassprog: Vec<heapless::String<24>, MAX_PROG>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -468,6 +593,18 @@ pub enum ParseError {
 ///   consumed per `stab:` hit (wraps each loop). Tokens are roman numerals
 ///   (`i iv V`), chord names (`Cm Ab Ebmaj7`), or `[..]` voicings. `.`/`-`
 ///   are visual filler; `|` and `,` group. See [`crate::chord`].
+/// - Stab tone lane: `stabtone:` — one digit `0`-`9` per step setting that
+///   hit's character on a single co-varying axis (0 = dark / short / heavily
+///   filtered, 9 = bright / long / open). `.`/`-` = "none" → the pristine
+///   patch with the per-voice filter bypassed. Absent row = all pristine.
+/// - Bass lane: `bass:` — like the drum rows, but with a **tie char** for
+///   duration on the monophonic sub-bass:
+///   - `X`/`x`/`1`-`9` = strike a new note (velocity as for drums)
+///   - `_` = hold (sustain the current note across this step, no retrigger)
+///   - `.`/`-` = rest (release the held note)
+///   A held note that runs to the loop end sustains seamlessly into the next
+///   loop. `bassprog: <chords>` supplies the pitches (lowest note of each chord
+///   is played, one per strike, wrapping); if omitted, the bass rides `prog`.
 ///
 /// Present voice rows must each have exactly `steps:` cells. Absent rows are
 /// left silent.
@@ -480,9 +617,12 @@ pub fn parse_grid(text: &str) -> Result<PatternGrid, ParseError> {
         chat: Vec::new(),
         ohat: Vec::new(),
         stab: Vec::new(),
+        stabtone: Vec::new(),
+        bass: Vec::new(),
         key: heapless::String::new(),
         octave: None,
         prog: Vec::new(),
+        bassprog: Vec::new(),
     };
     let mut got_steps = false;
 
@@ -513,8 +653,46 @@ pub fn parse_grid(text: &str) -> Result<PatternGrid, ParseError> {
             grid.octave = Some(rest.trim().parse().map_err(|_| ParseError::BadHeader)?);
             continue;
         }
+        // `bassprog:` must be tested before `prog:` so the longer key wins.
+        if let Some(rest) = line.strip_prefix("bassprog:") {
+            grid.bassprog = tokenize_prog::<MAX_PROG>(rest);
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("prog:") {
             grid.prog = tokenize_prog::<MAX_PROG>(rest);
+            continue;
+        }
+
+        // Bass lane: tie-char cells (strike / hold / rest), parsed separately
+        // from the drum/stab velocity rows below.
+        if let Some(rest) = line.strip_prefix("bass:") {
+            for ch in rest.chars() {
+                let cell = match ch {
+                    'X' => BassCell::Strike(1.0),
+                    'x' => BassCell::Strike(0.7),
+                    '0'..='9' => BassCell::Strike((ch as u8 - b'0') as f32 / 9.0),
+                    '_' => BassCell::Hold,
+                    '.' | '-' => BassCell::Rest,
+                    ' ' | '\t' | '|' | ',' => continue,
+                    _ => continue,
+                };
+                grid.bass.push(cell).map_err(|_| ParseError::TooManyCells)?;
+            }
+            continue;
+        }
+
+        // Stab tone lane: digit 0-9 → tone 0..1; `.`/`-` → none (sentinel -1).
+        // Tested before the generic `stab:` row so the longer key wins.
+        if let Some(rest) = line.strip_prefix("stabtone:") {
+            for ch in rest.chars() {
+                let v = match ch {
+                    '0'..='9' => (ch as u8 - b'0') as f32 / 9.0,
+                    '.' | '-' => -1.0,
+                    ' ' | '\t' | '|' | ',' => continue,
+                    _ => continue,
+                };
+                grid.stabtone.push(v).map_err(|_| ParseError::TooManyCells)?;
+            }
             continue;
         }
 
@@ -552,7 +730,9 @@ pub fn parse_grid(text: &str) -> Result<PatternGrid, ParseError> {
     let any_voice_mismatch = (!grid.kick.is_empty() && grid.kick.len() != grid.steps)
         || (!grid.chat.is_empty() && grid.chat.len() != grid.steps)
         || (!grid.ohat.is_empty() && grid.ohat.len() != grid.steps)
-        || (!grid.stab.is_empty() && grid.stab.len() != grid.steps);
+        || (!grid.stab.is_empty() && grid.stab.len() != grid.steps)
+        || (!grid.stabtone.is_empty() && grid.stabtone.len() != grid.steps)
+        || (!grid.bass.is_empty() && grid.bass.len() != grid.steps);
     if any_voice_mismatch {
         return Err(ParseError::VoiceLengthMismatch);
     }
@@ -561,6 +741,17 @@ pub fn parse_grid(text: &str) -> Result<PatternGrid, ParseError> {
     pad_silent(&mut grid.chat, grid.steps);
     pad_silent(&mut grid.ohat, grid.steps);
     pad_silent(&mut grid.stab, grid.steps);
+    // Stab-tone pads with the "none" sentinel (-1), not silence.
+    while grid.stabtone.len() < grid.steps {
+        if grid.stabtone.push(-1.0).is_err() {
+            break;
+        }
+    }
+    while grid.bass.len() < grid.steps {
+        if grid.bass.push(BassCell::Rest).is_err() {
+            break;
+        }
+    }
 
     Ok(grid)
 }
@@ -658,6 +849,100 @@ chat: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
         seq.load_grid(text)
     }
 
+    // 16-step bass: a whole-note (strike + 7 holds) then a half + rests, with
+    // a held note running to the loop end (seamless-sustain case).
+    const PATBASS: &str = "\
+name: bass test
+steps: 16
+res: 16
+key: C minor
+kick: X . . . X . . . X . . . X . . .
+bass: X _ _ _ _ _ _ _ X _ _ _ _ _ _ _
+bassprog: i v
+";
+
+    fn fixed_tempo(bpm: f32, loop_s: f32) -> Vec<Keypoint, MAX_KEYPOINTS> {
+        let mut kps: Vec<Keypoint, MAX_KEYPOINTS> = Vec::new();
+        let _ = kps.push(Keypoint { t: 0.0, v: bpm });
+        kps
+    }
+
+    #[test]
+    fn bass_lane_parses_strike_hold_rest() {
+        let grid = parse_grid(PATBASS).unwrap();
+        assert_eq!(grid.bass.len(), 16);
+        assert_eq!(grid.bass[0], BassCell::Strike(1.0));
+        assert_eq!(grid.bass[1], BassCell::Hold);
+        assert_eq!(grid.bass[8], BassCell::Strike(1.0));
+        assert_eq!(grid.bassprog.len(), 2);
+    }
+
+    #[test]
+    fn held_bass_emits_one_noteon_per_strike_and_plays_chord_root() {
+        let mut seq = Sequencer::new(48_000.0);
+        seq.load_grid(PATBASS).unwrap();
+        // 16 sixteenths at 120 BPM = 2 s loop.
+        seq.set_tempo(fixed_tempo(120.0, 2.0), 2.0);
+        let (mut ons, mut offs) = (0u32, 0u32);
+        let mut first_note = None;
+        // Sample just under one full loop (1.9 s of a 2 s loop) so we don't
+        // land on the wrap and re-fire step 0.
+        for _ in 0..((48_000.0 * 1.9) as usize) {
+            match seq.advance().bass {
+                BassEvent::NoteOn { note, .. } => {
+                    if first_note.is_none() {
+                        first_note = Some(note);
+                    }
+                    ons += 1;
+                }
+                BassEvent::NoteOff => offs += 1,
+                BassEvent::None => {}
+            }
+        }
+        // Two strikes per loop (steps 0 and 8), no rests → no note-offs in the
+        // loop body; the gate stays open across the wrap (seamless sustain).
+        assert_eq!(ons, 2, "two strikes per loop");
+        assert_eq!(offs, 0, "no rests → no note-off; sustain crosses the loop");
+        // `i` in C minor at default octave 3 = C(48) Eb(51) G(55); bass plays
+        // the lowest note → 48, then offset -12 happens in the voice, not here.
+        assert_eq!(first_note, Some(48));
+    }
+
+    #[test]
+    fn bass_note_length_is_tempo_invariant_in_steps() {
+        // The whole point: a held note's duration measured in STEPS is the same
+        // regardless of tempo (only its wall-clock seconds differ). Count the
+        // steps the gate stays open by sampling step() at note-on/off.
+        fn steps_held(bpm: f32) -> u32 {
+            // One strike, held to the end of a 16-step loop, then a rest pattern
+            // that releases at step 12.
+            let pat = "steps: 16\nres: 16\nkick: X...X...X...X...\nbass: X___________....\nbassprog: i\n";
+            let mut seq = Sequencer::new(48_000.0);
+            seq.load_grid(pat).unwrap();
+            // loop seconds = 16 sixteenths = 4 beats = 4 * 60/bpm.
+            let loop_s = 4.0 * 60.0 / bpm;
+            seq.set_tempo(fixed_tempo(bpm, loop_s), loop_s);
+            let mut on_step = None;
+            let mut off_step = None;
+            // Run ~1.1 loops so we catch the release.
+            let n = (loop_s * 1.1 * 48_000.0) as usize;
+            for _ in 0..n {
+                let st = seq.step();
+                match seq.advance().bass {
+                    BassEvent::NoteOn { .. } if on_step.is_none() => on_step = Some(st),
+                    BassEvent::NoteOff if off_step.is_none() => off_step = Some(st),
+                    _ => {}
+                }
+            }
+            // Release happens at step 12 (first '.' after the 12 strike/holds).
+            off_step.unwrap().wrapping_sub(on_step.unwrap())
+        }
+        let slow = steps_held(60.0);
+        let fast = steps_held(140.0);
+        assert_eq!(slow, fast, "held duration in steps must not depend on tempo");
+        assert_eq!(slow, 12, "strike at 0, release at 12 → 12 steps held");
+    }
+
     #[test]
     fn load_grid_resolves_chords_and_fires_stabs() {
         let mut seq = Sequencer::new(48_000.0);
@@ -676,5 +961,41 @@ chat: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
         assert!(seq.stab_count() >= 2, "stabs should have fired");
         // First fired chord is `i` in C minor = C Eb G at octave 3 = 48,51,55.
         assert_eq!(chords_seen[0].notes(), &[48, 51, 55]);
+    }
+
+    const PATTONE: &str = "\
+name: tone test
+steps: 16
+res: 16
+key: C minor
+stab:     X . . . X . . . X . . . X . . .
+stabtone: 2 . . . 9 . . . . . . . 5 . . .
+prog: i i i i
+";
+
+    #[test]
+    fn stabtone_lane_attaches_per_hit_tone() {
+        let grid = parse_grid(PATTONE).unwrap();
+        assert_eq!(grid.stabtone.len(), 16);
+        assert!((grid.stabtone[0] - 2.0 / 9.0).abs() < 1e-6);
+        assert!((grid.stabtone[4] - 1.0).abs() < 1e-6); // 9/9
+        assert_eq!(grid.stabtone[8], -1.0); // '.' → none
+        assert!((grid.stabtone[12] - 5.0 / 9.0).abs() < 1e-6);
+
+        let mut seq = Sequencer::new(48_000.0);
+        seq.load_grid(PATTONE).unwrap();
+        seq.set_tempo(fixed_tempo(120.0, 2.0), 2.0);
+        let mut tones = alloc::vec::Vec::new();
+        for _ in 0..((48_000.0 * 1.9) as usize) {
+            if let Some(hit) = seq.advance().stab {
+                tones.push(hit.tone);
+            }
+        }
+        // Four stab hits: tone 2/9, 9/9, none, 5/9.
+        assert_eq!(tones.len(), 4);
+        assert!((tones[0].unwrap() - 2.0 / 9.0).abs() < 1e-6);
+        assert!((tones[1].unwrap() - 1.0).abs() < 1e-6);
+        assert_eq!(tones[2], None);
+        assert!((tones[3].unwrap() - 5.0 / 9.0).abs() < 1e-6);
     }
 }

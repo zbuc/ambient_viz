@@ -37,6 +37,14 @@ pub enum Param {
     StabDelayFeedback,
     /// Stab ping-pong delay: delay time, seconds.
     StabDelayTime,
+    /// Rumble-bass lowpass cutoff, Hz.
+    BassCutoff,
+    /// Rumble-bass filter resonance (0..1).
+    BassRes,
+    /// Rumble-bass envelope→cutoff sweep amount, Hz.
+    BassEnvMod,
+    /// Rumble-bass output gain.
+    BassGain,
 }
 
 #[derive(Debug, Clone, Copy)]

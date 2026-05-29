@@ -22,9 +22,28 @@
 //! oscillator's internal `AudioParam`/block buffers are never touched and no
 //! allocation happens after construction — safe for the embedded target.
 
+use crate::svf::Svf;
 use infinitedsp_core::FrameProcessor;
 use infinitedsp_core::core::audio_param::AudioParam;
 use infinitedsp_core::synthesis::oscillator::{Oscillator, Waveform};
+
+/// Map a per-hit "tone" value (0..1) to the modulation applied on top of the
+/// base patch. The three perceptual axes co-vary on one knob:
+/// 0 = dark / short / heavily-filtered, 1 = bright / long / open.
+///
+/// Returns `(index_mul, decay_mul, cutoff_hz, resonance)`:
+/// - `index_mul` scales FM index (brightness / sideband richness),
+/// - `decay_mul` scales the amp + mod decay (note length),
+/// - `cutoff_hz` is the per-note lowpass cutoff (exp-mapped, dark→open),
+/// - `resonance` adds growl at the dark end where the filter is doing work.
+fn tone_to_mods(tone: f32) -> (f32, f32, f32, f32) {
+    let t = tone.clamp(0.0, 1.0);
+    let index_mul = 0.4 + t * 1.2; // 0.4 .. 1.6
+    let decay_mul = 0.3 + t * 1.7; // 0.3 .. 2.0
+    let cutoff_hz = 180.0 * libm::powf(40.0, t); // ~180 Hz .. ~7.2 kHz (exp)
+    let resonance = 0.15 + (1.0 - t) * 0.3; // darker hits ring a touch more
+    (index_mul, decay_mul, cutoff_hz, resonance)
+}
 
 /// Polyphony. A triad uses 3 voices, so 8 lets two stabs overlap with room.
 pub const NUM_VOICES: usize = 8;
@@ -145,6 +164,12 @@ struct FmVoice {
     fb_z1: f32,
     fb_z2: f32,
 
+    /// Per-voice resonant lowpass. Only run when `filtered` is set (a hit with
+    /// a `stabtone:` value); otherwise bypassed so the clean DX pluck is
+    /// untouched and costs nothing in the hot loop.
+    svf: Svf,
+    filtered: bool,
+
     velocity: f32,
     note: u8,
     /// Monotonic stamp from the bank, for oldest-voice stealing.
@@ -170,6 +195,8 @@ impl FmVoice {
             mod_decay_coeff: 0.0,
             fb_z1: 0.0,
             fb_z2: 0.0,
+            svf: Svf::new(sample_rate),
+            filtered: false,
             velocity: 0.0,
             note: 0,
             age: 0,
@@ -179,13 +206,26 @@ impl FmVoice {
     fn set_sample_rate(&mut self, sample_rate: f32) {
         self.carrier.set_sample_rate(sample_rate);
         self.modulator.set_sample_rate(sample_rate);
+        self.svf = Svf::new(sample_rate);
     }
 
     fn is_idle(&self) -> bool {
         self.stage == Stage::Idle
     }
 
-    fn note_on(&mut self, note: u8, velocity: f32, patch: &FmPatch, sample_rate: f32, age: u64) {
+    /// Strike a note. `tone` is the optional per-hit character (0..1): `None`
+    /// plays the base patch verbatim with the filter bypassed (the pristine
+    /// pluck); `Some(t)` co-varies brightness/length/filtering via
+    /// [`tone_to_mods`].
+    fn note_on(
+        &mut self,
+        note: u8,
+        velocity: f32,
+        patch: &FmPatch,
+        tone: Option<f32>,
+        sample_rate: f32,
+        age: u64,
+    ) {
         self.note = note;
         self.car_freq = midi_to_freq(note);
         self.patch = *patch;
@@ -198,6 +238,21 @@ impl FmVoice {
         self.fb_z1 = 0.0;
         self.fb_z2 = 0.0;
 
+        // Per-hit tone shaping. When absent, leave the patch untouched and the
+        // filter bypassed so the base pluck is bit-for-bit unchanged.
+        let (mut decay_s, mut mod_decay_s) = (patch.decay_s, patch.mod_decay_s);
+        if let Some(t) = tone {
+            let (index_mul, decay_mul, cutoff_hz, res) = tone_to_mods(t);
+            self.patch.index = patch.index * index_mul;
+            decay_s = patch.decay_s * decay_mul;
+            mod_decay_s = patch.mod_decay_s * decay_mul;
+            self.svf.set_freq(cutoff_hz);
+            self.svf.set_res(res);
+            self.filtered = true;
+        } else {
+            self.filtered = false;
+        }
+
         self.amp = 0.0;
         self.stage = Stage::Attack;
         let attack_samples = (patch.attack_s * sample_rate).max(1.0);
@@ -205,9 +260,9 @@ impl FmVoice {
 
         // Exponential coefficient matching infinitedsp's ADSR convention
         // (reaches ~95% of the target over the stated time).
-        self.decay_coeff = exp_coeff(patch.decay_s, sample_rate);
+        self.decay_coeff = exp_coeff(decay_s, sample_rate);
         self.mod_env = 1.0;
-        self.mod_decay_coeff = exp_coeff(patch.mod_decay_s, sample_rate);
+        self.mod_decay_coeff = exp_coeff(mod_decay_s, sample_rate);
     }
 
     #[inline]
@@ -247,8 +302,16 @@ impl FmVoice {
         self.fb_z2 = self.fb_z1;
         self.fb_z1 = raw;
 
-        // Drive into the waveshaper, then envelope.
-        let shaped = self.patch.shaper.apply(raw * self.patch.drive);
+        // Drive into the waveshaper.
+        let mut shaped = self.patch.shaper.apply(raw * self.patch.drive);
+
+        // Optional per-hit resonant lowpass (only for hits with a tone value;
+        // bypassed otherwise so the clean pluck path is untouched).
+        if self.filtered {
+            self.svf.process(shaped);
+            shaped = self.svf.low();
+        }
+
         shaped * self.amp * self.velocity
     }
 }
@@ -279,18 +342,31 @@ impl FmStab {
         }
     }
 
-    /// Start one note, allocating a free voice or stealing the oldest.
+    /// Start one note, allocating a free voice or stealing the oldest. Plays
+    /// the base patch with the filter bypassed (the pristine pluck).
     pub fn note_on(&mut self, note: u8, velocity: f32) {
+        self.note_on_toned(note, velocity, None);
+    }
+
+    /// Start one note with an optional per-hit `tone` (0..1). `None` =
+    /// pristine; `Some(t)` co-varies brightness/length/filtering.
+    pub fn note_on_toned(&mut self, note: u8, velocity: f32, tone: Option<f32>) {
         self.counter = self.counter.wrapping_add(1);
         let age = self.counter;
         let idx = self.pick_voice();
-        self.voices[idx].note_on(note, velocity, &self.patch, self.sample_rate, age);
+        self.voices[idx].note_on(note, velocity, &self.patch, tone, self.sample_rate, age);
     }
 
-    /// Trigger every note of a chord at once.
+    /// Trigger every note of a chord at once (pristine, no per-hit tone).
     pub fn play_chord(&mut self, notes: &[u8], velocity: f32) {
+        self.play_chord_toned(notes, velocity, None);
+    }
+
+    /// Trigger a chord with an optional shared per-hit `tone` applied to every
+    /// note of the chord.
+    pub fn play_chord_toned(&mut self, notes: &[u8], velocity: f32, tone: Option<f32>) {
         for &n in notes {
-            self.note_on(n, velocity);
+            self.note_on_toned(n, velocity, tone);
         }
     }
 
@@ -445,5 +521,59 @@ mod tests {
             dirty > clean,
             "industrial ({dirty}) should be brighter/harsher than clean ({clean})"
         );
+    }
+
+    /// Energy + brightness (zero crossings) of one struck note over `n` samples.
+    fn measure(tone: Option<f32>, n: usize) -> (f64, u32) {
+        let mut bank = FmStab::new(48_000.0);
+        // Use the clean default pluck so the filter/tone is the only variable.
+        bank.load_patch(FmPatch::default());
+        bank.note_on_toned(60, 1.0, tone);
+        let (mut energy, mut prev, mut xings) = (0.0f64, 0.0f32, 0u32);
+        for _ in 0..n {
+            let s = bank.tick();
+            energy += (s * s) as f64;
+            if (s > 0.0) != (prev > 0.0) {
+                xings += 1;
+            }
+            prev = s;
+        }
+        (energy, xings)
+    }
+
+    #[test]
+    fn dark_tone_is_duller_and_shorter_than_bright_tone() {
+        // Brightness: a high-tone hit should have more zero crossings (more HF
+        // through the open filter + higher FM index) than a low-tone hit.
+        let (_, dark_x) = measure(Some(0.1), 4_800);
+        let (_, bright_x) = measure(Some(0.95), 4_800);
+        assert!(
+            bright_x > dark_x,
+            "bright tone ({bright_x} xings) should be brighter than dark ({dark_x})"
+        );
+
+        // Length: over a 1 s window the short (dark) hit should have decayed to
+        // far less total energy than the long (bright) one.
+        let (dark_e, _) = measure(Some(0.1), 48_000);
+        let (bright_e, _) = measure(Some(0.95), 48_000);
+        assert!(
+            bright_e > dark_e * 2.0,
+            "bright/long ({bright_e:.3}) should ring much longer than dark/short ({dark_e:.3})"
+        );
+    }
+
+    #[test]
+    fn no_tone_is_bit_for_bit_the_pristine_pluck() {
+        // A hit with tone=None must be identical to the old filterless path:
+        // render the patch directly and compare sample-for-sample.
+        let mut toned = FmStab::new(48_000.0);
+        toned.note_on_toned(60, 1.0, None);
+        let mut plain = FmStab::new(48_000.0);
+        plain.note_on(60, 1.0); // delegates to note_on_toned(.., None)
+        for i in 0..4_800 {
+            let a = toned.tick();
+            let b = plain.tick();
+            assert_eq!(a, b, "pristine path diverged at sample {i}");
+        }
     }
 }
