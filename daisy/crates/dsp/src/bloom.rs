@@ -38,14 +38,14 @@ const VOICES: [(f32, f32, f32, f32); NUM_VOICES] = [
 /// Resonance (Q) at `amount` 0 and 1. Higher = more ringing / more pitched.
 /// Capped below 1.0 for stability (the SVF's cubic damping self-limits above).
 const RES_MIN: f32 = 0.50;
-const RES_MAX: f32 = 0.90;
+const RES_MAX: f32 = 0.96;
 
 /// Attenuation applied to the program tap before the resonators — the master
 /// mix is near full-scale and high-Q band-pass gain is large.
 const INPUT_ATTEN: f32 = 0.35;
 
 /// Overall bloom output gain folded back into the master. Tune by ear.
-const MASTER_GAIN: f32 = 0.35;
+const MASTER_GAIN: f32 = 0.8;
 
 struct Voice {
     svf: Svf,

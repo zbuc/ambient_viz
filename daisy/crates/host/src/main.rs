@@ -148,15 +148,18 @@ fn main() -> Result<()> {
         use std::f32::consts::PI;
         let bloom_engine = Arc::clone(&engine);
         let period_s = 8.0 * 4.0 * 60.0 / 112.0; // 8 bars · 4 beats · (60/BPM)
-        println!("bloom LFO: far→near→far every {period_s:.3}s (8 bars @ 112 BPM)");
+        println!("bloom amount PINNED at 0.9 for tuning (LFO period would be {period_s:.3}s)");
         std::thread::spawn(move || {
             let start = std::time::Instant::now();
             let dt = std::time::Duration::from_millis(10); // 100 Hz control rate
             loop {
                 std::thread::sleep(dt);
                 let t = start.elapsed().as_secs_f32();
-                let phase = (t / period_s) * 2.0 * PI;
-                let amount = 0.5 - 0.5 * phase.cos(); // 0 → 1 → 0 over the period
+                let _sweep = 0.5 - 0.5 * ((t / period_s) * 2.0 * PI).cos(); // far→near→far LFO
+                // AUDITION: pinned high so the bloom is judged at the peak of
+                // the gesture, not the fleeting LFO crest. Swap to `_sweep` to
+                // restore the far→near→far sweep.
+                let amount = 0.9;
                 bloom_engine.lock().unwrap().set_bloom_amount(amount);
             }
         });

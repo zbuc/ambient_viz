@@ -766,33 +766,6 @@ function _buildEye() {
     ],
   };
 }
-function _buildSkyline() {
-  const heights = [0.08, 0.32, 0.18, 0.42, 0.14, 0.50, 0.22, 0.36, 0.10, 0.28, 0.16];
-  const baseY = 0.25;
-  const pts = [-0.5, baseY];
-  const n = heights.length;
-  for (let i = 0; i < n; i++) {
-    const x0 = -0.5 + i * (1 / n);
-    const x1 = -0.5 + (i + 1) * (1 / n);
-    const y = baseY - heights[i];
-    pts.push(x0, y, x1, y);
-  }
-  pts.push(0.5, baseY);
-  const subs = [pts];
-  for (let i = 0; i < n; i++) {
-    if (heights[i] < 0.18) continue;
-    const x0 = -0.5 + i * (1 / n) + 0.015;
-    const x1 = -0.5 + (i + 1) * (1 / n) - 0.015;
-    const yTop = baseY - heights[i] + 0.05;
-    const yBot = baseY - 0.05;
-    for (let row = 0; row < 2; row++) {
-      const ry0 = yTop + (yBot - yTop) * (row / 3);
-      const ry1 = ry0 + (yBot - yTop) * 0.18;
-      subs.push(_rect(x0 + 0.005, ry0, x1 - 0.005, ry1));
-    }
-  }
-  return { aspect: 2.0, subpaths: subs };
-}
 function _buildSpeaker() {
   return {
     aspect: 1.0,
@@ -809,7 +782,6 @@ const SILHOUETTES = {
   walker:   _buildWalker(),
   umbrella: _buildUmbrella(),
   eye:      _buildEye(),
-  skyline:  _buildSkyline(),
   speaker:  _buildSpeaker(),
 };
 const SILHOUETTE_NAMES = Object.keys(SILHOUETTES);
@@ -2637,7 +2609,7 @@ function setupLattice() {
 
     // Bake fill + edge sprites per silhouette and upload as GL textures.
     // Done once at init using Canvas2D's evenodd fill (preserves holes in
-    // umbrella/eye/skyline/speaker). The path coordinate range is roughly
+    // umbrella/eye/speaker). The path coordinate range is roughly
     // [-0.5, 0.5]; we render into a SILH_BAKE_PX² canvas centered at the
     // midpoint. The sprite quad in the vertex shader is [-0.5, 0.5], so a
     // drawScale of N gives an N-CSS-pixel silhouette in screen space.
@@ -2810,8 +2782,8 @@ function applySparks(instanceData, instanceCount) {
 // Bake an alpha-only sprite per silhouette per layer (fill, edge) using
 // Canvas2D Path2D. Path coords are normalized to roughly [-0.5, 0.5]; we
 // translate by SILH_BAKE_PX/2 and scale by SILH_BAKE_PX so the silhouette
-// fills the bake canvas. evenodd preserves holes (eye/speaker/umbrella/
-// skyline). Strokes are baked at fixed widths chosen to roughly match the
+// fills the bake canvas. evenodd preserves holes (eye/speaker/umbrella).
+// Strokes are baked at fixed widths chosen to roughly match the
 // CSS-pixel widths at typical drawScale values.
 function bakeSilhouetteSprites() {
   // Fixed stroke widths in path-coord units. The original code used
@@ -4809,7 +4781,7 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   // in the worker (see <script type="text/worker"> above). Main only needs
   // the name list so the dev panel dropdown can populate. Keep in sync with
   // SILHOUETTES in the worker.
-  const SILHOUETTE_NAMES = ['car', 'walker', 'umbrella', 'eye', 'skyline', 'speaker'];
+  const SILHOUETTE_NAMES = ['car', 'walker', 'umbrella', 'eye', 'speaker'];
 
   // ============================================================
   // automation runtime + PARAMS registry (single source of truth)
