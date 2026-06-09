@@ -528,6 +528,12 @@ impl TapeProcessor {
     }
 
     /// Apply tape effects to an interleaved-stereo buffer, in place.
+    // `itcm-tape`: relocate this (the dominant DSP stage) into the firmware's
+    // zero-wait ITCM to dodge QSPI-XIP I-cache contention (see BENCH_QSPI.md).
+    // Only this fn's own body moves; `#[inline]` sub-stages (hysteresis/wow/chew)
+    // fold in, but slice callees (loss/head_bump/noise) stay in flash unless they
+    // too are tagged — verify the captured bytes with `llvm-nm`/size.
+    #[cfg_attr(feature = "itcm-tape", unsafe(link_section = ".itcm"))]
     pub fn process(&mut self, output: &mut [f32], sample_index: u64) {
         if !self.enabled {
             return;

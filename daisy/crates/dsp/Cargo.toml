@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 description = "Audio + MIDI core for ambient-viz-daisy. no_std, runs on both Daisy and Mac."
 
+[features]
+# Place `tape::TapeProcessor::process` in the firmware's `.itcm` linker section
+# (zero-wait ITCM) for QSPI-XIP perf tuning. Firmware-only — enabled via the
+# firmware `itcm-tape` feature; the Mac host build never sets it (the `.itcm`
+# section is meaningless there). See memory `daisy-modular-itcm-perbuild`.
+itcm-tape = []
+
 [dependencies]
 # DaisySP-equivalent no_std DSP library (reverbs, filters, delays, distortion,
 # modulation, oscillators, etc.). Requires alloc — firmware crate provides a

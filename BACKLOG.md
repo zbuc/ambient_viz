@@ -38,10 +38,28 @@ failure live control, SAI audio path) are intentionally excluded.
   (`block-device-driver` + an async FS) so the audio task can `await` reads. Also needs
   the SDMMC1 socket wired (4-bit, D1–D6 — see "KiCad PCB design" under Hardware / PCB).
   — mem `daisy-uac-async-sd-future`, `daisy-usb-capture-clicks`, `daisy-sd-connector-roadmap`
-- [ ] **Bootloader + QSPI XIP** — run firmware from external QSPI via the Daisy
-  bootloader to lift the 128 KB internal-flash ceiling; then revert the `opt-level='z'`
-  debug-alias workaround. Prereq for large additions (embassy-net, etc.). —
-  `daisy/PLAN_QSPI_BOOTLOADER.md`, mem `daisy-qspi-flash-future`
+- [x] **Bootloader + QSPI XIP** — DONE (2026-06-09). Runs from external QSPI (app @
+  `0x90040000`) via the Daisy bootloader behind the `qspi` feature; `cargo flash-qspi` /
+  `flash-qspi-debug` build+flash via dfu on a USB power-cycle. Lifts the 128 KB ceiling →
+  full `bell+voice` (which no longer fits internal flash) runs at opt-s. Benchmarked:
+  +26 % on `tape` (I-cache contention) but `SAI_ERR≈0` → real-time-viable. Internal flash
+  is now PARED (`flash-prod-bell`/`flash-prod-voice`); the opt-z workaround still applies
+  to the internal-flash builds, dropped for QSPI. Future: ITCM-ramfunc `tape` if DSP load
+  grows. — `daisy/BENCH_QSPI.md`, `daisy/PLAN_QSPI_BOOTLOADER.md`, mem `daisy-qspi-flash-future`
+- [ ] **SAI RX `Overrun` restarts (startup-only, low priority)** — the audio loop
+  restarts (`daisy-embassy audio.rs:169` "enter audio callback loop") on SAI **RX
+  Overruns**, all clustered in the first ~1.3 s of boot: 2 at the SAI-start→loop-start
+  gap, then one ~5-restart burst as the USB UAC stream comes up (variable timing across
+  runs: 1.3 s / 3.7 s / 5.8 s). Steady state is glitch-free (`sai_err=0`, `cb_full=366µs`).
+  The input is UNUSED (`|_input, output|` — `codec.read()` only paces the loop), so an
+  Overrun = a brief loop stall (likely a `critical_section` IRQ-mask during USB/heap
+  setup) that drops one ~0.67 ms output block before re-syncing → a faint boot click.
+  Options if ever worth it: (a) trim startup critical-section stalls; (b) vendor
+  `daisy-embassy` to continue (not `?`-bail + tear down output) on a benign RX overrun on
+  an unused input. Diagnosed via the `bin-qspi-debug` SAI-restart error log (`main.rs`
+  ~921). The separate boot SD-underrun (`sd_under=832`) is already FIXED by the ring
+  pre-fill (`main.rs`, before the audio spawn). — mem `daisy-dsp-realtime`, conversation
+  2026-06-09 (new)
 - [ ] **Patch SD overlay (JSON) — GATED ON QSPI** — read `/PATCHES/BELL.JSON` +
   `STAB.JSON` at boot via `embedded-sdmmc` + `FmPatch::from_json` (serde-json-core),
   falling back to the compiled `FmPatch::bell()`/`industrial()` on any error. Threading

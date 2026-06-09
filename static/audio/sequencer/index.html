@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sequencer — audio tools</title>
+  <link rel="stylesheet" href="../shared/style.css">
+  <style>
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 14px; color: var(--muted); }
+    .meta label { display: flex; gap: 6px; align-items: center; }
+    .meta input { width: 64px; }
+    .meta input.wide { width: 150px; }
+    .grid { display: grid; gap: 3px; overflow-x: auto; padding-bottom: 6px; }
+    .grid-row { display: grid; grid-auto-flow: column; gap: 3px; align-items: center; }
+    .lane-name { width: 70px; color: var(--muted); position: sticky; left: 0; background: var(--bg); }
+    .cell {
+      width: 22px; height: 22px; border: 1px solid var(--line); border-radius: 3px;
+      background: var(--panel-2); cursor: pointer;
+    }
+    .cell.bar-start { border-left-color: var(--muted); }
+    .cell.on { background: var(--accent); }
+    .cell.soft { background: #3b6f6a; }
+    .cell.hold { background: #4a5160; }
+    .prog { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; max-width: 520px; }
+    .prog input { width: 100%; }
+    #status { color: var(--muted); margin-left: auto; }
+    .err { color: #e06d6d; }
+  </style>
+</head>
+<body>
+  <header class="app-bar">
+    <h1>sequencer</h1>
+    <span class="spacer"></span>
+    <a href="../index.html">← audio tools</a>
+  </header>
+  <main>
+    <div class="toolbar">
+      <button id="load-default">Load sample .pat</button>
+      <button id="open">Open file…</button>
+      <button id="new">New</button>
+      <button id="save" class="primary">Download .pat</button>
+      <span id="status"></span>
+    </div>
+
+    <div class="meta">
+      <label>name <input id="m-name" type="text" class="wide"></label>
+      <label>key <input id="m-key" type="text"></label>
+      <label>octave <input id="m-octave" type="number"></label>
+      <label>steps <input id="m-steps" type="number" disabled></label>
+      <label>res <input id="m-res" type="number"></label>
+    </div>
+
+    <div id="grid" class="grid"></div>
+
+    <div class="prog">
+      <label>prog (chord tokens, one per stab hit)
+        <input id="m-prog" type="text" placeholder="ii ii i ii">
+      </label>
+      <label>bassprog (blank = ride prog)
+        <input id="m-bassprog" type="text" placeholder="ii ii i ii">
+      </label>
+    </div>
+  </main>
+  <script type="module" src="sequencer.js"></script>
+</body>
+</html>

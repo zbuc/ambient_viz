@@ -15,7 +15,14 @@ anyhow = "1.0"
 midir = "0.10"
 
 # Timeline JSON parsing is shared with firmware via `dsp::timeline`
-# (serde-json-core). No host-specific JSON dep needed.
+# (serde-json-core). On the host we use full serde_json instead — the
+# `patch_server` bin deserializes FmPatch/BassPatch from the browser editor's
+# POST bodies (the patch structs derive serde in `dsp`).
+serde_json = "1.0"
+
+# Minimal blocking HTTP server for the `patch_server` bin — fits the host's
+# existing synchronous cpal/midir architecture (no async runtime).
+tiny_http = "0.12"
 
 # `mp3` feature enables both the MP3 demuxer and the MPEG audio decoder.
 # Add "wav"/"flac"/"ogg" here later if we want to load those formats too.

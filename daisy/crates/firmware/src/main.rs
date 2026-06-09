@@ -135,6 +135,48 @@ static USB_PKT_MAX_FR: AtomicU32 = AtomicU32::new(0);
 // so the expected overflow during not-capturing periods doesn't inflate it.
 static USB_CAPTURING: AtomicBool = AtomicBool::new(false);
 
+// --- Per-stage DSP benchmark (feature = "bench") -------------------------------
+// Max DWT cycle count per heartbeat interval for each master-chain stage, to
+// quantify the QSPI XIP penalty pre/post port (same code, internal flash vs
+// `0x90000000` XIP). CPU @ 480 MHz, so cycles/480 = us. Reported over RTT in the
+// heartbeat; fully cfg'd out (zero cost) without the feature. See BENCH_QSPI.md.
+#[cfg(feature = "bench")]
+static BENCH_SD: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "bench")]
+static BENCH_TAPE: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "bench")]
+static BENCH_FREEZE: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "bench")]
+static BENCH_BELL: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "bench")]
+static BENCH_VOICE: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "bench")]
+static BENCH_LIMITER: AtomicU32 = AtomicU32::new(0);
+
+/// Raw DWT_CYCCNT read (0xE0001004). The counter is enabled once at boot (main).
+#[cfg(feature = "bench")]
+#[inline(always)]
+fn cyccnt() -> u32 {
+    unsafe { core::ptr::read_volatile(0xE000_1004 as *const u32) }
+}
+
+/// Time `$body`, record the worst-case cycle count into the `$cyc` atomic, and
+/// return the body's value. Off-feature it just runs `$body` — and because the
+/// `$cyc` token isn't emitted then, the `BENCH_*` statics need not exist.
+#[cfg(feature = "bench")]
+macro_rules! bench_stage {
+    ($cyc:expr, $body:block) => {{
+        let __t = cyccnt();
+        let __r = $body;
+        $cyc.fetch_max(cyccnt().wrapping_sub(__t), Ordering::Relaxed);
+        __r
+    }};
+}
+#[cfg(not(feature = "bench"))]
+macro_rules! bench_stage {
+    ($cyc:expr, $body:block) => {{ $body }};
+}
+
 // 2b: audio runs on a high-priority interrupt executor so blocking SD reads
 // (and, later, DSP/MIDI) on the thread executor can never starve the SAI
 // refill. UART4's vector is unused by the app and just drives this executor —
@@ -149,8 +191,65 @@ unsafe fn UART4() {
 // LED (thread executor): 1 flash = no card, 2 = FAT mount, 3 = AMBIENT.RAW
 // open failed; steady 1 Hz = streaming. Panics print over the debug UART.
 
+// Reset-handler hook (feature = "qspi" and/or "itcm"). Runs BEFORE RAM init, so it
+// must touch only registers + do explicit memory copies (no .data/.bss yet).
+#[cfg(any(feature = "qspi", feature = "itcm"))]
+#[cortex_m_rt::pre_init]
+unsafe fn pre_init() {
+    unsafe {
+        // QSPI XIP boot hand-off: the Daisy bootloader jumps to us with SysTick
+        // still running and (potentially) NVIC interrupts enabled — they fire into
+        // our default handler before `main` and wedge boot (observed: VECTACTIVE=15
+        // SysTick in DefaultHandler, .data never copied). Kill SysTick, clear all
+        // external interrupts, point VTOR at our 0x90040000 vector table.
+        #[cfg(feature = "qspi")]
+        {
+            core::ptr::write_volatile(0xE000_E010 as *mut u32, 0); // SYST_CSR = 0 (SysTick off)
+            core::ptr::write_volatile(0xE000_ED04 as *mut u32, 1 << 25); // ICSR.PENDSTCLR
+            for i in 0..8u32 {
+                core::ptr::write_volatile((0xE000_E180_u32 + i * 4) as *mut u32, 0xFFFF_FFFF); // ICERx
+                core::ptr::write_volatile((0xE000_E280_u32 + i * 4) as *mut u32, 0xFFFF_FFFF); // ICPRx
+            }
+            core::ptr::write_volatile(0xE000_ED08 as *mut u32, 0x9004_0000); // SCB_VTOR
+        }
+
+        // ITCM ram-functions: ensure ITCM is enabled, then copy the `.itcm` section
+        // from its FLASH/QSPI load address (__siitcm) into ITCM (zero-wait code RAM
+        // @ 0x0). Done in pre_init so it runs before ANY code can call a relocated
+        // fn AND before there's any doubt the TCM is active. ITCM isn't cached, so
+        // dsb;isb suffices. No-op (0 words) when nothing is tagged `.itcm`.
+        #[cfg(feature = "itcm")]
+        {
+            // CM7 ITCMCR.EN = 1 (idempotent; guarantees the stores below land in
+            // ITCM rather than a boot-time alias).
+            let itcmcr = 0xE000_EF90 as *mut u32;
+            core::ptr::write_volatile(itcmcr, core::ptr::read_volatile(itcmcr) | 1);
+            cortex_m::asm::dsb();
+            cortex_m::asm::isb();
+
+            unsafe extern "C" {
+                static mut __sitcm: u32;
+                static mut __eitcm: u32;
+                static __siitcm: u32;
+            }
+            let dst = &raw mut __sitcm as *mut u32;
+            let end = &raw mut __eitcm as *mut u32;
+            let src = &raw const __siitcm as *const u32;
+            let words = (end as usize).saturating_sub(dst as usize) / 4;
+            let mut i = 0;
+            while i < words {
+                core::ptr::write_volatile(dst.add(i), core::ptr::read_volatile(src.add(i)));
+                i += 1;
+            }
+            cortex_m::asm::dsb();
+            cortex_m::asm::isb();
+        }
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+
     // Enable FPU flush-to-zero + default-NaN. The DSP filter tails decay into
     // denormals; without FZ the Cortex-M7 traps them to glacial support code
     // (~300 ms/block measured -> silence via SAI underrun). FPDSCR sets the
@@ -241,6 +340,16 @@ async fn main(spawner: Spawner) {
     }
     cm.SCB.enable_dcache(&mut cm.CPUID);
     dbg_uart!("cache: I+D on (SDRAM cacheable, SRAM1 DMA non-cacheable)");
+
+    // DWT cycle counter for the per-stage DSP benchmark (feature = "bench").
+    // Enabled after the caches so the measured cycles reflect the real runtime
+    // (I-cache on — XIP cost is hidden on hits, exposed on misses).
+    #[cfg(feature = "bench")]
+    {
+        cm.DCB.enable_trace();
+        cm.DWT.enable_cycle_counter();
+        info!("bench: DWT cycle counter on (480 MHz, cycles/480 = us)");
+    }
 
     // Hand the audio peripherals to the interrupt-executor task (below). Doing
     // all SAI setup inside the task keeps the non-Send Interface from crossing
@@ -377,6 +486,38 @@ async fn main(spawner: Spawner) {
     let usb_q = USB_RING.init(Queue::new());
     let (usb_producer, usb_consumer) = usb_q.split();
 
+    // Pre-fill the SD ring (RING_LEN=8192 i16 ≈ 85 ms @ 48 kHz) BEFORE the audio
+    // consumer starts, so the first callbacks have real samples instead of the
+    // ~832 silent fills we otherwise feed while the reader task spins up (the boot
+    // `sd_under` burst). Reads straight from the file here (synchronous, like the
+    // reader task); the reader picks up from the advanced cursor, so it's seamless.
+    // Runs before USB is even built, so there's no executor contention. NOTE: this
+    // does NOT address the boot/USB-setup SAI *Overrun* restarts — those are a
+    // separate RX-pacing stall (see BACKLOG: "SAI RX overruns on unused input").
+    {
+        let mut block = [0u8; 512];
+        let mut filled = 0usize;
+        'prefill: loop {
+            let n = file.read(&mut block).unwrap_or(0);
+            if n == 0 {
+                break; // EOF or read error: leave the ring as-is (graceful)
+            }
+            let mut i = 0;
+            while i + 1 < n {
+                let s = i16::from_le_bytes([block[i], block[i + 1]]);
+                if producer.enqueue(s).is_err() {
+                    break 'prefill; // ring full
+                }
+                filled += 1;
+                i += 2;
+            }
+        }
+        let _ = filled;
+        #[cfg(feature = "debug-uart")]
+        info!("SD: pre-filled ring with {} samples before audio start", filled);
+        dbg_uart!("SD: pre-filled ring with {} samples", filled);
+    }
+
     // Spawn the audio consumer on the high-priority interrupt executor.
     interrupt::UART4.set_priority(Priority::P6);
     let audio_spawner = AUDIO_EXEC.start(interrupt::UART4);
@@ -477,6 +618,19 @@ async fn main(spawner: Spawner) {
                 SAI_ERR.load(Ordering::Relaxed),
                 SD_UNDERRUN.load(Ordering::Relaxed),
                 OUT_PEAK_MILLI.load(Ordering::Relaxed),
+            );
+            // Per-stage DSP cycles (max this interval) for the QSPI XIP benchmark.
+            // Cycles, not us, to keep sub-us stages (limiter) resolvable; /480 = us.
+            #[cfg(feature = "bench")]
+            info!(
+                "bench(cyc): sd={} tape={} freeze={} bell={} voice={} lim={} | cb_full_us={}",
+                BENCH_SD.swap(0, Ordering::Relaxed),
+                BENCH_TAPE.swap(0, Ordering::Relaxed),
+                BENCH_FREEZE.swap(0, Ordering::Relaxed),
+                BENCH_BELL.swap(0, Ordering::Relaxed),
+                BENCH_VOICE.swap(0, Ordering::Relaxed),
+                BENCH_LIMITER.swap(0, Ordering::Relaxed),
+                CB_FULL_US.swap(0, Ordering::Relaxed),
             );
             // TEMP DIAG: real-time-health readout on the LED (prod has no UART).
             // PER-INTERVAL, not latching: we read-and-RESET SAI_ERR each beat, so
@@ -632,7 +786,7 @@ async fn audio_task(
     loop {
         // start_callback returns only on a SAI error; on its own executor that
         // shouldn't happen now. Restart rather than panic if it ever does.
-        let _ = interface
+        let _result = interface
             .start_callback(|_input, output| {
                 let cb_t = embassy_time::Instant::now();
                 let n = output.len().min(HALF_DMA_BUFFER_LENGTH);
@@ -645,16 +799,18 @@ async fn audio_task(
                 let mut voice_send = [0.0f32; HALF_DMA_BUFFER_LENGTH];
 
                 // SD i16 -> f32 master block.
-                for s in buf[..n].iter_mut() {
-                    let v = match consumer.dequeue() {
-                        Some(v) => v,
-                        None => {
-                            SD_UNDERRUN.fetch_add(1, Ordering::Relaxed);
-                            0
-                        }
-                    };
-                    *s = v as f32 / 32768.0;
-                }
+                bench_stage!(BENCH_SD, {
+                    for s in buf[..n].iter_mut() {
+                        let v = match consumer.dequeue() {
+                            Some(v) => v,
+                            None => {
+                                SD_UNDERRUN.fetch_add(1, Ordering::Relaxed);
+                                0
+                            }
+                        };
+                        *s = v as f32 / 32768.0;
+                    }
+                });
 
                 // Apply inbound CC from the Pi (drained off the channel the CDC
                 // read task fills). Decode happened off the RT path; this is just
@@ -708,11 +864,40 @@ async fn audio_task(
                     }
                 }
 
+                // Bench builds: auto-strike so the stages run + get timed without
+                // the Pi/MIDI. ~1500 blocks/s, so 7500 blocks ≈ 5 s. Strike ONE
+                // voice per interval, ALTERNATING bell/voice — i.e. a single hit
+                // every ~5 s (bell at 5 s, voice at 10 s, bell at 15 s, …). This
+                // mimics sparse real-world triggering so the layered limiter
+                // clipping from the old fire-both-every-0.5-s strike can't masquer-
+                // ade as real distortion. NOT tick 0 (keeps boot/strike panics
+                // distinguishable — PLAYED_FRAMES advances first).
+                #[cfg(feature = "bench")]
+                {
+                    static BENCH_TICK: AtomicU32 = AtomicU32::new(0);
+                    let t = BENCH_TICK.fetch_add(1, Ordering::Relaxed);
+                    if t != 0 && t % 7500 == 0 {
+                        // (t / 7500) is the strike index; even = bell, odd = voice.
+                        if (t / 7500) % 2 == 0 {
+                            #[cfg(feature = "bell")]
+                            {
+                                bell.load_patch(FmPatch::bell());
+                                bell.note_on(69, 0.8);
+                            }
+                        } else {
+                            #[cfg(feature = "voice")]
+                            voice.trigger_phrase(0, 0.8);
+                        }
+                    }
+                }
+
                 // Master chain (mirrors Engine::process): tape -> freeze send
                 // (glitch + return while active) -> limiter.
-                tape.process(&mut buf[..n], sample_index);
+                bench_stage!(BENCH_TAPE, {
+                    tape.process(&mut buf[..n], sample_index);
+                });
                 #[cfg(feature = "freeze")]
-                {
+                bench_stage!(BENCH_FREEZE, {
                     freeze.process(&buf[..n], &mut send[..n]);
                     if freeze.active() {
                         glitch.process(&mut send[..n]);
@@ -720,7 +905,7 @@ async fn audio_task(
                             *o += g * freeze::FREEZE_RETURN_GAIN;
                         }
                     }
-                }
+                });
 
                 // Bell + ping-pong summed on top of the (post-tape) master,
                 // before the limiter — so the chime sits over the backing track
@@ -728,7 +913,7 @@ async fn audio_task(
                 // to both channels; the delay send is left-only so the
                 // cross-feedback bounces the echoes L<->R.
                 #[cfg(feature = "bell")]
-                {
+                bench_stage!(BENCH_BELL, {
                     let frames = n / 2;
                     for i in 0..frames {
                         // Scale at the source so dry + ping-pong drop together.
@@ -742,7 +927,7 @@ async fn audio_task(
                     for (o, &w) in buf[..n].iter_mut().zip(bell_send[..n].iter()) {
                         *o += w * BELL_DELAY_WET;
                     }
-                }
+                });
 
                 // "Pain material" speech (its own reverb) summed on top, same
                 // post-fx / pre-limiter slot as the bell. Renders only while
@@ -750,13 +935,17 @@ async fn audio_task(
                 // between utterances.
                 #[cfg(feature = "voice")]
                 if voice.is_active() {
-                    voice.process(&mut voice_send[..n], sample_index);
-                    for (o, &w) in buf[..n].iter_mut().zip(voice_send[..n].iter()) {
-                        *o += w * VOICE_GAIN;
-                    }
+                    bench_stage!(BENCH_VOICE, {
+                        voice.process(&mut voice_send[..n], sample_index);
+                        for (o, &w) in buf[..n].iter_mut().zip(voice_send[..n].iter()) {
+                            *o += w * VOICE_GAIN;
+                        }
+                    });
                 }
 
-                limiter.process(&mut buf[..n]);
+                bench_stage!(BENCH_LIMITER, {
+                    limiter.process(&mut buf[..n]);
+                });
 
                 let mut pk = 0.0f32;
                 for &s in buf[..n].iter() {
@@ -795,8 +984,15 @@ async fn audio_task(
             })
             .await;
         // start_callback returns Result<Infallible, _>, so a return == a SAI
-        // error (underrun/overrun) — the glitch event. Count + restart.
-        SAI_ERR.fetch_add(1, Ordering::Relaxed);
+        // error (underrun/overrun) — the glitch event. Count + restart. Log the
+        // error VARIANT so we can tell what each restart actually is (overrun vs
+        // underrun vs frame-sync) and correlate the boot/USB bursts. debug-uart-
+        // only (matches the heartbeat; keeps it out of the lean prod image).
+        let _n_err = SAI_ERR.fetch_add(1, Ordering::Relaxed) + 1;
+        #[cfg(feature = "debug-uart")]
+        if let Err(e) = &_result {
+            info!("audio: SAI restart #{} — {}", _n_err, e);
+        }
     }
 }
 

@@ -145,10 +145,33 @@ pub use imp::{init, write_fmt};
 // flash-prod); it's a fixed string interned in the non-loaded `.defmt` section,
 // so it costs ~0 flash and avoids the ~25 KB `info.location()` retention.
 // ---------------------------------------------------------------------------
+// Diagnostic panic-location stash (bench/qspi builds only). Flash is plentiful on
+// QSPI, so we can afford `info.location()` retention here and write file ptr/len +
+// line to fixed RAM, readable over SWD when no UART/probe-RTT panic path exists.
+#[cfg(all(not(feature = "debug-uart"), any(feature = "bench", feature = "qspi")))]
+#[used]
+pub static PANIC_LINE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+#[cfg(all(not(feature = "debug-uart"), any(feature = "bench", feature = "qspi")))]
+#[used]
+pub static PANIC_FILE_PTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+#[cfg(all(not(feature = "debug-uart"), any(feature = "bench", feature = "qspi")))]
+#[used]
+pub static PANIC_FILE_LEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 #[cfg(not(feature = "debug-uart"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     defmt::error!("*** PANIC (prod) — LED strobe on PC7 ***");
+    #[cfg(any(feature = "bench", feature = "qspi"))]
+    {
+        use core::sync::atomic::Ordering;
+        if let Some(loc) = _info.location() {
+            let f = loc.file();
+            PANIC_FILE_PTR.store(f.as_ptr() as u32, Ordering::Relaxed);
+            PANIC_FILE_LEN.store(f.len() as u32, Ordering::Relaxed);
+            PANIC_LINE.store(loc.line(), Ordering::Relaxed);
+        }
+    }
     use embassy_stm32::pac::GPIOC;
     loop {
         GPIOC.bsrr().write(|w| w.set_bs(7, true)); // PC7 high → LED on

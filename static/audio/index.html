@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>audio tools — ambient_viz</title>
+  <link rel="stylesheet" href="shared/style.css">
+</head>
+<body>
+  <header class="app-bar">
+    <h1>ambient_viz · audio tools</h1>
+    <span class="spacer"></span>
+    <a href="../index.html">← visualizer</a>
+  </header>
+  <main>
+    <p style="color:var(--muted);max-width:60ch">
+      Browser tools for authoring the audio side of the exhibit: the DSP
+      sequencer patterns and the synth patches that feed the Daisy.
+    </p>
+    <div class="cards">
+      <a class="card" href="sequencer/index.html">
+        <h2>Sequencer <span class="tag">.pat grid</span></h2>
+        <p>Edit the drum grid, stab/bass lanes, and chord progression for a song's pattern.</p>
+      </a>
+      <a class="card" href="patches/index.html">
+        <h2>Patches <span class="tag">FM stab · rumble bass</span></h2>
+        <p>Tune the synth-voice parameters (mod ratio, index, envelopes, filter, …).</p>
+      </a>
+    </div>
+    <div class="note">
+      The <code>.pat</code> grid format is slated to migrate to MIDI. When it
+      does, only <code>shared/patfile.js</code> changes — the editor speaks an
+      in-memory pattern object, not <code>.pat</code> syntax.
+    </div>
+  </main>
+</body>
+</html>
