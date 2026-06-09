@@ -42,6 +42,29 @@ bell = []
 # the SpeechSynth, reverb (~40-50 KB AXI heap), phoneme tables, and ch2 routing
 # compile out.
 voice = []
+# `qspi` (OFF) builds for XIP from external QSPI flash (app @ 0x90040000) via the
+# Daisy bootloader instead of the 128 KB internal flash — lifts the flash ceiling
+# so all features (bell+voice+...) fit at opt-s. build.rs swaps in memory-qspi.x;
+# main sets VTOR. Flashed with dfu-util through the bootloader, not probe-rs. The
+# internal-flash build (feature off) stays the deployable fallback (pared). See
+# PLAN_QSPI_BOOTLOADER.md / BENCH_QSPI.md.
+qspi = []
+# `bench` (OFF) compiles per-DSP-stage cycle timing (DWT CYCCNT) into the audio
+# callback, reported over RTT in the heartbeat — used to quantify the XIP cost of
+# the QSPI port (pre/post). Zero cost when off (all instrumentation cfg'd out).
+# See BENCH_QSPI.md. Pair with the features under test, e.g. `bell,voice,bench`.
+bench = []
+# --- ITCM ram-function placement (per-build perf tuning) ---------------------
+# `itcm` is the umbrella: it gates the boot-time copy_itcm() that relocates the
+# `.itcm` section into the H750's zero-wait ITCM. Don't enable it directly —
+# enable an `itcm-<stage>` below, each of which turns on `itcm` AND the matching
+# dsp-crate placement feature. Which stages to relocate is a PER-BUILD, bench-
+# driven decision (the XIP bottleneck is I-cache contention; moving the biggest
+# cache-hog stage to ITCM both speeds it up and frees cache for the others). See
+# BENCH_QSPI.md + memory `daisy-modular-itcm-perbuild`.
+itcm = []
+# Relocate `dsp::tape::TapeProcessor::process` (the dominant stage) to ITCM.
+itcm-tape = ["itcm", "dsp/itcm-tape"]
 
 [dependencies]
 dsp = { path = "../dsp" }

@@ -8,6 +8,9 @@ rustflags = [
   "-C", "link-arg=-Tlink.x",
   "-C", "link-arg=--nmagic",
   "-C", "link-arg=-Tdefmt.x",
+  # ITCM ram-function section (INSERT AFTER .data); emitted by build.rs into
+  # OUT_DIR. Empty/harmless unless a fn is tagged `link_section=".itcm"`.
+  "-C", "link-arg=-Titcm.x",
   "-C", "target-cpu=cortex-m7",
 ]
 
@@ -47,8 +50,28 @@ bin = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--rele
 # profile, and feature flags. They differ ONLY in the action (probe-flash vs
 # emit a .bin); both produce the identical shipping image. If you change the
 # feature set or flags on one, change the other in the same edit.
+#
+# *** OVERFLOW: as of the DSP-opt-s audio fix (commit 4e789ac), bell+voice TOGETHER
+# no longer fit the 128 KB internal flash at opt-s (overflow ~5 KB; measured
+# 2026-06-09, see BENCH_QSPI.md). The full bell+voice exhibit image is now
+# QSPI-ONLY — build it with `cargo bin-qspi` (XIP, app @ 0x90040000). These two
+# aliases are kept as the canonical full-feature reference but WILL FAIL to link
+# for internal flash. For an internal-flash deployment, pick a PARED variant
+# below (bell OR voice — not both). ***
 flash-prod = "run -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,voice,sd-spi"
 bin-prod = "objcopy -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,voice,sd-spi -- -O binary target/firmware-prod.bin"
+
+# --- PARED internal-flash production images (one of bell/voice, fits 128 KB) ---
+# The full bell+voice set is QSPI-only (above), so a SHIPPING internal-flash image
+# must drop one. Both pared sets fit at opt-s with sd-spi (measured 2026-06-09):
+#   bell-only  : ~108 KB (comfortable)   voice-only : ~131 KB (≈100 B to spare)
+# Choose by which interaction the degraded fallback should keep — the entry chime
+# (bell) or the "pain material" speech (voice). INVARIANT: keep each flash-/bin-
+# pair in parity. (voice + sd-sdmmc overflows by 240 B → sd-spi only for voice.)
+flash-prod-bell  = "run -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,sd-spi"
+bin-prod-bell    = "objcopy -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,sd-spi -- -O binary target/firmware-prod-bell.bin"
+flash-prod-voice = "run -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features voice,sd-spi"
+bin-prod-voice   = "objcopy -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features voice,sd-spi -- -O binary target/firmware-prod-voice.bin"
 
 # --- SDMMC backend builds ------------------------------------------------
 # Drive the native SDMMC1 peripheral instead of the SPI SD module (needs a
@@ -72,3 +95,51 @@ flash-sdmmc = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--
 bin-sdmmc = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "debug-uart,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc.bin"]
 flash-sdmmc-prod = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\""]
 bin-sdmmc-prod = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc-prod.bin"]
+
+# --- QSPI XIP builds (run from external QSPI via the Daisy bootloader) --------
+# No probe-rs `run` alias: the app is loaded into QSPI over the bootloader's USB
+# DFU, NOT internal flash. Build the .bin, then load with:
+#   dfu-util -a 0 -s 0x90040000:leave -D target/firmware-qspi.bin
+# Then attach for RTT/logs over the STLINK: `probe-rs attach --chip STM32H750IBKx
+# target/thumbv7em-none-eabihf/release/firmware`.
+# opt-s everywhere (QSPI lifts the 128 KB ceiling, so NO opt-z workaround), and
+# ALL features — the whole point of the port. `qspi` swaps the linker layout to
+# 0x90040000 and sets VTOR.
+bin-qspi = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc,qspi", "--", "-O", "binary", "target/firmware-qspi.bin"]
+# Benchmark image: bell+voice+bench (per-stage DWT cycles over RTT) for the
+# pre/post-QSPI comparison (BENCH_QSPI.md). NOTE: NO `freeze` — bell+voice+freeze
+# together exceed the 504 KB AXI heap (bell ~172 K + voice ~204 K + freeze + tape
+# > 504 K → alloc panic at boot). freeze's cost is tiny (~1087 cyc idle) and was
+# measured on internal flash; it's not worth the heap to co-bench it here.
+bin-qspi-bench = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc,qspi,bench", "--", "-O", "binary", "target/firmware-qspi-bench.bin"]
+# Same as bin-qspi-bench PLUS `itcm-tape`: relocates TapeProcessor::process into
+# zero-wait ITCM. Compare the `bench(cyc): tape=…` line against bin-qspi-bench to
+# measure the ITCM win (tape itself + reduced I-cache contention on the others).
+bin-qspi-bench-itcm = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc,qspi,bench,itcm-tape", "--", "-O", "binary", "target/firmware-qspi-bench-itcm.bin"]
+# Debug image: same full feature set as bin-qspi PLUS `debug-uart`, so the
+# `diag(rtt): cb_full=… sai_err=… sd_under=… peak=…` health heartbeat + panic
+# message print over RTT (visible via `probe-rs attach`). This is the QSPI
+# equivalent of the old `cargo flash` dev loop — voice/bell still fire only on
+# MIDI (no bench auto-strike). `debug-uart` forces 1-bit SDMMC (D2/PC10 is the
+# USART3 TX pin — hard collision); fine for debug. Flash is 8 MB on QSPI so the
+# extra ~38 KB of debug-uart code is free (no opt-z needed). Workflow:
+#   cargo bin-qspi-debug
+#   <power-cycle USB>  dfu-util -a 0 -s 0x90040000:leave -D target/firmware-qspi-debug.bin
+#   probe-rs attach --chip STM32H750IBKx target/thumbv7em-none-eabihf/release/firmware
+bin-qspi-debug = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "debug-uart,bell,voice,sd-sdmmc,qspi", "--", "-O", "binary", "target/firmware-qspi-debug.bin"]
+
+# --- One-shot build + arm-watcher + flash (the QSPI `cargo flash` equivalent) ---
+# cargo aliases can't run shell directly, but `cargo run` invokes the target
+# `runner` with the freshly-built ELF — so these override the runner to point at
+# scripts/flash-qspi.sh, which objcopies the ELF, waits for the bootloader DFU
+# window (POWER-CYCLE the Daisy when prompted), flashes with retries, and verifies
+# the boot. `flash-qspi` = production set (no debug-uart). `flash-qspi-debug` adds
+# debug-uart AND auto-attaches `probe-rs` for the live RTT heartbeat after boot.
+# Run these from the `daisy/` workspace root (the runner path is relative to it).
+# NOTE: the runner override MUST be the string form (`runner='bash …'`). The TOML
+# *array* form (`runner=['bash',…]`) makes cargo refuse to merge the CLI `target`
+# table over the one in this file ("failed to merge key `target`"). cargo splits
+# the string on whitespace and appends the built ELF path as the final arg, so the
+# script sees: $1 = mode, $2 = ELF.
+flash-qspi = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc,qspi", "--config", "target.thumbv7em-none-eabihf.runner='bash scripts/flash-qspi.sh noattach'"]
+flash-qspi-debug = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "debug-uart,bell,voice,sd-sdmmc,qspi", "--config", "target.thumbv7em-none-eabihf.runner='bash scripts/flash-qspi.sh attach'"]
