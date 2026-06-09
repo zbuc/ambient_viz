@@ -4402,6 +4402,23 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   const timeCur = document.getElementById('time-cur');
   const timeDur = document.getElementById('time-dur');
 
+  // Lightweight FPS overlay for perf debugging — ?lite=1&fps=1. Shows the render
+  // worker's measured fps (the global fpsValue on the iOS main-render fallback) +
+  // the audio source, so localaudio vs usbaudio framerate is directly comparable
+  // without opening the dev panel.
+  const FPS_OVERLAY = (() => {
+    const q = new URLSearchParams(location.search);
+    return q.get('lite') === '1' && q.get('fps') === '1';
+  })();
+  let fpsOverlayEl = null;
+  if (FPS_OVERLAY) {
+    fpsOverlayEl = document.createElement('div');
+    fpsOverlayEl.style.cssText = 'position:fixed;top:6px;left:6px;z-index:99999;'
+      + 'font:12px/1.3 monospace;color:#0f0;background:rgba(0,0,0,.55);'
+      + 'padding:3px 6px;border-radius:3px;pointer-events:none;white-space:pre';
+    document.body.appendChild(fpsOverlayEl);
+  }
+
   function fmtTime(s) {
     if (!isFinite(s) || s < 0) s = 0;
     const m = Math.floor(s / 60);
@@ -6969,6 +6986,11 @@ async function init() {
       });
     }
     updateDebug();
+    if (fpsOverlayEl) {
+      // worker render → workerDebug.fpsValue; iOS main render → the global fpsValue.
+      const f = renderWorker ? workerDebug.fpsValue : fpsValue;
+      fpsOverlayEl.textContent = (f || 0).toFixed(0) + ' fps  ' + (window.__audioSource || '-');
+    }
     autoCenterEditor();
     renderEditor();
     requestAnimationFrame(frame);
