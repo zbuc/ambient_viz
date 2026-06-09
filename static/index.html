@@ -4477,11 +4477,10 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   // 0 means nothing is reading the USB bulk endpoint, so it isn't USB.)
   window.__audioSource = null;
   const DAISY_VID = 0x1209, DAISY_PID = 0xDA15; // matches firmware dev_cfg
-  let usbDevice = null;         // claimed USBDevice
-  let usbIface = -1;            // claimed vendor interface number (for release)
-  let usbRunning = false;       // read-loop gate
+  let usbRunning = false;       // capture-active gate (the worker owns the device)
   let usbWorkletLoaded = false; // addModule is once-per-context
   let usbNode = null;           // AudioWorkletNode feeding the analysers
+  let usbWorker = null;         // dedicated worker running the transferIn loop
 
   let audioUnlocked = false;
   // Create the AudioContext + analysers eagerly at page load so the context
@@ -4543,15 +4542,11 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
     }
     if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     if (usbNode) { try { usbNode.disconnect(); } catch (_) {} usbNode = null; }
-    if (usbDevice) {
+    if (usbWorker) {
       usbRunning = false;
-      const d = usbDevice, i = usbIface;
-      usbDevice = null; usbIface = -1;
-      // releaseInterface + close are async; fire-and-forget so teardown stays sync.
-      (async () => {
-        try { if (i >= 0) await d.releaseInterface(i); } catch (_) {}
-        try { await d.close(); } catch (_) {}
-      })();
+      const w = usbWorker; usbWorker = null;
+      try { w.postMessage({ stop: true }); } catch (_) {}   // worker closes the device
+      setTimeout(() => { try { w.terminate(); } catch (_) {} }, 50); // then kill it
     }
     playBtn.disabled = true;
     playBtn.textContent = 'play';
@@ -4930,8 +4925,7 @@ class UsbPcm extends AudioWorkletProcessor {
     this.bufL = new Float32Array(this.cap);
     this.bufR = new Float32Array(this.cap);
     this.w = 0; this.r = 0; this.count = 0;
-    this.port.onmessage = (e) => {
-      const d = e.data;               // interleaved Float32 [L,R,L,R,...]
+    const onPcm = (d) => {            // d = interleaved Float32 [L,R,L,R,...]
       for (let i = 0; i + 1 < d.length; i += 2) {
         this.bufL[this.w] = d[i];
         this.bufR[this.w] = d[i + 1];
@@ -4939,6 +4933,13 @@ class UsbPcm extends AudioWorkletProcessor {
         if (this.count < this.cap) this.count++;
         else this.r = (this.r + 1) % this.cap;   // overflow: drop oldest
       }
+    };
+    this.port.onmessage = (e) => {
+      // The USB worker streams PCM straight to us over a transferred MessagePort,
+      // so audio never touches the main thread (no rAF/analyser contention -> no
+      // drops, low latency). Bursts are absorbed by the ring above.
+      if (e.data && e.data.pcmPort) { e.data.pcmPort.onmessage = (ev) => onPcm(ev.data); }
+      else if (e.data) { onPcm(e.data); }        // fallback: direct post
     };
   }
   process(inputs, outputs) {
@@ -4953,6 +4954,60 @@ class UsbPcm extends AudioWorkletProcessor {
   }
 }
 registerProcessor('usb-pcm', UsbPcm);
+`;
+
+  // Dedicated worker that owns the USB device: getDevices/open/claim + the
+  // transferIn loop run entirely off the main thread, so a busy main thread can't
+  // stall the drain (the cause of the dropouts). It posts PCM straight to the
+  // AudioWorklet over a transferred MessagePort — main relays nothing. DEPTH is
+  // pure safety margin here: the worker keeps the pre-posted buffers drained, so
+  // they add no steady-state latency (unlike the main-thread version). VID/PID are
+  // interpolated from the page constants.
+  const USB_WORKER_SRC = `
+const VID = ${DAISY_VID}, PID = ${DAISY_PID};
+const REQ = 2048;                 // bytes/transfer (multiple of 64) — sets latency granularity (~10.6ms)
+let pcmPort = null, dev = null, epNum = -1, ifaceNum = -1, running = false, DEPTH = 4;
+self.onmessage = (e) => {
+  const d = e.data || {};
+  if (d.pcmPort) pcmPort = d.pcmPort;
+  if (d.depth) DEPTH = d.depth;
+  if (d.start) init();
+  if (d.stop) { running = false; if (dev) { try { dev.close(); } catch (_) {} } }
+};
+async function init() {
+  try {
+    if (!self.navigator || !navigator.usb) { self.postMessage({ error: 'no navigator.usb in worker (old Chromium?)' }); return; }
+    const devs = await navigator.usb.getDevices();
+    dev = devs.find(x => x.vendorId === VID && x.productId === PID);
+    if (!dev) { self.postMessage({ error: 'device not granted to origin (grant on main first)' }); return; }
+    await dev.open();
+    if (dev.configuration === null) await dev.selectConfiguration(1);
+    for (const iface of dev.configuration.interfaces) {
+      const alt = iface.alternate;
+      if (alt && alt.interfaceClass === 0xFF) {
+        const ep = alt.endpoints.find(x => x.direction === 'in' && x.type === 'bulk');
+        if (ep) { ifaceNum = iface.interfaceNumber; epNum = ep.endpointNumber; break; }
+      }
+    }
+    if (ifaceNum < 0) { self.postMessage({ error: 'no vendor bulk-IN interface (usb-bulk firmware flashed?)' }); return; }
+    await dev.claimInterface(ifaceNum);
+    running = true;
+    self.postMessage({ ready: true, iface: ifaceNum, ep: epNum });
+    const pump = async () => {
+      if (!running) return;
+      let res;
+      try { res = await dev.transferIn(epNum, REQ); }
+      catch (err) { if (running) self.postMessage({ error: 'transferIn: ' + (err && err.message) }); running = false; return; }
+      if (running) pump();                                   // re-arm -> keep DEPTH outstanding
+      if (res.status === 'stall') { try { await dev.clearHalt('in', epNum); } catch (_) {} return; }
+      if (res.status !== 'ok' || !res.data || res.data.byteLength < 2) return;
+      const dv = res.data, n = dv.byteLength >> 1, f = new Float32Array(n);
+      for (let i = 0; i < n; i++) f[i] = dv.getInt16(i * 2, true) / 32768;
+      if (pcmPort) pcmPort.postMessage(f, [f.buffer]);        // -> AudioWorklet, zero-copy
+    };
+    for (let i = 0; i < DEPTH; i++) pump();
+  } catch (err) { self.postMessage({ error: 'init: ' + (err && err.message) }); }
+}
 `;
 
   async function startUsbCapture(viaGesture) {
@@ -4970,35 +5025,23 @@ registerProcessor('usb-pcm', UsbPcm);
         URL.revokeObjectURL(url);
         usbWorkletLoaded = true;
       }
-      // Pre-authorized devices (kiosk WebUsbAllowDevicesForUrls policy) show up in
-      // getDevices() with no gesture; requestDevice needs a user gesture (mic btn).
-      let dev = (await navigator.usb.getDevices()).find(d => d.vendorId === DAISY_VID && d.productId === DAISY_PID);
-      if (!dev && viaGesture) {
-        dev = await navigator.usb.requestDevice({ filters: [{ vendorId: DAISY_VID, productId: DAISY_PID }] });
+      // Grant must happen on the main thread (requestDevice needs a user gesture;
+      // pre-authorized kiosk devices appear in getDevices() with no gesture). The
+      // worker then re-acquires the granted device via its own getDevices().
+      let granted = (await navigator.usb.getDevices()).some(d => d.vendorId === DAISY_VID && d.productId === DAISY_PID);
+      if (!granted && viaGesture) {
+        try { await navigator.usb.requestDevice({ filters: [{ vendorId: DAISY_VID, productId: DAISY_PID }] }); granted = true; }
+        catch (_) { /* user dismissed chooser */ }
       }
-      if (!dev) {
+      if (!granted) {
         statusEl.textContent = 'usb: no device';
         console.warn('[ambient_viz] Daisy not pre-authorized; click `mic` to grant, or set the WebUsbAllowDevicesForUrls policy on the kiosk');
         return;
       }
-      await dev.open();
-      if (dev.configuration === null) await dev.selectConfiguration(1);
-      // Find the vendor (0xFF) interface + its bulk IN endpoint — robust to numbering.
-      let ifaceNum = -1, epNum = -1;
-      for (const iface of dev.configuration.interfaces) {
-        const alt = iface.alternate;
-        if (alt && alt.interfaceClass === 0xFF) {
-          const ep = alt.endpoints.find(e => e.direction === 'in' && e.type === 'bulk');
-          if (ep) { ifaceNum = iface.interfaceNumber; epNum = ep.endpointNumber; break; }
-        }
-      }
-      if (ifaceNum < 0) throw new Error('no vendor bulk-IN interface (is the `usb-bulk` firmware flashed?)');
-      await dev.claimInterface(ifaceNum);
-      usbDevice = dev; usbIface = ifaceNum; usbRunning = true;
 
       // Worklet -> gain -> analysers (mirrors startMic). Not routed to destination
-      // unless ?monitor=1 — the capture IS the Daisy's own line-out (no feedback
-      // risk, but the audience hears the analog out, so the browser stays silent).
+      // unless ?monitor=1 — the capture IS the Daisy's own line-out (the audience
+      // hears the analog out, so the browser stays silent).
       const node = new AudioWorkletNode(audioCtx, 'usb-pcm', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
       const gain = audioCtx.createGain();
       gain.gain.value = MIC_GAIN;
@@ -5010,40 +5053,34 @@ registerProcessor('usb-pcm', UsbPcm);
         try { gain.connect(audioCtx.destination); console.log('[ambient_viz] usb monitor ON'); } catch (_) {}
       }
       usbNode = node; currentSource = node;
-      statusEl.textContent = 'usb';
-      window.__audioSource = 'usb';
+
+      // Wire worker -> worklet directly: a MessageChannel whose port2 goes to the
+      // worklet and port1 to the worker; PCM flows over it without touching main.
+      const ch = new MessageChannel();
+      node.port.postMessage({ pcmPort: ch.port2 }, [ch.port2]);
+      const wurl = URL.createObjectURL(new Blob([USB_WORKER_SRC], { type: 'application/javascript' }));
+      const worker = new Worker(wurl);
+      URL.revokeObjectURL(wurl);
+      usbWorker = worker; usbRunning = true;
+      worker.onmessage = (e) => {
+        const d = e.data || {};
+        if (d.ready) {
+          statusEl.textContent = 'usb';
+          window.__audioSource = 'usb';
+          console.log('[ambient_viz] WebUSB capture (worker): iface', d.iface, 'ep', d.ep, 'ctx', audioCtx.sampleRate + 'Hz');
+        } else if (d.error) {
+          statusEl.textContent = 'usb err';
+          console.warn('[ambient_viz] usb worker:', d.error);
+        }
+      };
+      worker.onerror = (e) => {
+        statusEl.textContent = 'usb err';
+        console.warn('[ambient_viz] usb worker error:', e && e.message);
+      };
+      const DEPTH = Math.max(2, parseInt(new URLSearchParams(location.search).get('usbdepth'), 10) || 4);
+      worker.postMessage({ pcmPort: ch.port1, depth: DEPTH, start: true }, [ch.port1]);
       playBtn.disabled = true;
       dropHint.classList.add('hidden');
-      console.log('[ambient_viz] WebUSB capture: iface', ifaceNum, 'ep', epNum, 'ctx', audioCtx.sampleRate + 'Hz');
-
-      // Pipelined read loop: keep DEPTH transferIn requests outstanding so the
-      // device is always draining into the host controller and a busy main thread
-      // (rAF/analyser, esp. on the Pi) can't stall the USB drain — a stall longer
-      // than the buffer overflows the device's ~5.3 ms ring and shows as usb_drop.
-      // DEPTH*REQ of audio is buffered (~tolerates that much main-thread jank, at
-      // that much added latency — fine for slow visuals); keep it under the
-      // firmware's 250 ms idle. ?usbdepth=N overrides (default 6 ≈ 128 ms).
-      const REQ = 4096; // bytes/transfer (multiple of the 64-byte bulk packet)
-      const DEPTH = Math.max(2, parseInt(new URLSearchParams(location.search).get('usbdepth'), 10) || 6);
-      const pump = async () => {
-        if (!usbRunning) return;
-        let res;
-        try {
-          res = await dev.transferIn(epNum, REQ);
-        } catch (e) {
-          if (usbRunning) console.warn('[ambient_viz] transferIn error:', e && (e.name + ': ' + e.message));
-          usbRunning = false;
-          return;
-        }
-        if (usbRunning) pump(); // re-arm before processing -> keeps 2 in flight
-        if (res.status === 'stall') { try { await dev.clearHalt('in', epNum); } catch (_) {} return; }
-        if (res.status !== 'ok' || !res.data || res.data.byteLength < 2) return;
-        const dv = res.data, n = dv.byteLength >> 1;
-        const f = new Float32Array(n);
-        for (let i = 0; i < n; i++) f[i] = dv.getInt16(i * 2, true) / 32768;
-        if (usbNode) usbNode.port.postMessage(f, [f.buffer]);
-      };
-      for (let i = 0; i < DEPTH; i++) pump();
     } catch (e) {
       statusEl.textContent = 'usb err';
       console.warn('[ambient_viz] startUsbCapture failed:', e && (e.name + ': ' + e.message));
