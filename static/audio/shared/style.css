@@ -1,0 +1,58 @@
+/* style.css — shared dark UI for the audio editing tools. */
+:root {
+  --bg: #0c0d10;
+  --panel: #16181d;
+  --panel-2: #1d2027;
+  --line: #2a2e37;
+  --fg: #d7dae0;
+  --muted: #7c828d;
+  --accent: #6ad0c8;
+  --hit: #e0a96d;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+header.app-bar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 12px 18px; border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+header.app-bar h1 { font-size: 15px; margin: 0; font-weight: 600; }
+header.app-bar .spacer { flex: 1; }
+main { padding: 18px; }
+
+button, select, input[type="text"], input[type="number"] {
+  background: var(--panel-2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 5px;
+  padding: 5px 9px; font: inherit;
+}
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #04201d; border-color: var(--accent); font-weight: 600; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+.card {
+  display: block; padding: 16px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.card:hover { border-color: var(--accent); text-decoration: none; }
+.card h2 { margin: 0 0 6px; font-size: 14px; color: var(--fg); }
+.card p { margin: 0; color: var(--muted); font-size: 13px; }
+.card .tag { color: var(--hit); font-size: 11px; }
+
+/* parameter rows (ui.js) */
+.param-row { display: grid; grid-template-columns: 130px 1fr 78px; align-items: center; gap: 10px; padding: 4px 0; }
+.param-label { color: var(--muted); }
+.param-val { text-align: right; color: var(--fg); }
+.param-row input[type="range"] { width: 100%; }
+
+.note {
+  margin-top: 18px; padding: 10px 14px; border-left: 3px solid var(--hit);
+  background: var(--panel); color: var(--muted); font-size: 12px;
+}
