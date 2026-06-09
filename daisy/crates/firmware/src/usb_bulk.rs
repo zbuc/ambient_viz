@@ -98,9 +98,6 @@ pub async fn stream_task(mut ep: BulkEpIn, mut samples: Consumer<'static, i16, U
                 embassy_futures::yield_now().await;
                 continue;
             }
-            // DIAG: peak single-write drain in stereo frames (reuses the UAC
-            // counter so the same rtt-diag heartbeat reads both paths).
-            USB_PKT_MAX_FR.fetch_max((len / 4) as u32, Ordering::Relaxed);
             // Bound the write: with no reader, `write` parks waiting for the
             // previous transfer to drain (host IN token) and never returns. A
             // BULK IN has no detach event, so a stalled write IS the "nobody's
@@ -110,7 +107,13 @@ pub async fn stream_task(mut ep: BulkEpIn, mut samples: Consumer<'static, i16, U
             // of pinning at 192000) and dump the backlog so a returning reader
             // gets fresh audio, not a ring of stale samples.
             match select(ep.write(&pkt[..len]), Timer::after(Duration::from_millis(IDLE_MS))).await {
-                Either::First(Ok(())) => USB_CAPTURING.store(true, Ordering::Relaxed),
+                Either::First(Ok(())) => {
+                    USB_CAPTURING.store(true, Ordering::Relaxed);
+                    // DIAG: peak drain per *delivered* write, in stereo frames
+                    // (reuses the UAC counter). Only on success — a probe that
+                    // times out built a packet but delivered nothing.
+                    USB_PKT_MAX_FR.fetch_max((len / 4) as u32, Ordering::Relaxed);
+                }
                 Either::First(Err(_)) => {
                     crate::dbg_uart!("usb-bulk: endpoint disabled");
                     USB_CAPTURING.store(false, Ordering::Relaxed);
