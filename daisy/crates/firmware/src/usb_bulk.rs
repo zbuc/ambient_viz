@@ -69,12 +69,18 @@ pub async fn stream_task(mut ep: BulkEpIn, mut samples: Consumer<'static, i16, U
         // Arm the tee's drop counter (see USB_DROP in main.rs).
         USB_CAPTURING.store(true, Ordering::Relaxed);
         loop {
-            // Fill one max-size packet from the ring (whole i16 samples).
+            // Fill one max-size packet from the ring, a whole stereo FRAME (L,R)
+            // at a time so a packet boundary never splits a pair — otherwise the
+            // byte stream goes off by one sample and the consumer swaps L/R (and
+            // the total isn't a multiple of 4 → "Invalid PCM packet"). pkt.len()
+            // is 64, a multiple of 4, so full packets are exactly 16 frames.
             let mut len = 0;
-            while len + 2 <= pkt.len() {
-                let Some(s) = samples.dequeue() else { break };
-                pkt[len..len + 2].copy_from_slice(&s.to_le_bytes());
-                len += 2;
+            while len + 4 <= pkt.len() {
+                let Some(l) = samples.dequeue() else { break };
+                let r = samples.dequeue().unwrap_or(0);
+                pkt[len..len + 2].copy_from_slice(&l.to_le_bytes());
+                pkt[len + 2..len + 4].copy_from_slice(&r.to_le_bytes());
+                len += 4;
             }
             if len == 0 {
                 // Ring momentarily empty — yield so the producer (audio task) can

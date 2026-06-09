@@ -991,11 +991,15 @@ async fn audio_task(
                     let r = buf[2 * i + 1];
                     frame[0] = f32_to_u24(l);
                     frame[1] = f32_to_u24(r);
-                    if usb_producer.enqueue(f32_to_i16(l)).is_err() {
-                        usb_dropped += 1;
-                    }
-                    if usb_producer.enqueue(f32_to_i16(r)).is_err() {
-                        usb_dropped += 1;
+                    // Tee L+R as one unit: enqueue both or neither. A half-frame
+                    // (L in, R dropped) would misalign the ring and swap L/R for
+                    // the whole downstream stream. SPSC-safe: the consumer only
+                    // frees slots, so a `free >= 2` check here can't go stale.
+                    if usb_producer.capacity() - usb_producer.len() >= 2 {
+                        let _ = usb_producer.enqueue(f32_to_i16(l));
+                        let _ = usb_producer.enqueue(f32_to_i16(r));
+                    } else {
+                        usb_dropped += 2;
                     }
                 }
                 if usb_capturing && usb_dropped > 0 {
