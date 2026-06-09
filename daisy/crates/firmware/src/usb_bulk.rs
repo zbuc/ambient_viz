@@ -18,6 +18,8 @@
 
 use core::sync::atomic::Ordering;
 
+use embassy_futures::select::{Either, select};
+use embassy_time::{Duration, Timer};
 use embassy_usb::Builder;
 use embassy_usb::driver::{Driver, Endpoint, EndpointIn};
 use heapless::spsc::Consumer;
@@ -37,6 +39,13 @@ const BULK_MAX_PACKET: u16 = 64;
 
 /// The concrete bulk IN endpoint type for our OTG-FS driver.
 type BulkEpIn = <Drv as Driver<'static>>::EndpointIn;
+
+/// If no host pulls a packet within this long, treat capture as idle. A BULK IN
+/// has no "host detached" event (unlike iso alt-setting disable), so we infer it
+/// from a stalled write. Must be comfortably longer than the gap a *reading*
+/// host leaves between transfers (sub-ms when pipelined) so active streaming
+/// never trips it.
+const IDLE_MS: u64 = 250;
 
 /// Add the vendor function + a single bulk IN endpoint to the composite device.
 /// Returns the endpoint to stream audio on. No control handler, no alt settings —
@@ -63,11 +72,12 @@ pub async fn stream_task(mut ep: BulkEpIn, mut samples: Consumer<'static, i16, U
     let mut pkt = [0u8; BULK_MAX_PACKET as usize];
     loop {
         ep.wait_enabled().await;
-        crate::dbg_uart!("usb-bulk: endpoint enabled — streaming line-out");
-        // Reset latency: drop the backlog buffered while the host wasn't reading.
+        crate::dbg_uart!("usb-bulk: endpoint enabled — waiting for a reader");
+        // Endpoint enabled != someone reading it. Stay "not capturing" (so the tee
+        // doesn't count drops) and drop any backlog until a host actually pulls a
+        // packet below.
+        USB_CAPTURING.store(false, Ordering::Relaxed);
         while samples.dequeue().is_some() {}
-        // Arm the tee's drop counter (see USB_DROP in main.rs).
-        USB_CAPTURING.store(true, Ordering::Relaxed);
         loop {
             // Fill one max-size packet from the ring, a whole stereo FRAME (L,R)
             // at a time so a packet boundary never splits a pair — otherwise the
@@ -84,18 +94,32 @@ pub async fn stream_task(mut ep: BulkEpIn, mut samples: Consumer<'static, i16, U
             }
             if len == 0 {
                 // Ring momentarily empty — yield so the producer (audio task) can
-                // refill, then retry. Bulk has no deadline, so the gap is harmless
-                // (the browser buffers); this just avoids a busy-spin.
+                // refill, then retry. Bulk has no deadline, so the gap is harmless.
                 embassy_futures::yield_now().await;
                 continue;
             }
             // DIAG: peak single-write drain in stereo frames (reuses the UAC
             // counter so the same rtt-diag heartbeat reads both paths).
             USB_PKT_MAX_FR.fetch_max((len / 4) as u32, Ordering::Relaxed);
-            if ep.write(&pkt[..len]).await.is_err() {
-                crate::dbg_uart!("usb-bulk: endpoint disabled");
-                USB_CAPTURING.store(false, Ordering::Relaxed);
-                break;
+            // Bound the write: with no reader, `write` parks waiting for the
+            // previous transfer to drain (host IN token) and never returns. A
+            // BULK IN has no detach event, so a stalled write IS the "nobody's
+            // listening" signal. Cancelling it on timeout is safe — it's pending
+            // in the register-poll phase, before any FIFO write. On idle we flip
+            // USB_CAPTURING off (the tee stops counting drops → usb_drop=0 instead
+            // of pinning at 192000) and dump the backlog so a returning reader
+            // gets fresh audio, not a ring of stale samples.
+            match select(ep.write(&pkt[..len]), Timer::after(Duration::from_millis(IDLE_MS))).await {
+                Either::First(Ok(())) => USB_CAPTURING.store(true, Ordering::Relaxed),
+                Either::First(Err(_)) => {
+                    crate::dbg_uart!("usb-bulk: endpoint disabled");
+                    USB_CAPTURING.store(false, Ordering::Relaxed);
+                    break;
+                }
+                Either::Second(_) => {
+                    USB_CAPTURING.store(false, Ordering::Relaxed);
+                    while samples.dequeue().is_some() {}
+                }
             }
         }
     }
