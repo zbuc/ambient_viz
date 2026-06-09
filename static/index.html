@@ -4465,8 +4465,17 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   // WebUSB-bulk capture (Daisy `usb-bulk` firmware): read the vendor (class 0xFF)
   // bulk IN endpoint directly via navigator.usb and feed an AudioWorklet — bypasses
   // getUserMedia/PipeWire, which the Pi 4 VL805 can't clock for a USB-audio iso
-  // source (see daisy/PLAN_USB_CAPTURE.md). Enabled with ?usbcapture=1.
-  const USB_CAPTURE = new URLSearchParams(location.search).get('usbcapture') === '1';
+  // source (see daisy/PLAN_USB_CAPTURE.md). Enabled with ?usbcapture=1 (alias
+  // ?usbaudio=1).
+  const USB_CAPTURE = (() => {
+    const q = new URLSearchParams(location.search);
+    return q.get('usbcapture') === '1' || q.get('usbaudio') === '1';
+  })();
+  // Inspectable source-of-truth for "what's feeding the analyser?": 'usb' | 'mic'
+  // | 'file' | 'localaudio' | null. Set at each start path; read in the console as
+  // window.__audioSource. (The firmware's usb_pktmax is the other ground truth —
+  // 0 means nothing is reading the USB bulk endpoint, so it isn't USB.)
+  window.__audioSource = null;
   const DAISY_VID = 0x1209, DAISY_PID = 0xDA15; // matches firmware dev_cfg
   let usbDevice = null;         // claimed USBDevice
   let usbIface = -1;            // claimed vendor interface number (for release)
@@ -4884,6 +4893,7 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
       if (new URLSearchParams(location.search).get('monitor') === '1') window.__monitorOn();
       currentSource = src;
       statusEl.textContent = 'mic';
+      window.__audioSource = 'mic';
       playBtn.disabled = true;
       dropHint.classList.add('hidden');
       // Diagnostics: which device did we actually capture, and what else is
@@ -5001,6 +5011,7 @@ registerProcessor('usb-pcm', UsbPcm);
       }
       usbNode = node; currentSource = node;
       statusEl.textContent = 'usb';
+      window.__audioSource = 'usb';
       playBtn.disabled = true;
       dropHint.classList.add('hidden');
       console.log('[ambient_viz] WebUSB capture: iface', ifaceNum, 'ep', epNum, 'ctx', audioCtx.sampleRate + 'Hz');
@@ -6980,6 +6991,7 @@ registerProcessor('usb-pcm', UsbPcm);
     // --autoplay-policy flag; falls back to first-gesture for manual testing.
     if (new URLSearchParams(location.search).get('localaudio') === '1') {
       localAudioMode = true;
+      window.__audioSource = 'localaudio';
       try {
         loadFromUrl(audioUrl, audioUrl, { silent: true });
         if (currentEl) {
@@ -7014,6 +7026,7 @@ registerProcessor('usb-pcm', UsbPcm);
       window.removeEventListener('touchstart', startOnGesture, true);
       try {
         loadFromUrl(audioUrl, audioUrl);
+        window.__audioSource = 'file';
         console.log('[ambient_viz] audio loaded, audioCtx.state=' + (audioCtx && audioCtx.state));
         // If the gesture was on the play button, its own click handler
         // will toggle playback — don't double-fire here (would pause the
