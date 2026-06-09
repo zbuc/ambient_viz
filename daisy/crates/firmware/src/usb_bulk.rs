@@ -19,7 +19,7 @@
 use core::sync::atomic::Ordering;
 
 use embassy_usb::Builder;
-use embassy_usb::driver::{Driver, Endpoint, EndpointIn, EndpointType};
+use embassy_usb::driver::{Driver, Endpoint, EndpointIn};
 use heapless::spsc::Consumer;
 
 use crate::USB_RING_LEN;
@@ -46,7 +46,11 @@ pub fn build(builder: &mut Builder<'static, Drv>) -> BulkEpIn {
     let mut func = builder.function(VENDOR_CLASS, VENDOR_SUBCLASS, VENDOR_PROTOCOL);
     let mut iface = func.interface();
     let mut alt = iface.alt_setting(VENDOR_CLASS, VENDOR_SUBCLASS, VENDOR_PROTOCOL, None);
-    alt.alloc_endpoint_in(EndpointType::Bulk, None, BULK_MAX_PACKET, 0)
+    // `endpoint_bulk_in` allocates the EP *and writes its standard endpoint
+    // descriptor* (NoSynchronization/DataEndpoint). The low-level
+    // `alloc_endpoint_in` does NOT write the descriptor — using it alone enumerates
+    // the interface with zero endpoints, so the host (and WebUSB) sees no bulk IN.
+    alt.endpoint_bulk_in(None, BULK_MAX_PACKET)
 }
 
 /// Drain the SAI tee ring into the bulk IN endpoint. Unlike the UAC iso task,
