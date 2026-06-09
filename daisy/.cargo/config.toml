@@ -95,6 +95,13 @@ flash-sdmmc = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--
 bin-sdmmc = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "debug-uart,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc.bin"]
 flash-sdmmc-prod = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\""]
 bin-sdmmc-prod = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc-prod.bin"]
+# `flash-sdmmc-bulk-prod` / `bin-sdmmc-bulk-prod`: the exhibit image WITH live
+# WebUSB-bulk capture — bell,voice + usb-bulk (vendor bulk IN audio for the
+# browser's ?usbaudio=1, instead of the UAC iso source the Pi 4 VL805 can't
+# clock). Same as flash-sdmmc-prod plus usb-bulk. INVARIANT: keep this flash-/bin-
+# pair in parity (and matched to flash-sdmmc-prod minus the audio path).
+flash-sdmmc-bulk-prod = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,usb-bulk,sd-sdmmc", "--config", "profile.release.opt-level=\"z\""]
+bin-sdmmc-bulk-prod = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,usb-bulk,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc-bulk-prod.bin"]
 
 # `flash-sdmmc-rtt`: USB-capture benchmark image. rtt-diag (heartbeat over the
 # SWD probe, NO D2 adapter) + sd-sdmmc at FULL 4-bit (no debug-uart, so D2 stays

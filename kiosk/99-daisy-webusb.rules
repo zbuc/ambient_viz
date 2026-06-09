@@ -1,0 +1,25 @@
+# udev rule — raw USB access to the Daisy for Chromium WebUSB capture.
+#
+# Grants the logged-in seat user (TAG+="uaccess" sets an ACL) read/write on the
+# Daisy's USB device node so Chromium can claimInterface() the vendor (class 0xFF)
+# bulk-audio interface used by the browser's ?usbaudio=1 capture path. The CDC
+# interface stays kernel-owned (/dev/ttyACM0) for the Node POS bridge — different
+# interfaces, no conflict.
+#
+# VID 1209 = pid.codes, PID da15 = "Daisy audio source" (firmware dev_cfg). udev
+# matches lowercase hex.
+#
+# Install:
+#   sudo cp kiosk/99-daisy-webusb.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   # then unplug + replug the Daisy (or reboot)
+#
+# Verify (find bus/dev from `lsusb | grep 1209`):
+#   getfacl /dev/bus/usb/<bus>/<dev> | grep user   # your user should have rw
+#
+# If TAG+="uaccess" doesn't apply (no active graphical seat — e.g. a bare systemd
+# service), use the group form instead and add the kiosk user to plugdev:
+#   SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="da15", MODE="0660", GROUP="plugdev"
+#   sudo usermod -aG plugdev <kiosk-user>   # then log out/in + replug
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="da15", TAG+="uaccess"

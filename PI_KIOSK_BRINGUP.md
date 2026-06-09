@@ -541,6 +541,40 @@ long mode) — see `SENSOR_MAPPING.md`
 for the full mapping. Append `&debug=1` to surface a diagnostic
 overlay that survives lite mode.
 
+### Audio source: localaudio vs live USB capture
+
+The visualizer needs an audio signal to react to. Two modes — pick one in the
+kiosk URL; both use `&clock=daisy` so the JSON lanes track the Daisy's song
+position over CDC:
+
+- **`&localaudio=1` (default, simplest)** — analyses the *pristine master mp3*
+  (muted), seeked to the Daisy's POS. The audience hears the Daisy's analog
+  line-out; the browser just reads the clean reference for the visuals. No extra
+  setup. Static — it does not reflect the Daisy's interaction-modified output.
+
+- **`&usbaudio=1` (live capture)** — reads the Daisy's *actual* output over
+  WebUSB, so the visuals track the real interaction-modified audio (tape
+  failure, freeze, etc.). The Pi 4's VL805 can't clock the old UAC iso source, so
+  this uses a vendor **bulk** endpoint (`daisy/PLAN_USB_CAPTURE.md`). Requires:
+
+  1. Flash a `usb-bulk` exhibit image: `cd daisy && cargo flash-sdmmc-bulk-prod`
+     (= `bell,voice,usb-bulk,sd-sdmmc`).
+  2. Install the two host-config files from `kiosk/` (raw-USB udev access +
+     Chromium WebUSB pre-authorization) — see **`kiosk/README.md`**. Without them
+     you get `SecurityError: Access denied` (udev) or `usb: no device` (policy).
+  3. Set the kiosk URL's `urls` origin in `kiosk/webusb-policy.json` to match.
+
+  The CDC POS bridge (`/dev/ttyACM0`) is a separate interface and runs
+  concurrently — no conflict. Reads run in a dedicated worker → no dropouts;
+  at native audio rate fps matches localaudio. Verify with `&fps=1` (under
+  `&lite=1`): a small overlay shows render fps + the active source.
+
+Example live-capture autostart `Exec=` line (note the double-quoting rule above):
+
+```ini
+Exec=chromium-browser --kiosk --noerrdialogs --disable-infobars --autoplay-policy=no-user-gesture-required "http://localhost:8080/?lite=1&bitmap=360&distanceToBitmap=on&clock=daisy&usbaudio=1"
+```
+
 ### Hiding the mouse cursor (Wayland)
 
 The kiosk runs under Wayland, where the usual X11 cursor-hiding tricks

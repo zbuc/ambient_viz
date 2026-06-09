@@ -1,0 +1,9 @@
+{
+  "_comment": "Chromium managed policy: pre-authorize the Daisy for WebUSB so ?usbaudio=1 auto-connects on kiosk boot with no user gesture. vendor_id 4617=0x1209, product_id 55829=0xDA15. 'urls' MUST match the kiosk origin (scheme+host+port). Install: sudo cp kiosk/webusb-policy.json /etc/chromium/policies/managed/ (dir may need creating); restart Chromium. Verify at chrome://policy. Requires a secure context (localhost counts).",
+  "WebUsbAllowDevicesForUrls": [
+    {
+      "devices": [{ "vendor_id": 4617, "product_id": 55829 }],
+      "urls": ["http://localhost:8080"]
+    }
+  ]
+}
