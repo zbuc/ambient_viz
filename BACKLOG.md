@@ -183,6 +183,38 @@ M55/M85) — proven by disassembly (a 4-lane f32 multiply lowers to 4 scalar
   `Sdmmc`). — `daisy/BREAKOUT.md` §4.3, conversation 2026-06-08 (new), mem
   `daisy-sd-connector-roadmap`
 
+## Test equipment / tooling
+
+- [ ] **Investigate a logic analyzer** — for debugging the digital buses on the Daisy
+  breakout and the analog-FX control plane (SDMMC1 4-bit timing, SPI1 SD, MIDI UART,
+  I²C sensor/digipot/crosspoint traffic, USB-CDC/UAC enumeration sanity). Would have
+  directly shortened the SDMMC bring-up and the marginal-SD-breakout debugging (mem
+  `daisy-sdmmc-dtcm-dma`, `daisy-sd-marginal-breakout`). Candidates, roughly in
+  decreasing capability/cost:
+  - **Saleae Logic 8** — best-in-class software (live protocol decoders for SPI/I²C/
+    UART/USB), 8ch, 100 MS/s digital / 10 MS/s analog. Expensive (~$400+). The "just
+    works" option; cross-platform, scriptable.
+  - **Digilent Analog Discovery 3** ([ref](https://digilent.com/reference/test-and-measurement/analog-discovery-3/start)) —
+    not just a logic analyzer: 2ch 125 MS/s scope + 2ch AWG + 16-pin digital
+    (logic-analyzer **and** pattern-generator) + power supplies, all in one USB pod via
+    WaveForms. ~$400. The most *versatile* pick — covers the analog-FX-rack work (scope
+    the buffered audio bus, generate test tones, characterize digipot/VCA response) as
+    well as digital-bus decode. Strong candidate given the analog-FX direction.
+  - **Bus Pirate** — cheap (~$30–50, esp. the v5/v6 RP2040 generation), great as an
+    *interactive bus probe / sniffer / injector* (talk to an I²C/SPI device by hand,
+    sniff a few lines) but **not** a real multi-channel, timing-accurate logic analyzer.
+    Complementary to, not a replacement for, the above.
+  - **Cheap Amazon clones** (~$10–15 "USB Logic Analyzer 24 MHz 8CH", Cypress FX2-based)
+    — work with **sigrok/PulseView** (open-source) and decode SPI/I²C/UART fine at low
+    rates; 24 MS/s is marginal for 4-bit SDMMC but adequate for MIDI/I²C/slow-SPI. The
+    pragmatic "buy one today to unblock bring-up" option; many spoof the Saleae VID/PID,
+    so drive them with sigrok rather than Saleae's software.
+
+  **Lean:** an FX2 clone + sigrok now for immediate bus debug (~$12), and seriously
+  weigh the **Analog Discovery 3** as the real purchase since its scope + AWG also serve
+  the analog FX rack — a plain logic analyzer (even the Saleae) doesn't. —
+  conversation 2026-06-09 (new)
+
 ## Analog FX hardware (speculative)
 
 - [ ] **Software-switched / parameterized / reroutable analog FX blocks** — build discrete
