@@ -4494,11 +4494,16 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   // AudioContext-not-allowed warning here; it's informational, not blocking.
   function initAudioGraph() {
     if (audioCtx) return;
-    // USB capture streams 48 kHz PCM; match the context rate so the worklet
-    // doesn't need to resample (a mismatched rate would slowly drift its ring).
+    // Default to the device's NATIVE rate. Forcing 48 kHz to match the USB stream
+    // makes the browser resample the whole graph every quantum when the output
+    // device isn't 48 kHz — measurable CPU on the Pi. At the native rate the
+    // worklet ring just drifts slightly (bounded: it drops-oldest / pads silence),
+    // which is imperceptible for FFT/envelope visualization. ?usb48=1 forces exact
+    // 48 kHz if you can spare the cycles.
     const AC = window.AudioContext || window.webkitAudioContext;
+    const force48 = USB_CAPTURE && new URLSearchParams(location.search).get('usb48') === '1';
     try {
-      audioCtx = USB_CAPTURE ? new AC({ sampleRate: 48000 }) : new AC();
+      audioCtx = force48 ? new AC({ sampleRate: 48000 }) : new AC();
     } catch (_) {
       audioCtx = new AC(); // fall back to the device-default rate
     }
