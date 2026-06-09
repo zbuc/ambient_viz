@@ -4462,6 +4462,18 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   let currentEl = null;         // HTMLAudioElement when in file mode
   let micStream = null;
 
+  // WebUSB-bulk capture (Daisy `usb-bulk` firmware): read the vendor (class 0xFF)
+  // bulk IN endpoint directly via navigator.usb and feed an AudioWorklet — bypasses
+  // getUserMedia/PipeWire, which the Pi 4 VL805 can't clock for a USB-audio iso
+  // source (see daisy/PLAN_USB_CAPTURE.md). Enabled with ?usbcapture=1.
+  const USB_CAPTURE = new URLSearchParams(location.search).get('usbcapture') === '1';
+  const DAISY_VID = 0x1209, DAISY_PID = 0xDA15; // matches firmware dev_cfg
+  let usbDevice = null;         // claimed USBDevice
+  let usbIface = -1;            // claimed vendor interface number (for release)
+  let usbRunning = false;       // read-loop gate
+  let usbWorkletLoaded = false; // addModule is once-per-context
+  let usbNode = null;           // AudioWorkletNode feeding the analysers
+
   let audioUnlocked = false;
   // Create the AudioContext + analysers eagerly at page load so the context
   // starts in the "suspended" state (no user gesture yet). This matches the
@@ -4474,7 +4486,14 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   // AudioContext-not-allowed warning here; it's informational, not blocking.
   function initAudioGraph() {
     if (audioCtx) return;
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // USB capture streams 48 kHz PCM; match the context rate so the worklet
+    // doesn't need to resample (a mismatched rate would slowly drift its ring).
+    const AC = window.AudioContext || window.webkitAudioContext;
+    try {
+      audioCtx = USB_CAPTURE ? new AC({ sampleRate: 48000 }) : new AC();
+    } catch (_) {
+      audioCtx = new AC(); // fall back to the device-default rate
+    }
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.85;
@@ -4514,6 +4533,17 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
       currentEl = null;
     }
     if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (usbNode) { try { usbNode.disconnect(); } catch (_) {} usbNode = null; }
+    if (usbDevice) {
+      usbRunning = false;
+      const d = usbDevice, i = usbIface;
+      usbDevice = null; usbIface = -1;
+      // releaseInterface + close are async; fire-and-forget so teardown stays sync.
+      (async () => {
+        try { if (i >= 0) await d.releaseInterface(i); } catch (_) {}
+        try { await d.close(); } catch (_) {}
+      })();
+    }
     playBtn.disabled = true;
     playBtn.textContent = 'play';
     timelineWrap.classList.add('hidden');
@@ -4877,11 +4907,140 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
     }
   }
 
+  // --- WebUSB-bulk capture --------------------------------------------------
+  // AudioWorklet that buffers interleaved stereo PCM (posted from the USB read
+  // loop) in a ring and plays it out, so the existing AnalyserNode graph can FFT
+  // it exactly like a mic/file source. Inlined as a Blob so index.html stays
+  // self-contained.
+  const USB_PCM_WORKLET = `
+class UsbPcm extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.cap = sampleRate;            // ~1s ring at the context rate (48k)
+    this.bufL = new Float32Array(this.cap);
+    this.bufR = new Float32Array(this.cap);
+    this.w = 0; this.r = 0; this.count = 0;
+    this.port.onmessage = (e) => {
+      const d = e.data;               // interleaved Float32 [L,R,L,R,...]
+      for (let i = 0; i + 1 < d.length; i += 2) {
+        this.bufL[this.w] = d[i];
+        this.bufR[this.w] = d[i + 1];
+        this.w = (this.w + 1) % this.cap;
+        if (this.count < this.cap) this.count++;
+        else this.r = (this.r + 1) % this.cap;   // overflow: drop oldest
+      }
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0], L = out[0], R = out[1] || out[0];
+    for (let i = 0; i < L.length; i++) {
+      if (this.count > 0) {
+        L[i] = this.bufL[this.r]; R[i] = this.bufR[this.r];
+        this.r = (this.r + 1) % this.cap; this.count--;
+      } else { L[i] = 0; R[i] = 0; }            // underrun -> silence
+    }
+    return true;
+  }
+}
+registerProcessor('usb-pcm', UsbPcm);
+`;
+
+  async function startUsbCapture(viaGesture) {
+    ensureCtx();
+    teardownSource();
+    if (!navigator.usb) {
+      statusEl.textContent = 'no WebUSB';
+      console.warn('[ambient_viz] navigator.usb unavailable — needs Chromium + a secure context (https or localhost)');
+      return;
+    }
+    try {
+      if (!usbWorkletLoaded) {
+        const url = URL.createObjectURL(new Blob([USB_PCM_WORKLET], { type: 'application/javascript' }));
+        await audioCtx.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+        usbWorkletLoaded = true;
+      }
+      // Pre-authorized devices (kiosk WebUsbAllowDevicesForUrls policy) show up in
+      // getDevices() with no gesture; requestDevice needs a user gesture (mic btn).
+      let dev = (await navigator.usb.getDevices()).find(d => d.vendorId === DAISY_VID && d.productId === DAISY_PID);
+      if (!dev && viaGesture) {
+        dev = await navigator.usb.requestDevice({ filters: [{ vendorId: DAISY_VID, productId: DAISY_PID }] });
+      }
+      if (!dev) {
+        statusEl.textContent = 'usb: no device';
+        console.warn('[ambient_viz] Daisy not pre-authorized; click `mic` to grant, or set the WebUsbAllowDevicesForUrls policy on the kiosk');
+        return;
+      }
+      await dev.open();
+      if (dev.configuration === null) await dev.selectConfiguration(1);
+      // Find the vendor (0xFF) interface + its bulk IN endpoint — robust to numbering.
+      let ifaceNum = -1, epNum = -1;
+      for (const iface of dev.configuration.interfaces) {
+        const alt = iface.alternate;
+        if (alt && alt.interfaceClass === 0xFF) {
+          const ep = alt.endpoints.find(e => e.direction === 'in' && e.type === 'bulk');
+          if (ep) { ifaceNum = iface.interfaceNumber; epNum = ep.endpointNumber; break; }
+        }
+      }
+      if (ifaceNum < 0) throw new Error('no vendor bulk-IN interface (is the `usb-bulk` firmware flashed?)');
+      await dev.claimInterface(ifaceNum);
+      usbDevice = dev; usbIface = ifaceNum; usbRunning = true;
+
+      // Worklet -> gain -> analysers (mirrors startMic). Not routed to destination
+      // unless ?monitor=1 — the capture IS the Daisy's own line-out (no feedback
+      // risk, but the audience hears the analog out, so the browser stays silent).
+      const node = new AudioWorkletNode(audioCtx, 'usb-pcm', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
+      const gain = audioCtx.createGain();
+      gain.gain.value = MIC_GAIN;
+      window.__micGain = gain;
+      node.connect(gain);
+      gain.connect(analyser);
+      gain.connect(transientAnalyser);
+      if (new URLSearchParams(location.search).get('monitor') === '1') {
+        try { gain.connect(audioCtx.destination); console.log('[ambient_viz] usb monitor ON'); } catch (_) {}
+      }
+      usbNode = node; currentSource = node;
+      statusEl.textContent = 'usb';
+      playBtn.disabled = true;
+      dropHint.classList.add('hidden');
+      console.log('[ambient_viz] WebUSB capture: iface', ifaceNum, 'ep', epNum, 'ctx', audioCtx.sampleRate + 'Hz');
+
+      // Pipelined read loop: keep TWO transferIn requests outstanding so the device
+      // never sees a gap and trips its 250 ms idle (which dumps the backlog). Each
+      // result is i16 LE -> Float32, posted (transferred) to the worklet ring.
+      const REQ = 2048; // bytes/transfer, a multiple of the 64-byte bulk packet
+      const pump = async () => {
+        if (!usbRunning) return;
+        let res;
+        try {
+          res = await dev.transferIn(epNum, REQ);
+        } catch (e) {
+          if (usbRunning) console.warn('[ambient_viz] transferIn error:', e && (e.name + ': ' + e.message));
+          usbRunning = false;
+          return;
+        }
+        if (usbRunning) pump(); // re-arm before processing -> keeps 2 in flight
+        if (res.status === 'stall') { try { await dev.clearHalt('in', epNum); } catch (_) {} return; }
+        if (res.status !== 'ok' || !res.data || res.data.byteLength < 2) return;
+        const dv = res.data, n = dv.byteLength >> 1;
+        const f = new Float32Array(n);
+        for (let i = 0; i < n; i++) f[i] = dv.getInt16(i * 2, true) / 32768;
+        if (usbNode) usbNode.port.postMessage(f, [f.buffer]);
+      };
+      pump(); pump();
+    } catch (e) {
+      statusEl.textContent = 'usb err';
+      console.warn('[ambient_viz] startUsbCapture failed:', e && (e.name + ': ' + e.message));
+    }
+  }
+
   fileInput.addEventListener('change', e => {
     const f = e.target.files[0];
     if (f) loadFile(f);
   });
-  micBtn.addEventListener('click', startMic);
+  // In USB-capture mode the mic button grants/starts WebUSB (the click is the
+  // gesture requestDevice needs); otherwise it's the normal getUserMedia path.
+  micBtn.addEventListener('click', () => (USB_CAPTURE ? startUsbCapture(true) : startMic()));
   playBtn.addEventListener('click', () => {
     if (!currentEl) return;
     if (currentEl.paused) currentEl.play();
@@ -6779,6 +6938,21 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
     const timelinePromise = fetch(timelineUrl)
       .then(r => r.ok ? r.json() : null)
       .catch(() => null);
+
+    // Kiosk: ?usbcapture=1 starts WebUSB-bulk capture immediately (no gesture)
+    // off the Daisy `usb-bulk` firmware — the iso UAC path can't be clocked by the
+    // Pi 4 VL805 (daisy/PLAN_USB_CAPTURE.md). Needs the device pre-authorized via
+    // the WebUsbAllowDevicesForUrls Chromium policy so getDevices() finds it with
+    // no click; for manual dev, click `mic` to grant via requestDevice. Lanes are
+    // clocked by ?clock=daisy off the CDC song position (a separate interface, so
+    // POS keeps flowing); load the timeline so the lanes exist. Browser stays silent.
+    if (USB_CAPTURE) {
+      startUsbCapture(false);
+      timelinePromise.then(timelineObj => {
+        if (timelineObj) { try { loadFromObject(timelineObj); } catch (_) {} }
+      });
+      return;
+    }
 
     // Kiosk: ?mic=1 starts live capture immediately (no gesture) instead of
     // waiting for a click to play the local file — for unattended boot off the
