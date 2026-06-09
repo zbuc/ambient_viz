@@ -28,9 +28,10 @@ sudo cp kiosk/webusb-policy.json /etc/chromium/policies/managed/
 - The udev rule's `TAG+="uaccess"` grants the **active graphical seat** user. For a
   headless/systemd-service context use the `plugdev` group form noted in the
   `.rules` file header.
-- The Daisy must be flashed with a `usb-bulk` firmware image
-  (`cargo flash-sdmmc-bulk-prod` for the exhibit). The CDC POS bridge
-  (`/dev/ttyACM0`) is unaffected — it's a separate interface.
+- The Daisy must be flashed with a `usb-bulk` firmware image. Preferred:
+  `cargo flash-qspi-bulk` (full features over QSPI XIP, no flash-headroom limit);
+  internal-flash alternative `cargo flash-sdmmc-bulk-prod` (~1.4 KB headroom). The
+  CDC POS bridge (`/dev/ttyACM0`) is unaffected — it's a separate interface.
 
 See `PI_KIOSK_BRINGUP.md` → "Audio source: localaudio vs live USB capture" and
 `daisy/PLAN_USB_CAPTURE.md` for the why.

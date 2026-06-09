@@ -557,8 +557,11 @@ position over CDC:
   failure, freeze, etc.). The Pi 4's VL805 can't clock the old UAC iso source, so
   this uses a vendor **bulk** endpoint (`daisy/PLAN_USB_CAPTURE.md`). Requires:
 
-  1. Flash a `usb-bulk` exhibit image: `cd daisy && cargo flash-sdmmc-bulk-prod`
-     (= `bell,voice,usb-bulk,sd-sdmmc`).
+  1. Flash a `usb-bulk` exhibit image. **Preferred:** `cd daisy && cargo
+     flash-qspi-bulk` (= `bell,voice,usb-bulk,sd-sdmmc,qspi`) — full features over
+     QSPI XIP, no internal-flash headroom limit; power-cycle the Daisy when the
+     dfu script prompts. Internal-flash alternative (probe-flash, no bootloader,
+     but only ~1.4 KB headroom): `cargo flash-sdmmc-bulk-prod`.
   2. Install the two host-config files from `kiosk/` (raw-USB udev access +
      Chromium WebUSB pre-authorization) — see **`kiosk/README.md`**. Without them
      you get `SecurityError: Access denied` (udev) or `usb: no device` (policy).

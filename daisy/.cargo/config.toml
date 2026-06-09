@@ -132,6 +132,12 @@ flash-sdmmc-lean = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf"
 # ALL features — the whole point of the port. `qspi` swaps the linker layout to
 # 0x90040000 and sets VTOR.
 bin-qspi = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc,qspi", "--", "-O", "binary", "target/firmware-qspi.bin"]
+# `bin-qspi-bulk` / `flash-qspi-bulk` (below): bin-qspi PLUS `usb-bulk` — the
+# PREFERRED exhibit-with-live-capture image. Full bell+voice + the vendor bulk
+# audio endpoint for the browser's ?usbaudio=1, from QSPI XIP (no 128 KB ceiling,
+# no opt-z), so the internal-flash headroom worry of flash-sdmmc-bulk-prod is
+# moot. INVARIANT: keep bin-qspi-bulk / flash-qspi-bulk in parity.
+bin-qspi-bulk = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,usb-bulk,sd-sdmmc,qspi", "--", "-O", "binary", "target/firmware-qspi-bulk.bin"]
 # Benchmark image: bell+voice+bench (per-stage DWT cycles over RTT) for the
 # pre/post-QSPI comparison (BENCH_QSPI.md). NOTE: NO `freeze` — bell+voice+freeze
 # together exceed the 504 KB AXI heap (bell ~172 K + voice ~204 K + freeze + tape
@@ -168,4 +174,8 @@ bin-qspi-debug = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabih
 # the string on whitespace and appends the built ELF path as the final arg, so the
 # script sees: $1 = mode, $2 = ELF.
 flash-qspi = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc,qspi", "--config", "target.thumbv7em-none-eabihf.runner='bash scripts/flash-qspi.sh noattach'"]
+# Preferred exhibit-with-live-capture image: full features + usb-bulk over QSPI
+# XIP. Parity with bin-qspi-bulk. Same dfu flow as flash-qspi (power-cycle when
+# prompted). Kiosk then launches ?usbaudio=1 (see PI_KIOSK_BRINGUP.md / kiosk/).
+flash-qspi-bulk = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,usb-bulk,sd-sdmmc,qspi", "--config", "target.thumbv7em-none-eabihf.runner='bash scripts/flash-qspi.sh noattach'"]
 flash-qspi-debug = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "debug-uart,bell,voice,sd-sdmmc,qspi", "--config", "target.thumbv7em-none-eabihf.runner='bash scripts/flash-qspi.sh attach'"]
