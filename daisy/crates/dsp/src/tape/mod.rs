@@ -614,3 +614,147 @@ impl TapeProcessor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::f32::consts::TAU;
+    use libm::sinf;
+
+    const SR: f32 = 48_000.0;
+
+    /// The nine failure params in a fixed order, so tests can iterate them
+    /// alongside their baseline/destroyed endpoints.
+    fn fields(s: &FailureSnapshot) -> [f32; 9] {
+        [
+            s.wow_rate_hz,
+            s.wow_depth_ms,
+            s.flutter_depth_ms,
+            s.chew_depth,
+            s.chew_freq,
+            s.speed_ips,
+            s.spacing_um,
+            s.hysteresis_drive,
+            s.hiss_amount,
+        ]
+    }
+
+    #[test]
+    fn failure_zero_is_exactly_baseline() {
+        // The knob's 0.0 endpoint must reproduce the light-tape baseline
+        // exactly — the documented "set_failure(0.0) after new() is a no-op"
+        // invariant. f32 lerp at t=0 is exact, so assert exact equality.
+        for (got, want) in fields(&failure_snapshot_at(0.0))
+            .iter()
+            .zip(fields(&FAILURE_BASELINE).iter())
+        {
+            assert_eq!(got, want, "failure(0.0) must equal FAILURE_BASELINE");
+        }
+    }
+
+    #[test]
+    fn failure_one_is_destroyed() {
+        for (got, want) in fields(&failure_snapshot_at(1.0))
+            .iter()
+            .zip(fields(&FAILURE_DESTROYED).iter())
+        {
+            assert!(
+                (got - want).abs() <= 1e-4 * want.abs().max(1.0),
+                "failure(1.0) ~ FAILURE_DESTROYED: got {got}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn failure_amount_clamps() {
+        for (g, w) in fields(&failure_snapshot_at(-0.5))
+            .iter()
+            .zip(fields(&FAILURE_BASELINE).iter())
+        {
+            assert_eq!(g, w, "t<0 clamps to baseline");
+        }
+        for (g, w) in fields(&failure_snapshot_at(1.5))
+            .iter()
+            .zip(fields(&FAILURE_DESTROYED).iter())
+        {
+            assert!((g - w).abs() <= 1e-4 * w.abs().max(1.0), "t>1 clamps to destroyed");
+        }
+    }
+
+    #[test]
+    fn brokenness_is_monotonic() {
+        // Sweep the knob: every param must move monotonically from baseline
+        // toward destroyed, so 0.5 is unambiguously "more broken" than 0.25.
+        let b = fields(&FAILURE_BASELINE);
+        let d = fields(&FAILURE_DESTROYED);
+        let mut prev = fields(&failure_snapshot_at(0.0));
+        for i in 1..=20 {
+            let cur = fields(&failure_snapshot_at(i as f32 / 20.0));
+            for j in 0..9 {
+                if d[j] >= b[j] {
+                    assert!(cur[j] >= prev[j] - 1e-6, "param {j} should rise toward destroyed");
+                } else {
+                    assert!(cur[j] <= prev[j] + 1e-6, "param {j} should fall toward destroyed");
+                }
+            }
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn destroyed_is_physically_more_broken() {
+        // Documents the intended physical direction of "more broken".
+        assert!(FAILURE_DESTROYED.speed_ips < FAILURE_BASELINE.speed_ips, "slower => more loss");
+        assert!(FAILURE_DESTROYED.spacing_um > FAILURE_BASELINE.spacing_um, "wider gap => more loss");
+        assert!(FAILURE_DESTROYED.hysteresis_drive > FAILURE_BASELINE.hysteresis_drive);
+        assert!(FAILURE_DESTROYED.chew_depth > FAILURE_BASELINE.chew_depth);
+        assert!(FAILURE_DESTROYED.wow_depth_ms > FAILURE_BASELINE.wow_depth_ms);
+        assert!(FAILURE_DESTROYED.flutter_depth_ms > FAILURE_BASELINE.flutter_depth_ms);
+        assert!(FAILURE_DESTROYED.hiss_amount >= FAILURE_BASELINE.hiss_amount);
+    }
+
+    #[test]
+    fn new_starts_at_zero_failure() {
+        let tape = TapeProcessor::new(SR);
+        assert_eq!(tape.failure(), 0.0);
+        assert_eq!(tape.failure_target(), 0.0);
+        assert!(tape.enabled());
+    }
+
+    #[test]
+    fn disabled_is_passthrough() {
+        let mut tape = TapeProcessor::new(SR);
+        tape.set_enabled(false);
+        let mut buf = vec![0.1f32, -0.2, 0.3, -0.4, 0.5, -0.6];
+        let orig = buf.clone();
+        tape.process(&mut buf, 0);
+        assert_eq!(buf, orig, "disabled tape must be bit-exact passthrough");
+    }
+
+    #[test]
+    fn process_stays_finite_across_failure_sweep() {
+        let mut tape = TapeProcessor::new(SR);
+        let block = 512usize;
+        let mut idx = 0u64;
+        for step in 0..=10 {
+            tape.set_failure(step as f32 / 10.0);
+            // Several blocks per setting so the failure smoother and the
+            // (throttled) loss-FIR rebuild actually engage.
+            for blk in 0..24 {
+                let mut buf = vec![0.0f32; block * 2];
+                for i in 0..block {
+                    let t = (idx + i as u64) as f32 / SR;
+                    let s = 0.6 * sinf(TAU * 440.0 * t);
+                    buf[2 * i] = s;
+                    buf[2 * i + 1] = s;
+                }
+                tape.process(&mut buf, idx);
+                for &v in &buf {
+                    assert!(v.is_finite(), "step {step} blk {blk}: non-finite {v}");
+                    assert!(v.abs() < 8.0, "step {step} blk {blk}: runaway {v}");
+                }
+                idx += block as u64;
+            }
+        }
+    }
+}

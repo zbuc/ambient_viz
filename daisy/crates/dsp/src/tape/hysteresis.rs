@@ -198,3 +198,70 @@ impl Hysteresis {
         m
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::f32::consts::TAU;
+    use libm::sinf;
+
+    const SR: f32 = 48_000.0;
+
+    #[test]
+    fn langevin_near_zero_branch_is_continuous() {
+        // At the branch threshold the Taylor approximation (q/3) must match the
+        // full coth(q) - 1/q closely — i.e. switching to the Taylor branch is
+        // continuous, not a step. (Only langevin_val is checked: l_prime's full
+        // form suffers catastrophic cancellation near 0, which is exactly why
+        // the near-zero branch exists.)
+        let q = NEAR_ZERO_THRESHOLD;
+        let taylor = q * ONE_THIRD;
+        let full = 1.0 / fast_tanh(q) - 1.0 / q;
+        assert!(
+            (taylor - full).abs() < 1e-3,
+            "branch discontinuity at q={q}: taylor {taylor} vs full {full}"
+        );
+    }
+
+    #[test]
+    fn finite_and_stable_on_extreme_input() {
+        // Hottest/widest settings + pathological inputs must never emit a
+        // NaN/Inf — the stability guard resets to 0 instead.
+        let mut h = Hysteresis::new(SR);
+        h.cook(1.0, 1.0, 1.0);
+        let probes = [0.0f32, 1e-9, -1e-9, 0.5, -0.5, 5.0, -5.0, 100.0, -100.0, 1e6, -1e6];
+        for rep in 0..50 {
+            for &x in &probes {
+                let y = h.process_sample(x);
+                assert!(y.is_finite(), "rep {rep} input {x} -> non-finite {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn near_zero_input_does_not_blow_up() {
+        // Tiny inputs keep the JA argument q in the near-zero branch; output
+        // must stay finite and quiet (no 1/q origin blow-up).
+        let mut h = Hysteresis::new(SR);
+        h.cook(0.5, 0.5, 0.5);
+        let mut max_out = 0.0f32;
+        for i in 0..2000 {
+            let x = 1e-4 * sinf(TAU * 1000.0 * i as f32 / SR);
+            let y = h.process_sample(x);
+            assert!(y.is_finite());
+            max_out = max_out.max(y.abs());
+        }
+        assert!(max_out < 1e-2, "1e-4 input must stay quiet, got max {max_out}");
+    }
+
+    #[test]
+    fn reset_clears_state() {
+        let mut h = Hysteresis::new(SR);
+        for i in 0..200 {
+            h.process_sample(0.7 * sinf(TAU * 500.0 * i as f32 / SR));
+        }
+        h.reset();
+        // With cleared state a zero input yields exactly zero — no residual.
+        assert!(h.process_sample(0.0).abs() < 1e-6, "reset should clear magnetization");
+    }
+}

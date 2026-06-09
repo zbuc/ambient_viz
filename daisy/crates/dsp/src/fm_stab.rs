@@ -24,6 +24,7 @@
 
 use crate::svf::Svf;
 use infinitedsp_core::FrameProcessor;
+use serde::{Deserialize, Serialize};
 use infinitedsp_core::core::audio_param::AudioParam;
 use infinitedsp_core::synthesis::oscillator::{Oscillator, Waveform};
 
@@ -55,7 +56,7 @@ pub fn midi_to_freq(note: u8) -> f32 {
 
 /// Output waveshaper applied per-voice after FM synthesis. The abrasive
 /// options (`HardClip`, `Foldback`) are what give the "industrial" edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Shaper {
     /// No shaping — the raw FM output.
     Off,
@@ -80,7 +81,7 @@ impl Shaper {
 }
 
 /// Tunable timbre/shape shared by every voice in a [`FmStab`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct FmPatch {
     /// Modulator frequency as a multiple of the carrier (the note). Integer
     /// ratios → harmonic/brassy; non-integer → metallic/clangorous/inharmonic.
@@ -634,5 +635,31 @@ mod tests {
             let b = plain.tick();
             assert_eq!(a, b, "pristine path diverged at sample {i}");
         }
+    }
+
+    #[test]
+    fn patch_json_round_trips_via_serde_json_core() {
+        // The patch editor (static/audio) and the firmware SD overlay share ONE
+        // JSON schema: the serde field names must match what the browser emits,
+        // and `Shaper` serializes as its variant string ("HardClip", …). Parse
+        // with serde-json-core, the same no_std parser the firmware uses.
+        let patch = FmPatch::industrial();
+        let mut buf = [0u8; 256];
+        let n = serde_json_core::to_slice(&patch, &mut buf).expect("serialize");
+        let json = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(json.contains("\"shaper\":\"HardClip\""), "shaper as variant string: {json}");
+        assert!(json.contains("\"mod_ratio\":"), "field name matches browser schema: {json}");
+
+        let (back, _): (FmPatch, _) = serde_json_core::from_slice(&buf[..n]).expect("deserialize");
+        assert_eq!(back.shaper, patch.shaper);
+        assert_eq!(back.mod_ratio, patch.mod_ratio);
+        assert_eq!(back.feedback, patch.feedback);
+        assert_eq!(back.decay_s, patch.decay_s);
+
+        // A hand-written blob in the browser's exact key order also parses.
+        let browser = br#"{"mod_ratio":1.0,"index":2.2,"feedback":0.0,"drive":1.0,
+            "shaper":"Tanh","attack_s":0.002,"decay_s":0.28,"mod_decay_s":0.12}"#;
+        let (p, _): (FmPatch, _) = serde_json_core::from_slice(browser).expect("browser json");
+        assert_eq!(p.shaper, Shaper::Tanh);
     }
 }

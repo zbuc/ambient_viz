@@ -18,7 +18,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use daisy_embassy::audio::{AudioPeripherals, HALF_DMA_BUFFER_LENGTH};
 use daisy_embassy::led::UserLed;
 use daisy_embassy::{hal, new_daisy_board};
-use defmt::info;
+use defmt::{error, info};
 #[cfg(feature = "voice")]
 use dsp::PainMaterialVoice;
 #[cfg(feature = "freeze")]
@@ -165,7 +165,18 @@ async fn main(spawner: Spawner) {
         core::arch::asm!("vmsr fpscr, {}", in(reg) fpscr);
     }
 
-    let p = hal::init(daisy_embassy::default_rcc());
+    let p = {
+        #[allow(unused_mut)]
+        let mut rcc = daisy_embassy::default_rcc();
+        // SDMMC kernel clock: PLL1Q (48 MHz) is the H7 default and is configured
+        // by default_rcc, but pin it explicitly so a future RCC change can't
+        // silently starve the SDMMC peripheral. No-op for the SPI backend.
+        #[cfg(feature = "sd-sdmmc")]
+        {
+            rcc.rcc.mux.sdmmcsel = embassy_stm32::pac::rcc::vals::Sdmmcsel::PLL1_Q;
+        }
+        hal::init(rcc)
+    };
     info!("ambient-viz-daisy firmware: SD stream + DSP (AXI heap)");
 
     let board = new_daisy_board!(p);
@@ -236,33 +247,86 @@ async fn main(spawner: Spawner) {
     // the executor boundary — only the Send AudioPeripherals + Consumer do.
     let audio_peripherals = board.audio_peripherals;
 
-    let sdcard = sd::build_sd_card(
-        p.SPI1,
-        board.pins.d8,  // PG11 / SCK
-        board.pins.d10, // PB5  / MOSI
-        board.pins.d9,  // PB4  / MISO
-        board.pins.d7,  // PG10 / CS
-    );
+    // --- SD backend: `sd-spi` (default) or `sd-sdmmc`, chosen at compile time.
+    // Both arms bind `sdcard` to an `embedded_sdmmc::BlockDevice`, so the
+    // VolumeManager + streaming code below is backend-agnostic.
+    #[cfg(feature = "sd-spi")]
+    let sdcard = {
+        let sdcard = sd::build_sd_card(
+            p.SPI1,
+            board.pins.d8,  // PG11 / SCK
+            board.pins.d10, // PB5  / MOSI
+            board.pins.d9,  // PB4  / MISO
+            board.pins.d7,  // PG10 / CS
+        );
 
-    // Acquire at the slow init clock, retrying a few times — cold-boot supply +
-    // card settling makes the first attempt flaky on the crowded breakout. Then
-    // bump to full speed for streaming.
-    let mut sd_ok = false;
-    for attempt in 1..=5u8 {
-        if sdcard.num_bytes().is_ok() {
-            sd_ok = true;
-            break;
+        // Acquire at the slow init clock, retrying a few times — cold-boot
+        // supply + card settling makes the first attempt flaky on the crowded
+        // breakout. Then bump to full speed for streaming.
+        let mut sd_ok = false;
+        for attempt in 1..=5u8 {
+            if sdcard.num_bytes().is_ok() {
+                sd_ok = true;
+                break;
+            }
+            dbg_uart!("SD: init attempt {} failed, retrying", attempt);
+            sdcard.mark_card_uninit();
+            Timer::after_millis(100).await;
         }
-        dbg_uart!("SD: init attempt {} failed, retrying", attempt);
-        sdcard.mark_card_uninit();
-        Timer::after_millis(100).await;
-    }
-    if !sd_ok {
-        dbg_uart!("SD: no card / init failed after 5 tries (blink 1)");
-        blink_code(&mut led, 1).await;
-    }
-    sd::set_fast(&sdcard);
-    dbg_uart!("SD: acquired at 400kHz, SPI -> 24MHz for streaming");
+        if !sd_ok {
+            dbg_uart!("SD: no card / init failed after 5 tries (blink 1)");
+            blink_code(&mut led, 1).await;
+        }
+        sd::set_fast(&sdcard);
+        dbg_uart!("SD: acquired at 400kHz, SPI -> 24MHz for streaming");
+        sdcard
+    };
+
+    // The SDMMC peripheral must outlive the VolumeManager (StorageDevice borrows
+    // it mutably), so it lives in this task frame — `main` never returns. 4-bit
+    // when `debug-uart` is off; 1-bit otherwise (D2/PC10 = debug-TX pin).
+    #[cfg(feature = "sd-sdmmc")]
+    let mut sdmmc_periph = sd::build_sdmmc(
+        p.SDMMC1,
+        board.pins.d6, // PC12 / SD CLK
+        board.pins.d5, // PD2  / SD CMD
+        board.pins.d4, // PC8  / SD D0
+        #[cfg(not(feature = "debug-uart"))]
+        board.pins.d3, // PC9  / SD D1
+        #[cfg(not(feature = "debug-uart"))]
+        board.pins.d2, // PC10 / SD D2
+        #[cfg(not(feature = "debug-uart"))]
+        board.pins.d1, // PC11 / SD D3
+    );
+    // `new_*bit` enabled the SDMMC1 IRQ at default priority 0 (highest), which
+    // would PREEMPT the P6 audio interrupt executor on every block transfer and
+    // glitch the SAI (SPI SD has no IRQ — that's why it ran clean). Pin it below
+    // audio, same as OTG_FS/P7. (block_on busy-polls the status, so the IRQ only
+    // wakes the waker / masks — it can fire late without stalling the SD read.)
+    #[cfg(feature = "sd-sdmmc")]
+    interrupt::SDMMC1.set_priority(Priority::P7);
+    #[cfg(feature = "sd-sdmmc")]
+    let sdcard = {
+        // defmt over RTT (always on, unlike dbg_uart!) so SD bring-up is visible
+        // via the STLINK even in the no-debug-uart prod image.
+        #[cfg(feature = "debug-uart")]
+        info!("SD: acquiring SDMMC1 (4-bit if no debug-uart, else 1-bit)...");
+        match sd::acquire_sdmmc(&mut sdmmc_periph).await {
+            Ok(dev) => {
+                let mb = (dev.num_bytes() / 1_048_576) as u32;
+                #[cfg(feature = "debug-uart")]
+                info!("SD: SDMMC acquired, {} MB", mb);
+                dbg_uart!("SD: SDMMC acquired ({} MB)", mb);
+                dev
+            }
+            Err(e) => {
+                error!("SD: SDMMC init failed: {} (blink 1)", e);
+                dbg_uart!("SD: no card / SDMMC init failed (blink 1)");
+                blink_code(&mut led, 1).await
+            }
+        }
+    };
+
     let volume_mgr = VolumeManager::new(sdcard, sd::ZeroTime);
     // Retry the FAT mount + open the same way as the acquire: a marginal MBR /
     // boot-sector / FAT read on cold boot can fail any of these (blink 2/3) even
@@ -276,6 +340,7 @@ async fn main(spawner: Spawner) {
             }
             Timer::after_millis(100).await;
         }
+        error!("SD: FAT volume mount failed after retries (blink 2)");
         dbg_uart!("SD: FAT volume mount failed after retries (blink 2)");
         blink_code(&mut led, 2).await
     };
@@ -286,6 +351,7 @@ async fn main(spawner: Spawner) {
             }
             Timer::after_millis(100).await;
         }
+        error!("SD: open root dir failed after retries (blink 2)");
         dbg_uart!("SD: open root dir failed after retries (blink 2)");
         blink_code(&mut led, 2).await
     };
@@ -296,9 +362,12 @@ async fn main(spawner: Spawner) {
             }
             Timer::after_millis(100).await;
         }
+        error!("SD: AMBIENT.RAW open failed after retries (blink 3)");
         dbg_uart!("SD: AMBIENT.RAW open failed after retries (blink 3)");
         blink_code(&mut led, 3).await
     };
+    #[cfg(feature = "debug-uart")]
+    info!("SD: streaming AMBIENT.RAW, {} bytes", file.length());
     dbg_uart!("SD: streaming AMBIENT.RAW, {} bytes", file.length());
     // Loop length in stereo frames (4 bytes/frame) for CDC position wrap.
     let loop_frames = (file.length() / 4) as u64;
@@ -397,6 +466,18 @@ async fn main(spawner: Spawner) {
     // no longer glitch the audio — the interrupt executor preempts them.
     let heartbeat = async {
         loop {
+            // Audio-health readout over RTT (the UART diag below needs a serial
+            // adapter on D2; this is visible via the STLINK). debug-uart-only to
+            // keep it out of the flash-tight prod image. cb_full must stay under
+            // the 667 us SAI deadline (BLOCK_LENGTH=32 @ 48 kHz).
+            #[cfg(feature = "debug-uart")]
+            info!(
+                "diag(rtt): cb_full={}us sai_err={} sd_under={} peak={}",
+                CB_FULL_US.load(Ordering::Relaxed),
+                SAI_ERR.load(Ordering::Relaxed),
+                SD_UNDERRUN.load(Ordering::Relaxed),
+                OUT_PEAK_MILLI.load(Ordering::Relaxed),
+            );
             // TEMP DIAG: real-time-health readout on the LED (prod has no UART).
             // PER-INTERVAL, not latching: we read-and-RESET SAI_ERR each beat, so
             // a one-off startup underrun shows fast for a single beat then calms.

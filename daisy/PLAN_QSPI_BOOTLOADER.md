@@ -33,6 +33,14 @@ Measured with `cargo size -p firmware --target thumbv7em-none-eabihf --release`:
 is the one pinned against the 128 KB wall**, so `debug-uart + bell` (or any
 future synth voice + the UART log) won't fit on internal flash.
 
+> **Unlocked by this migration — patch SD overlay.** Reading patch JSON off SD
+> at boot (`FmPatch::from_json` / `serde_json_core`) to override the compiled
+> patches needs ~30 KB of deserialize codegen — measured a 30 KB overflow on the
+> `bell,voice` build. It's parked until QSPI lifts the ceiling. The serde schema
+> and the browser/host live preview are already built; see `BACKLOG.md` ("Patch
+> SD overlay"). (As of 2026-06, in-flight `tape/*.rs` work already pushes the
+> `bell,voice` image a few KB over the table above — re-measure post-QSPI.)
+
 ### Why `debug-uart` is so large (~38 KB over the bare build)
 
 - On-device `core::fmt` for all the plaintext diagnostics (the `dbg_uart!`

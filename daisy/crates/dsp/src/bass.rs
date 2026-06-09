@@ -27,6 +27,7 @@ use crate::svf::Svf;
 use infinitedsp_core::FrameProcessor;
 use infinitedsp_core::core::audio_param::AudioParam;
 use infinitedsp_core::synthesis::oscillator::{Oscillator, Waveform};
+use serde::{Deserialize, Serialize};
 
 /// Number of detuned saws in the stack. 3 = center + sharp + flat: enough
 /// analog thickness/beating without piling up per-sample cost.
@@ -34,7 +35,7 @@ pub const NUM_SAWS: usize = 3;
 const INV_NSAWS: f32 = 1.0 / NUM_SAWS as f32;
 
 /// Tunable timbre/shape for the [`RumbleBass`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BassPatch {
     /// Semitone offset applied to the incoming note so the bass sits below the
     /// stabs. Default -12 (one octave down) → a `prog` root at octave 3 plays

@@ -9,8 +9,21 @@ edition = "2024"
 # and the panic-message print. Every `dbg_uart!` is a no-op without it, the UART
 # is never initialised, and the panic handler just halts — so the production
 # build (`--no-default-features`) carries zero debug UART traffic or code.
-default = ["debug-uart"]
+default = ["debug-uart", "sd-spi"]
 debug-uart = []
+# --- SD backend (pick EXACTLY one; `sd.rs` compile_error!s otherwise) --------
+# `sd-spi` (default): SPI1 + embedded-sdmmc, for the 6-pin WWZMDiB prototype
+# module. See daisy/BREAKOUT.md §4.3.
+sd-spi = []
+# `sd-sdmmc`: native SDMMC1 peripheral (embassy `Sdmmc`) bridged into the same
+# embedded-sdmmc VolumeManager via a block_on adapter. Bus width auto-selects:
+# 1-bit when `debug-uart` is on (4-bit needs D2/PC10, which is the USART3
+# debug-TX pin — a hard collision), 4-bit otherwise. The production aliases
+# (`--no-default-features`) get 4-bit; the debug `flash`/`bin` aliases get 1-bit.
+# Still blocks the executor like SPI does — the true async/DMA win is the
+# separate BACKLOG "async/DMA SD reads" item. Needs the SDMMC1-wired socket
+# (Adafruit #4682 proto / GCT MEM2075 prod).
+sd-sdmmc = []
 # `freeze` (OFF by default) compiles the master "freeze" parallel send: the grain
 # hold ring -> glitch tape -> return summed under the master. It's opt-in because
 # we don't currently like how it sounds; without it (the default) the ring
@@ -73,7 +86,12 @@ cortex-m-rt = { version = "0.7.0", features = ["device"] }
 critical-section = "1.2.0"
 
 defmt = "1.0.1"
-defmt-rtt = "1.0.0"
+# Non-blocking RTT: drop log bytes when the buffer is full instead of spinning
+# until the host drains it. Blocking mode stalls whatever task is logging — fatal
+# for the audio task (start_callback logs on each restart), which then underruns
+# the SAI, errors, restarts, logs again → a restart storm = blown-out audio. It
+# also hangs in the exhibit (DFU, no probe ever drains RTT). Drop-on-full instead.
+defmt-rtt = { version = "1.0.0", features = ["disable-blocking-mode"] }
 # Panic handler lives in src/debug.rs (prints panics over the debug UART), so
 # panic-probe is intentionally absent — there must be exactly one #[panic_handler].
 

@@ -245,3 +245,94 @@ impl LossFilter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::f32::consts::TAU;
+    use libm::{cosf, sinf};
+
+    const SR: f32 = 48_000.0;
+
+    #[test]
+    fn coefs_match_reference_idft() {
+        // The optimized rebuild uses a precomputed cos LUT addressed by an
+        // incremental (k*n) % order index. Verify the stored coefficients equal
+        // a from-scratch reference IDFT of the SAME magnitude spectrum — this
+        // isolates the indexing trick (the bug-prone part) from the fast_exp /
+        // fast_sin magnitude approximations, which both sides share via h_mag.
+        let f = LossFilter::new(SR); // recompute_coefs() ran inside new()
+        let order = f.order;
+        let step = TAU / order as f32;
+        let inv_order = 1.0 / order as f32;
+        for n in 0..(order / 2) {
+            let mut acc = 0.0f32;
+            for k in 0..order {
+                let idx = (k * n) % order;
+                acc += f.h_mag[k] * cosf(idx as f32 * step);
+            }
+            let expected = acc * inv_order;
+            let got = f.coefs[order / 2 + n];
+            assert!(
+                (got - expected).abs() < 1e-4,
+                "coef[{}] (n={n}): got {got}, reference {expected}",
+                order / 2 + n
+            );
+        }
+    }
+
+    #[test]
+    fn coefs_are_symmetric_and_finite() {
+        let f = LossFilter::new(SR);
+        let order = f.order;
+        for &c in &f.coefs {
+            assert!(c.is_finite(), "coef not finite: {c}");
+        }
+        // Linear-phase FIR: coefs mirror around the centre tap.
+        for n in 1..(order / 2) {
+            assert_eq!(
+                f.coefs[order / 2 - n],
+                f.coefs[order / 2 + n],
+                "FIR must be symmetric at n={n}"
+            );
+        }
+    }
+
+    /// Drive a steady tone through the filter and return its post-filter RMS
+    /// once the (throttled) rebuild has applied and the delay line has filled.
+    fn settled_rms(f: &mut LossFilter, freq: f32) -> f32 {
+        let block = 512usize;
+        let mut idx = 0u64;
+        let mut last = vec![0.0f32; block];
+        for _ in 0..40 {
+            let mut buf = vec![0.0f32; block];
+            for (i, s) in buf.iter_mut().enumerate() {
+                let t = (idx + i as u64) as f32 / SR;
+                *s = sinf(TAU * freq * t);
+            }
+            f.process(&mut buf);
+            last = buf;
+            idx += block as u64;
+        }
+        (last.iter().map(|s| s * s).sum::<f32>() / last.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn more_loss_attenuates_highs_more() {
+        // Pristine transport (fast speed, tight spacing) vs eaten (slow, wide):
+        // the eaten filter must crush an 18 kHz tone far more than the pristine.
+        let mut pristine = LossFilter::new(SR);
+        pristine.set_speed_ips(30.0);
+        pristine.set_spacing_um(0.1);
+        let mut eaten = LossFilter::new(SR);
+        eaten.set_speed_ips(1.5);
+        eaten.set_spacing_um(18.0);
+
+        let rms_pristine = settled_rms(&mut pristine, 18_000.0);
+        let rms_eaten = settled_rms(&mut eaten, 18_000.0);
+        assert!(
+            rms_eaten < rms_pristine * 0.5,
+            "eaten HF rms {rms_eaten} should be << pristine {rms_pristine}"
+        );
+    }
+}

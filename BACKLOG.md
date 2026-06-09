@@ -31,12 +31,29 @@ failure live control, SAI audio path) are intentionally excluded.
 
 - [ ] **async/DMA SD reads** — non-blocking SDMMC the audio task can `await` +
   double-buffering, so SD reads stop freezing the embassy executor (root cause of the
-  USB iso clicks). Interim: contiguous-sector reads to make each read uniform <1 ms. —
-  mem `daisy-uac-async-sd-future`, `daisy-usb-capture-clicks`
+  USB iso clicks). Interim: contiguous-sector reads to make each read uniform <1 ms.
+  *Partial:* the `sd-sdmmc` feature now drives SDMMC1 (`crates/firmware/src/sd.rs`), but
+  via a `block_on` adapter into the **sync** `embedded-sdmmc` stack — so it still blocks
+  the executor exactly like SPI. The real win needs an **async** FAT/block layer
+  (`block-device-driver` + an async FS) so the audio task can `await` reads. Also needs
+  the SDMMC1 socket wired (4-bit, D1–D6 — see "KiCad PCB design" under Hardware / PCB).
+  — mem `daisy-uac-async-sd-future`, `daisy-usb-capture-clicks`, `daisy-sd-connector-roadmap`
 - [ ] **Bootloader + QSPI XIP** — run firmware from external QSPI via the Daisy
   bootloader to lift the 128 KB internal-flash ceiling; then revert the `opt-level='z'`
   debug-alias workaround. Prereq for large additions (embassy-net, etc.). —
   `daisy/PLAN_QSPI_BOOTLOADER.md`, mem `daisy-qspi-flash-future`
+- [ ] **Patch SD overlay (JSON) — GATED ON QSPI** — read `/PATCHES/BELL.JSON` +
+  `STAB.JSON` at boot via `embedded-sdmmc` + `FmPatch::from_json` (serde-json-core),
+  falling back to the compiled `FmPatch::bell()`/`industrial()` on any error. Threading
+  is trivial (patches → `audio_task` args → the note-on patch swap). **Blocked:** the
+  `serde_json_core` *deserialize* codegen for the patch structs is ~30 KB of flash and
+  the internal-flash image is already full — measured a 30 KB overflow on the
+  `bell,voice` prod build. Revisit once QSPI XIP lands. The shared serde schema
+  (`FmPatch`/`BassPatch`/`Shaper` derive serde in `dsp`) and the browser/host live
+  preview (`static/audio/patches` ↔ `host` `patch_server`) are **already done**; only
+  the firmware read is deferred. If on-site editability is wanted sooner, a compact
+  fixed-layout `.bin` overlay (hand-parsed, ~0 flash) is the pre-QSPI alternative. —
+  conversation 2026-06-08 (new), mem `daisy-qspi-flash-future`
 - [ ] **Phase E: inbound sensor→MIDI over CDC** — host→device sensor data as MIDI CC so
   a sensor drives Daisy audio (TapeFailure) in lockstep with the visual. Deferred at
   `usb_cdc.rs:16`. — `daisy/PLAN_USB_COMPOSITE.md` Phase E
@@ -53,6 +70,48 @@ failure live control, SAI audio path) are intentionally excluded.
 - [ ] **Synth/sampler Engine path** *(optional, non-exhibit)* — `Engine::handle_midi`
   (currently a sine stub), dsp sampler, host MIDI input. Confirm it's wanted first. —
   `daisy/README.md` roadmap
+
+### Cortex-M7 utilization (audit, conversation 2026-06-08)
+
+Audit of how well the firmware exploits the STM32H750's M7. Already good: FZ+DN
+denormal flush, I/D-cache on, MPU for SDRAM, DSP heap in cached AXI SRAM,
+stack/`.bss` in single-cycle DTCM. Four gaps found, in priority order. Key fact
+to keep straight: the M7 has **scalar** double-precision FP **and integer** DSP-SIMD
+(`SMLAD`/dual-16 MAC), but **no float SIMD** (NEON is Cortex-A; MVE/Helium is
+M55/M85) — proven by disassembly (a 4-lane f32 multiply lowers to 4 scalar
+`vmul.f32` even at `-O3 -C target-cpu=cortex-m7`).
+
+- [ ] **Add `-C target-cpu=cortex-m7` to the firmware build** *(validated; one-line,
+  highest ROI)* — the default `thumbv7em-none-eabihf` is Cortex-M4-class codegen with a
+  **single-precision-only** FPU, so all on-device `f64` runs in **soft-float**. The
+  `Sampler` playback position (`position += step`/sample; f64 is justified — f32's
+  24-bit mantissa drifts over a 50 M-frame sample) and the resample ratio are the
+  consumers. Measured: baseline binary has `__aeabi_dmul`×35 / `__adddf3`×34 and zero
+  `.f64`; with the flag those soft-float helpers vanish, **178 hardware `.f64`
+  instructions** appear, **and text shrinks ~4.7 KB** (122048→117340 — eases the 128 KB
+  ceiling). No source or numeric change. Flag is currently applied in
+  `daisy/.cargo/config.toml` but **not committed** — needs an on-hardware smoke test
+  (`CB_FULL_US`/`SAI_ERR`) first, then commit. — conversation 2026-06-08 (new)
+- [ ] **Place the hottest DSP / audio-ISR code in ITCM** — the 64 KB ITCM (`0x0000_0000`)
+  is unused; the audio FX run in the UART4 interrupt executor fetching from cached flash.
+  I-cache helps steady-state but ITCM gives deterministic zero-wait fetch with no eviction
+  jitter — directly targets the worst-case block time tracked by `CB_FULL_US`. Needs a
+  linker section in `memory.x` (`> ITCMRAM`), `#[link_section]` on the hot fns, and a
+  startup copy. Medium effort. — conversation 2026-06-08 (new)
+- [ ] **Explicit FMA (`mul_add`) in the hottest inner loops** — zero `mul_add` in the
+  codebase today, and without fast-math LLVM won't fuse `a*b + c` across statements, so
+  biquad/SVF/comb/FIR loops emit separate `VMUL`+`VADD` instead of single-cycle `VFMA`.
+  Adding explicit `.mul_add()` cuts instructions and improves accuracy, but it's a per-site
+  numeric change (single vs double rounding) — apply only to measured-hot loops with
+  before/after `CB_FULL_US`. — conversation 2026-06-08 (new)
+- [ ] **Integer DSP-SIMD for the i16 reverb combs** *(speculative, high effort)* — the
+  low-mem reverb stores combs as `i16` with 2× downsampling, which is exactly the layout
+  the M7's integer DSP-SIMD (`SMLAD`/dual-16 MAC, `SADD16`) is built for — the one place
+  real M7 SIMD applies. Rust/LLVM won't auto-emit these; needs hand asm or unstable
+  `core::arch::arm` DSP intrinsics. Narrow payoff. Also: fix the vendored reverb comment
+  (`daisy/vendor/.../reverb_low_mem.rs`) "no hardware SIMD on the Daisy's Cortex-M7" →
+  "no *float* SIMD" — it has integer DSP-SIMD, just not for f32. — conversation 2026-06-08
+  (new), mem `daisy-dsp-realtime`
 
 ## Sensors
 
@@ -93,6 +152,54 @@ failure live control, SAI audio path) are intentionally excluded.
 - [ ] **Enclosure: measurements + print fixes** — board/jack/USB/cable/Dupont measurements;
   fix undersized holes, snap-fit, edge stringing. — `ENCLOSURE.md`, `MODEL_NOTES.md`
 
+## Hardware / PCB (Pain Material breakout)
+
+- [ ] **KiCad PCB design (post-prototype)** — once the perfboard breakout (Board A,
+  `BREAKOUT.md`) is validated, lay out proper PCBs in KiCad to replace the hand-wired
+  prototype. Folds in the MIDI/opto/audio-jack blocks plus the **SD connector
+  productionization**: drop the prototype Adafruit #4682 / WWZMDiB SPI module for the bare
+  **GCT MEM2075-00-140-01-A** push-push spring socket — fine-pitch SMT (1.09 mm, *not*
+  0.1"-compatible), so it needs a custom land pattern from `gct.co/files/drawings/mem2075.pdf`
+  (DM3AT-SF-PEJM5 = footprint-different fallback) — wired to **SDMMC1** (D1–D6) for 4-bit
+  mode. Pairs with the firmware **async/DMA SD** migration (SPI1 `embedded-sdmmc` → embassy
+  `Sdmmc`). — `daisy/BREAKOUT.md` §4.3, conversation 2026-06-08 (new), mem
+  `daisy-sd-connector-roadmap`
+
+## Analog FX hardware (speculative)
+
+- [ ] **Software-switched / parameterized / reroutable analog FX blocks** — build discrete
+  analog effects (e.g. analog distortion, analog reverb) as modular blocks the Daisy/Pi can
+  control digitally. **(A) Routing** — feasible: analog crosspoint/switch ICs (`MT8816`,
+  `ADG1414`, `DG409`, `CD4053`) over SPI/I²C for series/parallel/swap/bypass, *or* latching
+  signal relays for cleaner true-bypass when routing changes infrequently (no charge-injection
+  clicks). **(B) Params** — mix/drive/tone via digital pots (`MCP41xxx`, `AD5252`, `X9C`) or
+  VCAs/OTAs (`THAT2180`, `LM13700`; VCAs preferred for click-free slow swells, no zipper noise).
+  **Caveat — reverb "room size"**: a real spring/plate has *fixed* decay (only mix/damping/regen
+  are tweakable); for continuous software size control the topology must be **PT2399-based**
+  (delay-time resistor → digipot; cheap, lo-fi, pragmatic) or **BBD-based** (`MN3005`/Coolaudio
+  `V3205`, clock-frequency = time; scarce/pricey). Controller = Daisy (spare I²C/SPI/GPIO + USB
+  link to Pi), so the existing sensor/SSE plumbing can drive params. Gotchas: digital-line noise
+  coupling into analog audio (opto-isolate/layout), switch clicks (relays/zero-cross/crossfade).
+  — `ANALOG_FX_RACK.md` §1, conversation 2026-06-08 (new)
+- [ ] **Modular FX backplane — common slot connector + breakout cards** — make the above blocks
+  swappable daughtercards on a motherboard with N identical keyed slots. **One connector spec**
+  (~16–20-pin keyed IDC/card-edge) per slot carries: buffered audio I/O (single-ended + ground
+  guards, or differential for noise immunity), analog power (`±12V`/`AGND`), digital power
+  (`+5V`/`+3V3`/`DGND`), a shared `SDA`/`SCL` control bus, slot-select, and a `CARD_PRESENT` +
+  EEPROM ID. **Key decisions:** (1) bus each slot's audio back to a **central crosspoint** on the
+  motherboard (NOT slot→slot chaining) so routing stays software-arbitrary regardless of which
+  cards are present; (2) **buffer audio at every card's in/out** so harness impedance/contact
+  resistance stop mattering — the #1 reliability move; (3) solve "indexable slots" with a per-slot
+  **I²C mux (`TCA9548A`)** so cards can be built identically and addresses repeat without collision
+  (alt: 3 address-strap pins → max 8 slots; or SPI w/ per-slot `CS`); (4) put a tiny **`24Cxx`
+  EEPROM on each card** holding type/param-map so the controller **auto-enumerates the rack on
+  boot** → genuinely plug-and-play, software-defined. Gotchas: key/polarize the connector (no
+  reverse insertion), interleave ground guards, per-slot PTC fuse + decoupling, current budget per
+  slot. Precedent: Eurorack/modular backplanes, PC expansion slots. Connector choice (IDC vs
+  card-edge vs DIN 41612), Eurorack A-100 bus reference, and the buffered+guarded+differential
+  shared-bus signal-integrity analysis are written up in `ANALOG_FX_RACK.md` §§2–4. —
+  `ANALOG_FX_RACK.md`, conversation 2026-06-08 (new)
+
 ## Visualizer features / interaction
 
 - [ ] **Proximity→effect direction config flag** — replace the hardcoded reversal (near =
@@ -101,6 +208,39 @@ failure live control, SAI audio path) are intentionally excluded.
 - [ ] **Build out unbuilt EXHIBIT interactions** — B dwell-destabilizes, D buzzer/touch
   stabs, E humidity→reverb, F floor-pad beats, G spatial zones, H eavesdropping cone; plus
   catch-delay tap + SVF bloom bank. Suggested first build A+C+D. — `EXHIBIT.md`
+
+## Symbolic event stream (visuals + algorithmic music)
+
+High-level design from a 2026-06-08 session that started as "convert `.pat` → MIDI"
+and reframed: the leverage isn't the *file format*, it's a symbolic **event stream**.
+The host sequencer already emits a fully-resolved `StepEvent` per sample
+(`daisy/crates/dsp/src/sequencer.rs` — kick velocity, hats, `stab: Option<StabHit>`
+with chord **and** `stabtone` already resolved, bass gate). That struct is the
+low-bandwidth, sample-accurate, *richer-than-MIDI* signal we want — chord identity
+and the tone float ride as native fields where MIDI would force GM-drum-note mapping
++ a CC convention and lose fidelity. So: **don't port `.pat` to `.mid`.** Keep `.pat`
+as the human-editable loop source; build the stream layer instead.
+
+- [ ] **Sequencer event → visualizer feed** — tap `Sequencer::advance()` in the host
+  per-sample loop, serialize each non-empty `StepEvent` to a JSON event
+  (`{t, kick, hats, stab:{chord, tone}, bass:{on, note}}`), and push it over the
+  **existing Node SSE bridge** (same path as sensor data). Teach the visualizer to
+  prefer this symbolic feed over FFT audio-analysis when present, falling back to
+  analysis for non-sequenced material (ambient bed / the 4 distant songs). Pairs with
+  the `dasp` analysis sidecar item above. — conversation 2026-06-08 (new)
+- [ ] **`StepEvent`-emitter as the generator abstraction** *(foundation for the next
+  project: directorially-guided algorithmic ambient)* — define the serializable event
+  as the contract and put today's `Sequencer` behind it as one implementation, so an
+  algorithmic generator can be a second producer of the *same* stream. Both producers
+  feed the audio engine **and** the visualizer identically; "directorial intent" =
+  choosing/blending/swapping producers per timeline section (some lanes from `.pat`
+  loops, others generated on the fly). The visualizer never knows which. —
+  conversation 2026-06-08 (new), mem `exhibit-composition-structure`
+- [ ] **MIDI output (parallel, optional, later)** — *only* if external gear/DAW enters
+  the loop (hardware synth voicing the stabs, recording the generative output). The
+  host already links `midir`; add a MIDI *out* alongside the JSON event stream — an
+  IO/export concern, never a replacement for `.pat` or the visualizer feed. —
+  conversation 2026-06-08 (new)
 
 ## Infra
 

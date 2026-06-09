@@ -102,6 +102,11 @@ mod imp {
 
     #[panic_handler]
     fn panic(info: &core::panic::PanicInfo) -> ! {
+        // Fixed defmt marker (interned in the non-loaded `.defmt` section → ~0
+        // flash) so a panic is visible over RTT/STLINK too, not just the UART
+        // pin — otherwise a panic is indistinguishable from a hang over a probe.
+        // Full location+message still goes over UART below.
+        defmt::error!("*** PANIC (debug-uart; full detail on UART pin D2) ***");
         // The whole reason for the custom handler: synchronously print the panic
         // (location + message) so it lands on the Shikra even though the executor
         // is dead. try_borrow guards against a panic that fired mid-write.

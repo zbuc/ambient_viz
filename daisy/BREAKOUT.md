@@ -247,9 +247,71 @@ available without hacking the card slot. Use SPI mode instead — plenty fast
 for sample streaming (12–25 MHz SPI ≈ 1–3 MB/s sustained, comfortable for
 an ambient sampler).
 
-**Firmware:** the SPI-driven stack (`embedded-sdmmc` over `embassy-stm32`
-SPI) is built and compile-checked in `crates/firmware/src/sd.rs` (committed,
-452f7af). Construction only — the card isn't driven yet; see §7.
+**Firmware:** `crates/firmware/src/sd.rs` now carries **both** backends behind a
+mutually-exclusive feature flag (default `sd-spi`):
+
+- **`sd-spi`** — `embedded-sdmmc` over `embassy-stm32` SPI1 (the current
+  prototype path; committed 452f7af).
+- **`sd-sdmmc`** — native SDMMC1 via embassy `Sdmmc`, bridged into the same
+  `embedded-sdmmc` `VolumeManager` by a `block_on` adapter. Bus width
+  auto-selects: **1-bit** when `debug-uart` is on (D2/PC10 is the USART3
+  debug-TX pin — a hard collision), **4-bit** otherwise. The mount/stream code
+  in `main.rs` is backend-agnostic (both produce an `embedded_sdmmc::BlockDevice`).
+
+**WORKING on a Daisy Pod (2026-06-09), both 1-bit and 4-bit:** card acquires,
+FAT volume mounts, `AMBIENT.RAW` opens (correct length), and streams — verified
+over RTT.
+
+**Root cause that had to be solved — SDMMC IDMA cannot reach DTCM.** This
+firmware aliases the default RAM region (stack + .bss/.data) to **DTCMRAM**
+(`memory.x` `REGION_ALIAS(RAM, DTCMRAM)`), and the STM32H7 SDMMC IDMA physically
+cannot access DTCM (it's core-coupled, off the AHB bus matrix). So a `CmdBlock`/
+`DataBlock` on the stack was invisible to the IDMA: the data-path state machine
+stalled forever (no DATAEND, no DTIMEOUT) on the first ≥-FIFO transfer — the
+8-byte SCR read squeaked through the FIFO, the 64-byte ACMD13 SD-status read (and
+every 512-byte block) hung. Independent of clock, D-cache, bus width; **not**
+embassy #4723 (that's the v1 DBCKEND erratum — the v2/H7 path already waits on
+DATAEND). The fix lives in `sd.rs`: the SDMMC IDMA scratch buffers are placed in
+**AXI SRAM** (D1, IDMA-reachable; D2 `.sram1_bss` is non-cacheable but NOT
+reachable cross-domain by SDMMC1's D1 IDMA), 32-byte aligned, with explicit
+D-cache maintenance — invalidate after a read, clean before a write — since AXI
+SRAM is cacheable. embedded-sdmmc's `Block`s stay in DTCM (CPU-only). **No
+embassy patch was needed.**
+
+**Flash cost:** the embassy SDMMC driver adds ~5-6 KB over SPI, so the 4-bit
+`bell,voice` exhibit image overflows the 128 KB internal flash by ~5 KB at
+`opt-level='s'` — the `*-sdmmc*` cargo aliases use the `opt-level='z'` workaround
+(like the debug aliases) to fit (~600 B to spare; QSPI is the real lift). NOTE on
+measuring: `cargo clean -p firmware` is NOT enough to surface a flash overflow —
+incremental state silently links a stale, smaller image. Use a **full**
+`cargo clean` when checking flash size.
+
+**Connector roadmap (post-prototype 4-bit SDMMC).** The 6-pin WWZMDiB SPI
+module is a *prototype-phase* part, chosen for its 0.1" breakout — not what we
+want to ship. The Seed exposes the full SDMMC1 bus on D1–D6, so a proper socket
+unlocks 4-bit SDMMC (~10–25 MB/s vs the SPI ~1–3 MB/s) and is the hardware half
+of the async/DMA-SD work that fixes the USB-capture clicks (BACKLOG "async/DMA
+SD reads"). Two-stage selection:
+
+- **Prototyping → Adafruit #4682** ("Micro SD SPI *or* SDIO Card Breakout").
+  Breaks out all 8 lines (CLK, CMD, D0, D1, DAT2, D3) on 0.1" header with
+  onboard pull-ups; 3V-only, matching the Seed's 3.3 V logic (no level shift).
+  Friction push-pull socket — fine for bring-up. Lets us validate the embassy
+  `Sdmmc` 4-bit driver on a breadboard before committing copper.
+- **Production → GCT MEM2075-00-140-01-A** (bare push-push, spring eject, with
+  card-detect — the slot feel we want, like the Daisy Pod's). Fine-pitch SMT:
+  0.043" (~1.09 mm) contact pitch, *not* 0.1"-compatible, so it needs a custom
+  KiCad land pattern from GCT's drawing (gct.co/files/drawings/mem2075.pdf) — it
+  does NOT drop onto perfboard. Hirose DM3AT-SF-PEJM5 is the equivalent fallback
+  (different footprint; "8+2" isolated card-detect vs the MEM2075's "8+1").
+
+SDMMC1 → Daisy pin map (for either the #4682 proto or the production socket):
+CLK→D6 (PC12), CMD→D5 (PD2), D0→D4 (PC8), D1→D3 (PC9), D2→D2 (PC10),
+D3→D1 (PC11), plus 3V3 + DGND. This is a different pin block than the current
+SPI1 SD (D7–D10). The firmware driver migration is **done** — build with the
+`sd-sdmmc` feature (see the Firmware note above). The remaining work is purely
+hardware: wire the socket and bring it up. Tracked in BACKLOG ("KiCad PCB
+design" + "async/DMA SD reads").
 
 ### 4.4 Debug — STLINK or DFU
 

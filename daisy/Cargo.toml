@@ -36,6 +36,18 @@ lto = 'fat'
 opt-level = 's'
 overflow-checks = false
 
+# Keep the hot DSP crates FAST even when the debug/sdmmc aliases force the rest
+# of the image to opt-level='z' (a flash-size workaround). opt-z slows these
+# loops ~2x — measured cb_full 305 us → 671 us, which blows the 667 us SAI
+# callback deadline (BLOCK_LENGTH=32 @ 48 kHz) and makes the audio glitch/
+# underrun. These per-package overrides pin them at 's' (the exhibit-proven
+# ~305 us) regardless of the profile-wide opt-level. Drop once QSPI lifts the
+# ceiling and the 'z' workaround goes away. See PLAN_QSPI_BOOTLOADER.md.
+[profile.release.package.dsp]
+opt-level = 's'
+[profile.release.package."infinitedsp-core"]
+opt-level = 's'
+
 [profile.dev]
 codegen-units = 1
 debug = 2

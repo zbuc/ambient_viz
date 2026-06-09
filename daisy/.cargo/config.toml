@@ -8,6 +8,7 @@ rustflags = [
   "-C", "link-arg=-Tlink.x",
   "-C", "link-arg=--nmagic",
   "-C", "link-arg=-Tdefmt.x",
+  "-C", "target-cpu=cortex-m7",
 ]
 
 # Affects defmt-rtt only (defmt is firmware-only); host ignores this var.
@@ -46,5 +47,28 @@ bin = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--rele
 # profile, and feature flags. They differ ONLY in the action (probe-flash vs
 # emit a .bin); both produce the identical shipping image. If you change the
 # feature set or flags on one, change the other in the same edit.
-flash-prod = "run -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,voice"
-bin-prod = "objcopy -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,voice -- -O binary target/firmware-prod.bin"
+flash-prod = "run -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,voice,sd-spi"
+bin-prod = "objcopy -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,voice,sd-spi -- -O binary target/firmware-prod.bin"
+
+# --- SDMMC backend builds ------------------------------------------------
+# Drive the native SDMMC1 peripheral instead of the SPI SD module (needs a
+# socket wired to SDMMC1 D1-D6 — Adafruit #4682 proto / GCT MEM2075 prod; see
+# BREAKOUT.md §4.3). `sd-sdmmc` auto-selects bus width: 1-bit with `debug-uart`
+# (D2/PC10 is the USART3 debug-TX pin — hard collision), 4-bit without.
+# HARDWARE-UNTESTED until the socket exists.
+#
+# The embassy SDMMC driver adds ~5-6 KB over the SPI path, so BOTH sdmmc images
+# carry the opt-level='z' size workaround (like the debug `flash`/`bin` aliases)
+# to fit the 128 KB internal flash — the 4-bit bell,voice image overflows by
+# ~5 KB at 's' (measured with a FULL `cargo clean`; note `cargo clean -p firmware`
+# is NOT enough — incremental state masks flash overflow). QSPI XIP is the real
+# ceiling lift (PLAN_QSPI_BOOTLOADER.md); drop the 'z' override once it lands.
+# Caveat: 'z' can slow hot DSP loops — watch CB_FULL_US / SAI_ERR on hardware.
+#
+# `flash-sdmmc` / `bin-sdmmc`: bring-up — debug-uart (so dbg_uart! logs print)
+# ⇒ 1-bit. `flash-sdmmc-prod` / `bin-sdmmc-prod`: 4-bit exhibit image (bell,
+# voice, no debug-uart). INVARIANT: keep each flash-/bin- pair in parity.
+flash-sdmmc = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "debug-uart,sd-sdmmc", "--config", "profile.release.opt-level=\"z\""]
+bin-sdmmc = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "debug-uart,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc.bin"]
+flash-sdmmc-prod = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\""]
+bin-sdmmc-prod = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc-prod.bin"]
