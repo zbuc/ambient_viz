@@ -5016,10 +5016,15 @@ registerProcessor('usb-pcm', UsbPcm);
       dropHint.classList.add('hidden');
       console.log('[ambient_viz] WebUSB capture: iface', ifaceNum, 'ep', epNum, 'ctx', audioCtx.sampleRate + 'Hz');
 
-      // Pipelined read loop: keep TWO transferIn requests outstanding so the device
-      // never sees a gap and trips its 250 ms idle (which dumps the backlog). Each
-      // result is i16 LE -> Float32, posted (transferred) to the worklet ring.
-      const REQ = 2048; // bytes/transfer, a multiple of the 64-byte bulk packet
+      // Pipelined read loop: keep DEPTH transferIn requests outstanding so the
+      // device is always draining into the host controller and a busy main thread
+      // (rAF/analyser, esp. on the Pi) can't stall the USB drain — a stall longer
+      // than the buffer overflows the device's ~5.3 ms ring and shows as usb_drop.
+      // DEPTH*REQ of audio is buffered (~tolerates that much main-thread jank, at
+      // that much added latency — fine for slow visuals); keep it under the
+      // firmware's 250 ms idle. ?usbdepth=N overrides (default 6 ≈ 128 ms).
+      const REQ = 4096; // bytes/transfer (multiple of the 64-byte bulk packet)
+      const DEPTH = Math.max(2, parseInt(new URLSearchParams(location.search).get('usbdepth'), 10) || 6);
       const pump = async () => {
         if (!usbRunning) return;
         let res;
@@ -5038,7 +5043,7 @@ registerProcessor('usb-pcm', UsbPcm);
         for (let i = 0; i < n; i++) f[i] = dv.getInt16(i * 2, true) / 32768;
         if (usbNode) usbNode.port.postMessage(f, [f.buffer]);
       };
-      pump(); pump();
+      for (let i = 0; i < DEPTH; i++) pump();
     } catch (e) {
       statusEl.textContent = 'usb err';
       console.warn('[ambient_viz] startUsbCapture failed:', e && (e.name + ': ' + e.message));
