@@ -607,17 +607,30 @@ async fn main(spawner: Spawner) {
     // no longer glitch the audio — the interrupt executor preempts them.
     let heartbeat = async {
         loop {
-            // Audio-health readout over RTT (the UART diag below needs a serial
-            // adapter on D2; this is visible via the STLINK). debug-uart-only to
-            // keep it out of the flash-tight prod image. cb_full must stay under
-            // the 667 us SAI deadline (BLOCK_LENGTH=32 @ 48 kHz).
-            #[cfg(feature = "debug-uart")]
+            // Snapshot + reset every per-interval audio-health counter ONCE at the
+            // top of the loop, then feed all readouts (RTT info!, bench, the LED,
+            // the UART diag) from these locals. Single reset per beat → the RTT and
+            // UART lines agree and nothing double-swaps a counter (the bench line
+            // and the UART line both used to swap CB_FULL_US, halving it). Kept
+            // UNCONDITIONAL — not feature-gated — so the prod build's no-op
+            // `dbg_uart!`, which type-checks its args in a never-called closure,
+            // still finds them; six relaxed atomic swaps per ~1 s beat are free.
+            let cb_full = CB_FULL_US.swap(0, Ordering::Relaxed);
+            let sai_err = SAI_ERR.swap(0, Ordering::Relaxed);
+            let sd_under = SD_UNDERRUN.swap(0, Ordering::Relaxed);
+            let out_peak = OUT_PEAK_MILLI.swap(0, Ordering::Relaxed);
+            let usb_drop = USB_DROP.swap(0, Ordering::Relaxed);
+            let usb_pktmax = USB_PKT_MAX_FR.swap(0, Ordering::Relaxed);
+            // Audio-health + USB-capture readout over RTT (visible via the SWD
+            // probe, no D2 adapter). Gated on debug-uart OR rtt-diag — the latter
+            // gives this readout at full 4-bit SD speed (debug-uart claims D2 and
+            // forces the bus to 1-bit). Out of the prod image (neither feature).
+            // cb_full must stay under the 667 us SAI deadline (BLOCK_LENGTH=32 @
+            // 48 kHz).
+            #[cfg(any(feature = "debug-uart", feature = "rtt-diag"))]
             info!(
-                "diag(rtt): cb_full={}us sai_err={} sd_under={} peak={}",
-                CB_FULL_US.load(Ordering::Relaxed),
-                SAI_ERR.load(Ordering::Relaxed),
-                SD_UNDERRUN.load(Ordering::Relaxed),
-                OUT_PEAK_MILLI.load(Ordering::Relaxed),
+                "diag(rtt): cb_full={}us sai_err={} sd_under={} peak={} usb_drop={} usb_pktmax={}",
+                cb_full, sai_err, sd_under, out_peak, usb_drop, usb_pktmax,
             );
             // Per-stage DSP cycles (max this interval) for the QSPI XIP benchmark.
             // Cycles, not us, to keep sub-us stages (limiter) resolvable; /480 = us.
@@ -630,20 +643,16 @@ async fn main(spawner: Spawner) {
                 BENCH_BELL.swap(0, Ordering::Relaxed),
                 BENCH_VOICE.swap(0, Ordering::Relaxed),
                 BENCH_LIMITER.swap(0, Ordering::Relaxed),
-                CB_FULL_US.swap(0, Ordering::Relaxed),
+                cb_full,
             );
             // TEMP DIAG: real-time-health readout on the LED (prod has no UART).
-            // PER-INTERVAL, not latching: we read-and-RESET SAI_ERR each beat, so
-            // a one-off startup underrun shows fast for a single beat then calms.
+            // PER-INTERVAL, not latching: sai_err was read-and-RESET above, so a
+            // one-off startup underrun shows fast for a single beat then calms.
             // Fast (150 ms) = the audio callback underran in the LAST interval.
             // Reading: at idle (just the bed) it should settle to the calm 1 s
             // pulse; if it stays fast at idle, even tape+bell overruns. Trigger
             // the voice — if it goes fast only then, the voice is the CPU hog.
-            let period = if SAI_ERR.swap(0, Ordering::Relaxed) > 0 {
-                150
-            } else {
-                1000
-            };
+            let period = if sai_err > 0 { 150 } else { 1000 };
             led.on();
             Timer::after_millis(period).await;
             led.off();
@@ -653,12 +662,7 @@ async fn main(spawner: Spawner) {
             // isolated; sai_err (SAI underruns) is the real health metric.
             dbg_uart!(
                 "diag: cb_full {} us | sai_err {} sd_under {} | peak {} | usb_drop {} usb_pktmax {}",
-                CB_FULL_US.swap(0, Ordering::Relaxed),
-                SAI_ERR.swap(0, Ordering::Relaxed),
-                SD_UNDERRUN.swap(0, Ordering::Relaxed),
-                OUT_PEAK_MILLI.swap(0, Ordering::Relaxed),
-                USB_DROP.swap(0, Ordering::Relaxed),
-                USB_PKT_MAX_FR.swap(0, Ordering::Relaxed),
+                cb_full, sai_err, sd_under, out_peak, usb_drop, usb_pktmax,
             );
         }
     };

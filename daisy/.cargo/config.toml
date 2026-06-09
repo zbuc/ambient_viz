@@ -96,6 +96,14 @@ bin-sdmmc = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "
 flash-sdmmc-prod = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\""]
 bin-sdmmc-prod = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc-prod.bin"]
 
+# `flash-sdmmc-rtt`: USB-capture benchmark image. rtt-diag (heartbeat over the
+# SWD probe, NO D2 adapter) + sd-sdmmc at FULL 4-bit (no debug-uart, so D2 stays
+# SDMMC1_D2). probe-rs `run` streams the `diag(rtt):` line live — watch usb_drop
+# / usb_pktmax while the Pi captures (`?mic=1`). This is the production SD timing,
+# unlike flash-sdmmc (debug-uart ⇒ 1-bit). No bell/voice: isolates SD↔USB
+# executor contention from DSP load.
+flash-sdmmc-rtt = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "rtt-diag,sd-sdmmc"]
+
 # --- QSPI XIP builds (run from external QSPI via the Daisy bootloader) --------
 # No probe-rs `run` alias: the app is loaded into QSPI over the bootloader's USB
 # DFU, NOT internal flash. Build the .bin, then load with:

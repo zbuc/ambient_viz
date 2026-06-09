@@ -54,6 +54,13 @@ qspi = []
 # the QSPI port (pre/post). Zero cost when off (all instrumentation cfg'd out).
 # See BENCH_QSPI.md. Pair with the features under test, e.g. `bell,voice,bench`.
 bench = []
+# `rtt-diag` (OFF) emits the audio-health + USB-capture heartbeat over RTT (the
+# `info!("diag(rtt): …")` line) WITHOUT pulling in `debug-uart`. The point: read
+# the capture-tee counters (usb_drop / usb_pktmax) over the SWD probe alone — no
+# D2 serial adapter — while keeping the SD bus at FULL 4-bit, because `debug-uart`
+# claims D2/PC10 (SDMMC1_D2) and forces the bus to 1-bit. Use this to benchmark
+# live USB capture at production SD speed: `--features rtt-diag,sd-sdmmc`.
+rtt-diag = []
 # --- ITCM ram-function placement (per-build perf tuning) ---------------------
 # `itcm` is the umbrella: it gates the boot-time copy_itcm() that relocates the
 # `.itcm` section into the H750's zero-wait ITCM. Don't enable it directly —
