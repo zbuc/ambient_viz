@@ -9,7 +9,12 @@ mod sd;
 mod temp;
 #[allow(dead_code)] // some control-handler accessors unused until composite CDC
 mod uac_source;
+// `usb_audio` (UAC iso) and `uac_source` stay compiled in `usb-bulk` builds but
+// go unused — the vendor-bulk path replaces them; let dead-code slide there only.
+#[cfg_attr(feature = "usb-bulk", allow(dead_code))]
 mod usb_audio;
+#[cfg(feature = "usb-bulk")]
+mod usb_bulk;
 mod usb_cdc;
 
 use core::mem::MaybeUninit;
@@ -535,7 +540,6 @@ async fn main(spawner: Spawner) {
     static BOS_DESC: StaticCell<[u8; 32]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
     static EP_OUT: StaticCell<[u8; usb_audio::EP_OUT_BUF]> = StaticCell::new();
-    static UAC_HANDLER: StaticCell<uac_source::AudioSourceControlHandler> = StaticCell::new();
 
     let mut usb_cfg = embassy_stm32::usb::Config::default();
     usb_cfg.vbus_detection = false; // safe default; Daisy is bus-powered
@@ -571,13 +575,27 @@ async fn main(spawner: Spawner) {
         CONTROL_BUF.init([0; 64]),
     );
 
-    let (uac_audio_ep, _uac_feedback_ep, uac_handler) = uac_source::AudioSource::new(
-        &mut usb_builder,
-        &usb_audio::SAMPLE_RATES,
-        embassy_usb::class::uac1::SampleWidth::Width2Byte,
-        usb_audio::FEEDBACK_REFRESH_MS,
-    );
-    usb_builder.handler(UAC_HANDLER.init(uac_handler));
+    // Audio capture path — pick ONE at build time (CDC is added below in BOTH):
+    //   default        → UAC1 isochronous source (Pi sees a USB mic via getUserMedia)
+    //   `usb-bulk`      → vendor (0xFF) BULK IN endpoint, read by the browser over
+    //                     WebUSB. Needed because the Pi 4 VL805 can't schedule FS
+    //                     iso+bulk concurrently (PLAN_USB_CAPTURE.md). The two
+    //                     return the same kind of "audio IN endpoint" handle, so
+    //                     only the build + the streaming task differ.
+    #[cfg(not(feature = "usb-bulk"))]
+    let audio_in_ep = {
+        static UAC_HANDLER: StaticCell<uac_source::AudioSourceControlHandler> = StaticCell::new();
+        let (uac_audio_ep, uac_handler) = uac_source::AudioSource::new(
+            &mut usb_builder,
+            &usb_audio::SAMPLE_RATES,
+            embassy_usb::class::uac1::SampleWidth::Width2Byte,
+            usb_audio::FEEDBACK_REFRESH_MS,
+        );
+        usb_builder.handler(UAC_HANDLER.init(uac_handler));
+        uac_audio_ep
+    };
+    #[cfg(feature = "usb-bulk")]
+    let audio_in_ep = usb_bulk::build(&mut usb_builder);
 
     // CDC ACM in the same composite: full-duplex. Split into a sender
     // (song-position out, Phase C) and a receiver (inbound sensor/freeze MIDI
@@ -592,10 +610,13 @@ async fn main(spawner: Spawner) {
     // the ~callback-length delay; audio must not.
     interrupt::OTG_FS.set_priority(Priority::P7);
     spawner.must_spawn(usb_audio::usb_task(usb_device));
-    spawner.must_spawn(usb_audio::stream_task(uac_audio_ep, usb_consumer));
+    #[cfg(not(feature = "usb-bulk"))]
+    spawner.must_spawn(usb_audio::stream_task(audio_in_ep, usb_consumer));
+    #[cfg(feature = "usb-bulk")]
+    spawner.must_spawn(usb_bulk::stream_task(audio_in_ep, usb_consumer));
     spawner.must_spawn(usb_cdc::position_emit_task(cdc_tx, loop_frames));
     spawner.must_spawn(usb_cdc::midi_in_task(cdc_rx));
-    dbg_uart!("usb: UAC source + CDC position built + tasks spawned");
+    dbg_uart!("usb: audio source + CDC position built + tasks spawned");
 
     // Chip-temperature telemetry on the thread executor (lowest priority, below
     // the P6 audio interrupt executor), so its ~20 µs ADC busy-wait every 5 s is

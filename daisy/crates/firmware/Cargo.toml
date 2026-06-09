@@ -54,6 +54,23 @@ qspi = []
 # the QSPI port (pre/post). Zero cost when off (all instrumentation cfg'd out).
 # See BENCH_QSPI.md. Pair with the features under test, e.g. `bell,voice,bench`.
 bench = []
+# `usb-bulk` (OFF) replaces the UAC1 isochronous capture source with a vendor
+# (class 0xFF) BULK IN endpoint read from the browser over WebUSB. Default (off)
+# keeps the UAC iso source. Bulk exists because the Pi 4's VL805 xHCI can't
+# schedule Full-Speed iso+bulk to one composite device — the UAC capture drops
+# 100% of frames whenever CDC is concurrently active (memory
+# `daisy-webusb-bulk-decision`, daisy/PLAN_USB_CAPTURE.md). CDC (POS/MIDI) is a
+# separate interface and is unaffected either way.
+usb-bulk = []
+# `usb-uac-lean` (OFF) keeps the UAC1 iso source but strips it to a *conformant
+# async source*: drops the (bogus, never-serviced) feedback isochronous endpoint,
+# leaving a SINGLE iso IN endpoint (bSynchAddress=0). A feedback EP on an audio
+# *source* is the DAC/sink pattern — a source's data stream already conveys its
+# rate; the host adapts by counting samples. Cuts the iso endpoints the Pi 4
+# VL805 must schedule from 2→1; a cheap test of whether lighter iso load lets the
+# UAC+CDC composite survive on the Pi before committing to `usb-bulk`. Ignored
+# under `usb-bulk` (no UAC built). See PLAN_USB_CAPTURE.md.
+usb-uac-lean = []
 # `rtt-diag` (OFF) emits the audio-health + USB-capture heartbeat over RTT (the
 # `info!("diag(rtt): …")` line) WITHOUT pulling in `debug-uart`. The point: read
 # the capture-tee counters (usb_drop / usb_pktmax) over the SWD probe alone — no

@@ -104,6 +104,17 @@ bin-sdmmc-prod = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabih
 # executor contention from DSP load.
 flash-sdmmc-rtt = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "rtt-diag,sd-sdmmc"]
 
+# `flash-sdmmc-bulk`: WebUSB-bulk capture path (vendor 0xFF BULK IN instead of the
+# UAC iso source) + rtt-diag, 4-bit SD. Use to test/benchmark live capture over
+# navigator.usb on the Pi, where the UAC iso path is starved by the VL805
+# (PLAN_USB_CAPTURE.md). probe-rs `run` streams the diag(rtt): heartbeat live.
+flash-sdmmc-bulk = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "usb-bulk,rtt-diag,sd-sdmmc"]
+
+# `flash-sdmmc-lean`: UAC iso source stripped to a conformant single-iso-EP async
+# source (no feedback EP) + rtt-diag, 4-bit SD. Cheap test of whether lighter iso
+# load lets UAC+CDC survive on the Pi 4 VL805 before falling back to usb-bulk.
+flash-sdmmc-lean = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "usb-uac-lean,rtt-diag,sd-sdmmc"]
+
 # --- QSPI XIP builds (run from external QSPI via the Daisy bootloader) --------
 # No probe-rs `run` alias: the app is loaded into QSPI over the bootloader's USB
 # DFU, NOT internal flash. Build the .bin, then load with:

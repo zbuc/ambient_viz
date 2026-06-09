@@ -201,8 +201,8 @@ impl<'d, D: Driver<'d>> AudioSource<'d, D> {
         b: &mut InterfaceAltBuilder<'_, 'd, D>,
         sample_rates: &[u32],
         sample_width: SampleWidth,
-        feedback_refresh_period_ms: u8,
-    ) -> (D::EndpointIn, D::EndpointIn) {
+        #[cfg_attr(feature = "usb-uac-lean", allow(unused_variables))] feedback_refresh_period_ms: u8,
+    ) -> D::EndpointIn {
         // Class-specific AS general descriptor.
         b.descriptor(
             CS_INTERFACE,
@@ -270,45 +270,76 @@ impl<'d, D: Driver<'d>> AudioSource<'d, D> {
             audio_in_endpoint.info().interval_ms,
         );
 
-        // Optional isochronous IN feedback endpoint.
-        let feedback_in_endpoint =
-            b.alloc_endpoint_in(EndpointType::Isochronous, None, 4, feedback_refresh_period_ms);
-        debug!(
-            "uac: feedback EP addr={:?} interval={}",
-            feedback_in_endpoint.info().addr,
-            feedback_in_endpoint.info().interval_ms,
-        );
+        // Default: async source WITH an (unused) feedback iso endpoint. A
+        // feedback EP on a *source* (IN) is really the DAC/sink pattern — UAC1
+        // explicit feedback is for async OUT — and we never service it. It's a
+        // SECOND iso endpoint the host must schedule; `usb-uac-lean` drops it.
+        #[cfg(not(feature = "usb-uac-lean"))]
+        {
+            let feedback_in_endpoint =
+                b.alloc_endpoint_in(EndpointType::Isochronous, None, 4, feedback_refresh_period_ms);
+            debug!(
+                "uac: feedback EP addr={:?} interval={}",
+                feedback_in_endpoint.info().addr,
+                feedback_in_endpoint.info().interval_ms,
+            );
+            // Standard endpoint descriptor for the audio IN endpoint (links feedback).
+            b.endpoint_descriptor(
+                audio_in_endpoint.info(),
+                SynchronizationType::Asynchronous,
+                UsageType::DataEndpoint,
+                &[
+                    feedback_refresh_period_ms,
+                    feedback_in_endpoint.info().addr.into(),
+                ],
+            );
+            // Class-specific endpoint descriptor for the audio endpoint.
+            b.descriptor(
+                CS_ENDPOINT,
+                &[
+                    EP_GENERAL, 0x01, // bmAttributes: sampling frequency control
+                    0x02, // bLockDelayUnits: PCM samples
+                    0x00, 0x00, // wLockDelay
+                ],
+            );
+            // Standard endpoint descriptor for the feedback IN endpoint.
+            b.endpoint_descriptor(
+                feedback_in_endpoint.info(),
+                SynchronizationType::NoSynchronization,
+                UsageType::FeedbackEndpoint,
+                &[],
+            );
+            // The feedback EP is never serviced (no feedback task) — but keep its
+            // handle alive for the program's life, exactly as before this returned
+            // it to `main`. `main` runs forever, so the old handle was never
+            // dropped; forget ours so any endpoint `Drop` can't change normal-mode
+            // enumeration vs the historical build.
+            core::mem::forget(feedback_in_endpoint);
+        }
 
-        // Standard endpoint descriptor for the audio IN endpoint (links feedback).
-        b.endpoint_descriptor(
-            audio_in_endpoint.info(),
-            SynchronizationType::Asynchronous,
-            UsageType::DataEndpoint,
-            &[
-                feedback_refresh_period_ms,
-                feedback_in_endpoint.info().addr.into(),
-            ],
-        );
+        // `usb-uac-lean`: conformant async SOURCE — a single iso IN endpoint, NO
+        // feedback EP (bRefresh=0, bSynchAddress=0). The host rate-adapts by
+        // counting received samples. Halves the iso endpoints the Pi 4 VL805 must
+        // schedule (memory daisy-webusb-bulk-decision / PLAN_USB_CAPTURE.md).
+        #[cfg(feature = "usb-uac-lean")]
+        {
+            b.endpoint_descriptor(
+                audio_in_endpoint.info(),
+                SynchronizationType::Asynchronous,
+                UsageType::DataEndpoint,
+                &[0x00, 0x00], // bRefresh=0, bSynchAddress=0 (no feedback EP)
+            );
+            b.descriptor(
+                CS_ENDPOINT,
+                &[
+                    EP_GENERAL, 0x01, // bmAttributes: sampling frequency control
+                    0x02, // bLockDelayUnits: PCM samples
+                    0x00, 0x00, // wLockDelay
+                ],
+            );
+        }
 
-        // Class-specific endpoint descriptor for the audio endpoint.
-        b.descriptor(
-            CS_ENDPOINT,
-            &[
-                EP_GENERAL, 0x01, // bmAttributes: sampling frequency control
-                0x02, // bLockDelayUnits: PCM samples
-                0x00, 0x00, // wLockDelay
-            ],
-        );
-
-        // Standard endpoint descriptor for the feedback IN endpoint.
-        b.endpoint_descriptor(
-            feedback_in_endpoint.info(),
-            SynchronizationType::NoSynchronization,
-            UsageType::FeedbackEndpoint,
-            &[],
-        );
-
-        (audio_in_endpoint, feedback_in_endpoint)
+        audio_in_endpoint
     }
 
     /// Build the audio-source function (control IF + streaming IF) and return
@@ -318,7 +349,7 @@ impl<'d, D: Driver<'d>> AudioSource<'d, D> {
         sample_rates: &'static [u32],
         sample_width: SampleWidth,
         feedback_refresh_period_ms: u8,
-    ) -> (AudioSourceEpIn<'d, D>, AudioSourceEpIn<'d, D>, AudioSourceControlHandler) {
+    ) -> (AudioSourceEpIn<'d, D>, AudioSourceControlHandler) {
         let mut func = b.function(USB_AUDIO_CLASS, USB_AUDIOCONTROL_SUBCLASS, PROTOCOL_NONE);
 
         // Audio Control interface (IF 0), single alt setting.
@@ -336,19 +367,16 @@ impl<'d, D: Driver<'d>> AudioSource<'d, D> {
         let alt0 = iface_stream.alt_setting(USB_AUDIO_CLASS, USB_AUDIOSTREAMING_SUBCLASS, PROTOCOL_NONE, None);
         drop(alt0);
         let mut alt1 = iface_stream.alt_setting(USB_AUDIO_CLASS, USB_AUDIOSTREAMING_SUBCLASS, PROTOCOL_NONE, None);
-        let (ep_audio_in, ep_feedback_in) =
+        let ep_audio_in =
             Self::create_streaming_iface_active(&mut alt1, sample_rates, sample_width, feedback_refresh_period_ms);
 
         let ep_audio_addr = ep_audio_in.info().addr;
-        let ep_feedback_addr = ep_feedback_in.info().addr;
 
         (
             AudioSourceEpIn { ep: ep_audio_in },
-            AudioSourceEpIn { ep: ep_feedback_in },
             AudioSourceControlHandler::new(
                 sample_rates,
                 ep_audio_addr,
-                ep_feedback_addr,
                 iface_ctrl_num,
                 iface_stream_num,
             ),
@@ -364,7 +392,6 @@ pub struct AudioSourceControlHandler {
     supported_sample_rates: &'static [u32],
     sample_rate_ch_pub: SampleRatePub,
     ep_audio_addr: EndpointAddress,
-    ep_feedback_addr: EndpointAddress,
     iface_ctrl_num: InterfaceNumber,
     iface_stream_num: InterfaceNumber,
 }
@@ -373,7 +400,6 @@ impl AudioSourceControlHandler {
     pub fn new(
         sample_rates: &'static [u32],
         ep_audio_addr: EndpointAddress,
-        ep_feedback_addr: EndpointAddress,
         iface_ctrl_num: InterfaceNumber,
         iface_stream_num: InterfaceNumber,
     ) -> Self {
@@ -384,7 +410,6 @@ impl AudioSourceControlHandler {
             supported_sample_rates: sample_rates,
             sample_rate_ch_pub: sample_rate_publisher(),
             ep_audio_addr,
-            ep_feedback_addr,
             iface_ctrl_num,
             iface_stream_num,
         }
@@ -490,11 +515,6 @@ impl AudioSourceControlHandler {
     /// bInterfaceNumber of the streaming interface.
     pub fn stream_iface_num(&self) -> u8 {
         u8::from(self.iface_stream_num)
-    }
-
-    /// Address of the feedback endpoint.
-    pub fn feedback_ep_addr(&self) -> u8 {
-        u8::from(self.ep_feedback_addr)
     }
 }
 
