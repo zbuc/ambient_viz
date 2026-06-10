@@ -9,6 +9,194 @@ Each item links its source doc/memory. Dependencies noted inline. Completed
 verification checklists from already-shipped work (USB composite Phases A–D, tape
 failure live control, SAI audio path) are intentionally excluded.
 
+## Platform / modularization
+
+The umbrella epic: generalize from the single Pain Material installation into the
+modular A/V platform defined in **`ARCHITECTURE.md`**. Ordered roughly by
+dependency.
+
+**Items elsewhere in this backlog that are already facets of this design**
+(cross-referenced, not duplicated here):
+
+- *Rust `dasp` DSP/analysis sidecar* (Audio capture/transport) — the external
+  `audio.*` **source** form of audio analysis.
+- *Sequencer event → visualizer feed* + *`StepEvent`-emitter as the generator
+  abstraction* (Symbolic event stream) — the `seq.*` **source** and its
+  producer contract. `seq.*` and `audio.*` are **both routable sources**;
+  route/blend/fallback between them is a DSL decision, not a host hardcode.
+- *MIDI output* (Symbolic event stream), *Phase E inbound sensor→MIDI over CDC*
+  + *Tempo Pi→Daisy* (Firmware/DSP) — **transport** / clock-distribution edges.
+- *Multi-project support* (Infra) — the **router config** / project manifest +
+  selector + project-aware bridge/sidecar.
+- *Addressable LED strip/array output* (Kiosk hardware) — an **emitter on the
+  render plane** (Tier-B), a member of an **emitter group**; see that item for
+  the WS2812/SK6812 + Pi-SPI/ESP32/Daisy detail. Generalizes to **distributed
+  ESP32 render nodes** (the mirror of the sensor mesh — LED strips room-wide,
+  each rendering its slice locally from shared control + position; no central
+  wiring). Laser/ILDA and multi-projector are render-plane groups too. — see
+  `ARCHITECTURE.md` (The render plane).
+- *Proximity→effect direction config flag* (Visualizer features) — a
+  **router-as-data** concern (mapping direction belongs in config).
+- *Software-switched analog FX blocks* + *Modular FX backplane* (Analog FX
+  hardware) — the hardware **audio router** + **audio processors**; their
+  crosspoint selection and block params are **control-plane sinks**, and the
+  per-card EEPROM is the **capability-enumeration** precedent.
+- *ESP32 wireless sensor network* + *Multi-MPR121 touch expansion* (Sensors) —
+  **distributed `sensor.*` sources** over a multi-hop transport. Extends to
+  **edge audio analysis**: an ESP32 with a mic running local DSP and emitting
+  derived `audio.<node>.*` control signals (level/onset/bands) — never shipping
+  audio. See `ARCHITECTURE.md` (Why the edge tap matters).
+- *Multichannel I/O (4×stereo TDM)* + *Synth/sampler Engine path* (Firmware/DSP)
+  — the multi-channel **audio plane** substrate (live-musician / multi-speaker)
+  and a non-exhibit **audio source**.
+
+The new foundational items below are the ones that don't exist yet:
+
+- [ ] **Formalize the control bus** — promote `window.AMBIENT_INPUTS` to a
+  namespaced, typed signal registry (`sensor.*`, `clock.*`, `audio.*`, `seq.*`)
+  with declared range/units **and the transport shapes + time semantics** (see
+  Runtime contracts below: state / event / bundle, `TimePoint`). *Foundation for
+  everything else.* — `ARCHITECTURE.md` (control bus, Runtime contracts)
+- [ ] **Capability registry (`manifest.v1`)** — the supervisor collects module
+  manifests (identity + publishes/subscribes + per-signal stale/failsafe +
+  emitter group/geometry) and the project policy (authority ladder + roles +
+  allowlist) into the registry the router/UI/inspector read. **Draft schema
+  written: `MANIFEST_PROTOCOL.md`.** Next: implement the registry + manifest read
+  path alongside `bus.v1`. — `MANIFEST_PROTOCOL.md`, `ARCHITECTURE.md` (Runtime
+  contracts → Identity / Failure / Geometry / Authority)
+- [ ] **Router as a typed graph IR** — extract the hardcoded mappings in
+  `applyAutomation()` (e.g. `distance_cm → x²-ease → twistGain`) into a **compiled
+  typed graph IR**, not a text DSL. Nodes (input/curve/smooth/select/blend/output)
+  each declare a **`rate_domain`**; supports `domain.instance.field` + **compile-
+  time wildcards** (`audio.*.bass` w/ a wildcard_policy), **select/blend/fallback**,
+  and **emitter-group definitions** (membership + position + choreography). No
+  hidden state; explicit delay nodes for cycles. Becomes the core of the project
+  manifest. **Draft schema written: `ROUTER_IR.md` (`router.v1`)** — node set,
+  compile/validation rules, `match_against: EXPECTED` wildcards, ZOH/`ONE_EURO`
+  resampling, `Replicated` (groups + wildcard fan-out), `PluginBinding`. Next:
+  build the compiler (manifests + RouterGraph → validated runtime graph),
+  replacing `applyAutomation()`. The plugin side is drafted: **`PLUGIN_CONTRACT.md`
+  (`plugin.v1`)** — versioned asset interface + compiler validation + the plugin
+  registry. **Shared vocab extracted to `COMMON_PROTO.md` (`common.v1`)** — the
+  five schemas (`common`/`bus`/`manifest`/`router`/`plugin`) are spec-complete;
+  remaining is implementation only (stand up the `.proto`s, the router compiler,
+  the plugin registry). — `COMMON_PROTO.md`, `ROUTER_IR.md`, `PLUGIN_CONTRACT.md`,
+  `BUS_PROTOCOL.md`, `MANIFEST_PROTOCOL.md`, `ARCHITECTURE.md`, `SENSOR_MAPPING.md`
+- [ ] **Clock abstraction** — a clock source publishing `clock.*` with a
+  swappable driver (bpm-timeline / sequencer / MIDI-clock / tap / free-run);
+  define the three sync tiers (tempo / frame-coherent / genlock). — `ARCHITECTURE.md`
+- [ ] **OSC / MIDI transports** — bridges that marshal the bus namespace across
+  machine boundaries (external gear, faders, TouchOSC, a second render node).
+  MIDI where native (clock, notes). Generalizes the SSE bridge. — `ARCHITECTURE.md`
+- [ ] **Visualizer host/plugin split** — carve `static/index.html` into a thin
+  host (canvas/compositor + audio analysis + bus + clock + UI) and swappable
+  visualizer plugins; Pain Material's pipeline becomes plugin #1. — `ARCHITECTURE.md`
+- [ ] **Config-driven visualizer engine** — a data-driven plugin (scenes /
+  palette / SVG silhouette / lane automation as config) so simple projects ship
+  as data, not a code fork. *Depends on the host/plugin split.* — `ARCHITECTURE.md`
+  > LED sink renderer (Pi/ESP32 process subscribing to `clock.*` + chosen
+  > signals, standalone or mirroring a downscaled visualizer region; Tier-B
+  > sync) is tracked under **Kiosk hardware → Addressable LED strip/array
+  > output** — the bus framing here, the hardware/data-source detail there.
+- [ ] **Multi-projector (research)** — edge-blended compositing + genlock across
+  outputs; needs multi-output GPU / genlock hardware or a render-node cluster fed
+  one clock. Tier-C, not single-Pi. *Far future.* — `ARCHITECTURE.md`
+
+#### Extraction & layout
+
+- [ ] **Extract Pain Material to `projects/pain-material/`** — migrate the
+  installation-specific content out of the engine, in dependency order: assets
+  (now-ish, pure data) → manifest (timeline/palettes/mappings, needs the router
+  IR) → the raster scene (needs the host/plugin split) → patches (needs a
+  project-aware loader). **Directory scaffolded** (`projects/pain-material/` with
+  README + subdirs); files not moved yet — do it *after* the engine/project
+  boundary is stable. Split to a separate repo only at the 2nd real installation.
+  — `ARCHITECTURE.md` (Repository layout), `projects/pain-material/README.md`
+
+## Implementation plan (MVP cut — spec frozen 2026-06-10)
+
+The schemas went through three review passes (two external) on 2026-06-10 and
+both reviewers converged on the same instruction: **stop adding spec; make the
+contracts executable.** The spec is frozen pending implementation — no new
+conceptual surface until every existing abstraction has survived the trace
+simulator and one real Pain Material migration.
+
+**Canonical: [`MIGRATION_PLAN.md`](MIGRATION_PLAN.md)** — the same cut,
+re-sequenced as strangler-fig vertical slices that keep Pain Material live
+throughout (shadow-by-priority, per-phase cutover/rollback, golden-trace
+validation). The capability summary below is retained for orientation:
+
+1. **Schemas + inspector, no router compiler.** `common.v1` + `bus.v1` codegen
+   (ts-proto / prost+serde), proto-JSON logging, retained state, event-queue
+   drain, `_meta` (rates / staleness / seq gaps / queue drops), and the
+   **signal inspector**. No priority, signatures, or stale modes beyond HOLD —
+   but every skipped enforcement displayed honestly (per-field truth values).
+2. **Manifest registry + policy, minimal enforcement.** Module manifests,
+   project allowlist, path/type/range validation, role `max_priority` check,
+   duplicate `stable_id`/`instance_id` handling, visible `runtime_modes`.
+3. **Offline trace simulator.** `input packet log + manifests + policy + tiny
+   graph → output packet log + _meta log`. Golden traces: stale source, event
+   burst, out-of-order seq, reboot epoch, priority handoff, wildcard
+   unexpected-match, reload ramp; plugin seeded randomness once plugins exist.
+4. **Tiny router compiler.** Only `Input / Const / Normalize / Curve / Scale /
+   Combine / Output` (+ `Trigger`/`Envelope` if the first mapping needs them).
+   No `Delay`, `Select`, wildcards, groups, or plugin bindings until a real
+   mapping drives them. First real mapping: the Pain Material nearness chain
+   (`projects/pain-material/manifest/IR_SKETCH.md`).
+5. **One plugin: `presence_choreography.v1`.** It proves event queues, the
+   seeded PRNG, `requires_host_tick`, and BUS outputs in one artifact (the
+   raster scene comes after). Plugin host API spec lands here, not before.
+
+Then — and only then — ESP bridge, render groups/LED nodes, OSC/MIDI adapters.
+
+## Runtime contracts (harden before scale)
+
+The operational layer surfaced by the external architecture review (2026-06-09,
+`Modular AV Architecture Design` PDF). Staging doctrine: **parameters present,
+enforcement staged** — each contract's *fields* ship in the schema/wire format
+now; the *checking* is a no-op until needed, so turning it on later is a config
+flip, not a schema migration. The order roughly tracks blast radius. Detail in
+`ARCHITECTURE.md` *Runtime contracts → Staging doctrine*.
+
+- [ ] **Transport shapes + time** — bus packets as **state / event / bundle**
+  (event = append-only, ordered, never collapsed/dropped between frames; bundle =
+  atomic w/ execution timetag) and a **`TimePoint`** tagging each packet's
+  timebase (`audio_sample | musical | monotonic | wall | render_frame`). *Do this
+  before the router IR.* **Draft schema written: `BUS_PROTOCOL.md` (`bus.v1`)** —
+  next: implement the `bus.v1` registry/types (TS + Rust serde mirror) replacing
+  the flat `AMBIENT_INPUTS` snapshot. — review §1–2, `BUS_PROTOCOL.md`
+- [ ] **Failure contracts** — per-signal `stale_after_ms` / `on_stale`
+  (hold|null|default|decay|freeze_route|fail_safe) / confidence; and a **module
+  lifecycle FSM** (discovered→configured→warming→active→degraded→stale→failed→
+  removed) for the supervisor. — review §A–B
+- [ ] **Authority / conflict resolution** — a numeric **priority ladder**
+  (safety > manual > local-UI > timeline > generative > sensor > idle, à la sACN)
+  + per-path publish/subscribe permissions; safety/blackout can always seize a
+  sink. — review §D-conflict
+- [ ] **Identity / capability / authorization** — split durable **identity**
+  (key/cert, SPIFFE-style) from the routing path; **capability manifest**
+  (stable_id/instance/type/fw/schema + per-signal unit/rate/stale); **project
+  authorization** policy (capabilities are claims, not permissions). *Staged
+  (parameters present, enforcement off):* ship `source_id`/`cert_fingerprint`/
+  `sig`/`seq` fields now and **trust claimed identity** (no verification); later
+  flip on a local project CA + mTLS/HMAC. Config flip, not a schema migration;
+  not Web PKI. — review §4 + identity follow-up
+- [ ] **Observability** — a **signal inspector** (who writes each signal, value/
+  rate/staleness, drops, clock drift) + **route inspector** (compiled graph), as
+  core tools, not debug extras (TouchDesigner CHOP-viewer lesson). — review §I
+- [ ] **Group geometry contract** — member `geometry`: physical/logical coords,
+  topology (ring/line/grid/graph), orientation, calibration, latency offset,
+  color profile, brightness/safe envelope. "A ring of strips is not a line." —
+  review §E
+- [ ] **Analog FX transactional/safe route changes** — crosspoint switch as a
+  transactional op (mute→ramp-down→switch→ramp-up) with forbidden states
+  (feedback-without-limiter, output-to-input-same-card); route changes are
+  privileged. — review §H, `ANALOG_FX_RACK.md`
+- [ ] **Edge adapters (confirmed)** — OSCQuery (discovery export), DMX/sACN/
+  Art-Net adapter (LED/lighting fixture semantics, don't reinvent), Ableton Link
+  (clock-driver option for live/jam), Houdini-HDA-style versioned plugin/
+  choreography assets (`laser.edge_tracer.v1`). — review prior-art table
+
 ## Audio capture / transport
 
 - [ ] **Run the USB-capture diagnostic** — flash `debug-uart`, briefly revive
@@ -25,7 +213,9 @@ failure live control, SAI audio path) are intentionally excluded.
 - [ ] **Rust `dasp` DSP/analysis sidecar** — move FFT/envelope/transient analysis out
   of the browser into a native Rust process feeding the visualizer over the SSE/WebSocket
   bridge. Decouples from Chromium's audio stack; pairs with the WebUSB path. Start from
-  the daisy `host` crate. — conversation 2026-06-06 (new)
+  the daisy `host` crate. *In the platform model this is the external-sidecar form of the
+  `audio.*` bus source — same signal names as the in-host `AnalyserNode`.* —
+  `ARCHITECTURE.md` (Audio analysis sources), conversation 2026-06-06 (new)
 
 ## Firmware / DSP (Daisy)
 
@@ -74,10 +264,12 @@ failure live control, SAI audio path) are intentionally excluded.
   conversation 2026-06-08 (new), mem `daisy-qspi-flash-future`
 - [ ] **Phase E: inbound sensor→MIDI over CDC** — host→device sensor data as MIDI CC so
   a sensor drives Daisy audio (TapeFailure) in lockstep with the visual. Deferred at
-  `usb_cdc.rs:16`. — `daisy/PLAN_USB_COMPOSITE.md` Phase E
+  `usb_cdc.rs:16`. *A MIDI **transport** edge in the platform model: routing `sensor.*`
+  to a Daisy sink.* — `daisy/PLAN_USB_COMPOSITE.md` Phase E, `ARCHITECTURE.md` (Transports)
 - [ ] **Tempo Pi→Daisy (or onboard `bpm_at`)** for the dsp Sequencer — parked until the
-  sequencer is instantiated; prefer onboard `bpm_at(own POS)` over a tempo CC. —
-  mem `daisy-tempo-sequencer-future`
+  sequencer is instantiated; prefer onboard `bpm_at(own POS)` over a tempo CC. *Clock
+  distribution across a transport edge — see the clock abstraction under Platform.* —
+  mem `daisy-tempo-sequencer-future`, `ARCHITECTURE.md` (Clock)
 - [ ] **Tape model quality** — oversampling (hysteresis, chew shaper), FIR crossfade on
   loss-filter changes, DC blocker, bypass smoothing, head-bump↔speed coupling, pre-tape
   EQ, mid/side, bias param, decorrelated stereo hiss, JA f32 audit. — `daisy/TAPE_SIMULATION.md`
@@ -202,7 +394,9 @@ M55/M85) — proven by disassembly (a 4-lane f32 multiply lowers to 4 scalar
 
 - [ ] **Addressable LED strip/array output** — drive WS2812/SK6812 from audio/visual state
   (Pi SPI vs ESP32 node vs Daisy); define layout + data source (palette/levels via SSE or
-  the dasp sidecar). — conversation 2026-06-06 (new)
+  the dasp sidecar). *In the platform model this is the LED **sink** (Tier-B sync),
+  subscribing to `clock.*` + chosen signals; standalone or mirroring a downscaled
+  visualizer region.* — `ARCHITECTURE.md` (LED strips/panels), conversation 2026-06-06 (new)
 - [ ] **Finalize cursor hiding on labwc** — transparent XCURSOR_THEME for the compositor
   default (mouseless case), plus the USB-mouse + page-cursor sources; verify on hardware. —
   `PI_KIOSK_BRINGUP.md`, mem `kiosk-hide-cursor-wayland`
@@ -292,8 +486,10 @@ M55/M85) — proven by disassembly (a 4-lane f32 multiply lowers to 4 scalar
 ## Visualizer features / interaction
 
 - [ ] **Proximity→effect direction config flag** — replace the hardcoded reversal (near =
-  distorted, ce577ea, 3 ramps/2 files) with one flag; share with the Phase E audio leg. —
-  mem `distance-reverse-flag-future`
+  distorted, ce577ea, 3 ramps/2 files) with one flag; share with the Phase E audio leg.
+  *A concrete instance of **router-as-data**: the mapping's direction belongs in the
+  project config, not hardcoded.* — mem `distance-reverse-flag-future`, `ARCHITECTURE.md`
+  (Router)
 - [ ] **Build out unbuilt EXHIBIT interactions** — B dwell-destabilizes, D buzzer/touch
   stabs, E humidity→reverb, F floor-pad beats, G spatial zones, H eavesdropping cone; plus
   catch-delay tap + SVF bloom bank. Suggested first build A+C+D. — `EXHIBIT.md`
@@ -313,26 +509,34 @@ as the human-editable loop source; build the stream layer instead.
 - [ ] **Sequencer event → visualizer feed** — tap `Sequencer::advance()` in the host
   per-sample loop, serialize each non-empty `StepEvent` to a JSON event
   (`{t, kick, hats, stab:{chord, tone}, bass:{on, note}}`), and push it over the
-  **existing Node SSE bridge** (same path as sensor data). Teach the visualizer to
-  prefer this symbolic feed over FFT audio-analysis when present, falling back to
-  analysis for non-sequenced material (ambient bed / the 4 distant songs). Pairs with
-  the `dasp` analysis sidecar item above. — conversation 2026-06-08 (new)
+  **existing Node SSE bridge** (same path as sensor data). Expose this symbolic feed
+  as a `seq.*` source the visualizer can consume — but make `seq.*` vs FFT `audio.*`
+  a **routing choice** (route/blend/fallback per project, e.g. symbolic for sequenced
+  sections, FFT for the ambient bed / 4 distant songs), **not** a hardcoded preference.
+  Pairs with the `dasp` analysis sidecar item above. *Needs the router's multi-source
+  select/blend primitives.* — `ARCHITECTURE.md` (Symbolic and analysis sources are both
+  routable), conversation 2026-06-08 (new)
 - [ ] **`StepEvent`-emitter as the generator abstraction** *(foundation for the next
   project: directorially-guided algorithmic ambient)* — define the serializable event
   as the contract and put today's `Sequencer` behind it as one implementation, so an
   algorithmic generator can be a second producer of the *same* stream. Both producers
   feed the audio engine **and** the visualizer identically; "directorial intent" =
   choosing/blending/swapping producers per timeline section (some lanes from `.pat`
-  loops, others generated on the fly). The visualizer never knows which. —
-  conversation 2026-06-08 (new), mem `exhibit-composition-structure`
+  loops, others generated on the fly). The visualizer never knows which. *This is
+  the bus **source-producer contract** in the architecture.* — `ARCHITECTURE.md`
+  (module taxonomy / Symbolic sources), conversation 2026-06-08 (new), mem
+  `exhibit-composition-structure`
 - [ ] **MIDI output (parallel, optional, later)** — *only* if external gear/DAW enters
   the loop (hardware synth voicing the stabs, recording the generative output). The
   host already links `midir`; add a MIDI *out* alongside the JSON event stream — an
-  IO/export concern, never a replacement for `.pat` or the visualizer feed. —
-  conversation 2026-06-08 (new)
+  IO/export concern, never a replacement for `.pat` or the visualizer feed. *A MIDI
+  **transport** edge exporting `seq.*` to external gear.* — `ARCHITECTURE.md`
+  (Transports), conversation 2026-06-08 (new)
 
 ## Infra
 
 - [ ] **Multi-project support** — generalize from the single hardcoded arrangement to a
   project manifest (audio, timeline/lanes, sensor mappings, palettes, localaudio source) +
-  a selector; make the bridge + Python sidecar project-aware. — conversation 2026-06-06 (new)
+  a selector; make the bridge + Python sidecar project-aware. *This manifest **is** the
+  platform's router config + assets; pairs with "Router as data" under Platform.* —
+  `ARCHITECTURE.md` (Router), conversation 2026-06-06 (new)

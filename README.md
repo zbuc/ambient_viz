@@ -1,8 +1,42 @@
 # ambient_viz
 
-Browser-based audio visualizer for ambient / industrial / IDM material.
-Black-and-white CRT/glitch aesthetic — reference points: NIN, Aphex Twin,
-Venetian Snares.
+A **modular system for A/V projects** — synthesis, sampling, sequencing,
+sensing, and visuals bound together by a configurable clock and a uniform way
+of routing signals between them. See **`ARCHITECTURE.md`** for the high-level
+model (control bus, clock, host+plugin visualizers, LED/projector tiers).
+
+The project began as — and still ships — a **browser-based audio visualizer**
+for ambient / industrial / IDM material: black-and-white CRT/glitch aesthetic,
+reference points NIN, Aphex Twin, Venetian Snares. That visualizer was built
+for the **Pain Material** installation (`EXHIBIT.md`), which is now the
+**reference project**, not the whole system. Most of this README documents that
+reference visualizer; the platform direction lives in `ARCHITECTURE.md`.
+
+## Components
+
+- **Synthesis** — FM, wavetable, voice engines (`daisy/`).
+- **Sample playback** — SD-backed streaming on the Daisy.
+- **Sequencer** — sample-accurate `StepEvent` source (`daisy/` host).
+- **Audio I/O** — swappable audio source: synth, **live instrument/mic in** via
+  the Daisy ADC (working with live musicians), or off-Daisy entirely; optional
+  multi-channel I/O (`daisy/MULTICHANNEL_IO.md`).
+- **Effects** — in-DSP on the Daisy, and/or a software-routable **analog FX
+  rack** on a modular backplane (`ANALOG_FX_RACK.md`).
+- **Chromium visualizer** — `static/index.html` (the reference visualizer;
+  target is a thin host + swappable plugins).
+- **Sensing + routing** — Pi sensors → bridge → signal bus → params
+  (`SENSOR_MAPPING.md`, `python/`, `server/`); optional distributed wireless
+  sensors (`ESP32_SENSOR_NETWORK.md`).
+- **Master clock** — configurable; today the `bpm` lane of the track timeline,
+  sometimes the sequencer (`ARCHITECTURE.md` → Clock).
+- **Visualization** — a media plane, not one device: a *scene* produced once
+  feeds one or more *emitters* — Chromium (today), addressable LED arrays,
+  laser/ILDA, and (future, special-hardware) multi-projector walls.
+
+The big picture — the **three planes** (one control plane parameterizing the
+audio + render media planes), swappable audio source and visual emitters, and
+how the FX rack / sensor network / multi-channel I/O fit — is in
+**`ARCHITECTURE.md`**.
 
 ## Layout
 

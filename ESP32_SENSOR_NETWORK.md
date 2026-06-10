@@ -252,11 +252,48 @@ distance-curve tuning on the Pi where `SENSOR_MAPPING.md` documents it.
       low-battery surfacing.
 - [ ] udev rule / fixed USB descriptor for deterministic host enumeration.
 
+## 9. Firmware language — Rust vs C (decision: lean Rust, hedge kept)
+
+The same question applies to the ESP nodes as to the rest of the platform. These
+nodes are **not dumb sensors** — under the platform architecture they run edge
+DSP (audio analysis taps), carry identity, and speak the `bus.v1` packet protocol
+([`BUS_PROTOCOL.md`](BUS_PROTOCOL.md)). The more a node *does*, the more sharing
+code/skills with the rest of the (Rust) system pays off. Decision from
+conversation 2026-06-10:
+
+**Lean Rust** (`esp-hal`, `no_std`), because:
+
+- We're already a Rust embedded shop — the Daisy firmware is `no_std` +
+  **embassy**, and `esp-hal` runs embassy too, so the async model, patterns, and
+  toolchain carry straight over ([[daisy-coprocessor-arch]]).
+- The node uses the **same generated `bus.v1` types** as host/Daisy (one
+  `.proto`, `femtopb`/`micropb` no_std runtime) instead of a hand-mirrored copy.
+- Memory safety exactly where it matters — ESP-NOW packet parsing.
+- Espressif officially backs Rust (esp-rs).
+
+**The load-bearing risk: `esp-wifi`/ESP-NOW in `no_std` Rust is the least-mature
+layer** (younger than ESP-IDF's decade-hardened C `esp_now`). ESP-NOW is *the*
+transport, so de-risk it:
+
+- **Spike the ESP-NOW link in Rust first** (one node → aggregator) before
+  committing the fleet — folds into the §8 prototype task.
+- **Prefer RISC-V parts (C3/C6)** — stock Rust toolchain; avoids the Xtensa
+  (`espup`) custom-LLVM wrinkle the S3 needs.
+
+**Hedges that keep most of the win** if the radio fights us: (a) `esp-idf-hal`
+— Rust *on top of* ESP-IDF, so Rust ergonomics + the proven C radio underneath
+(heavier: FreeRTOS/newlib); (b) **C + `nanopb` on just that node**. Either is
+clean **because the bus is proto-as-IDL** — the wire is the contract, not the
+language, so a C node still speaks `bus.v1` perfectly. The format decision
+([`BUS_PROTOCOL.md`](BUS_PROTOCOL.md)) deliberately keeps the C fallback open.
+
 ## See also
 
 - [`hardware-handoff.md`](hardware-handoff.md) — current wired build; sensor
   pinouts, addresses, detection semantics (the source of truth this spec reuses).
 - [`SENSOR_MAPPING.md`](SENSOR_MAPPING.md) — sensor → visualizer pipeline; nothing
   downstream of `POST /ingest` changes under this design.
+- [`BUS_PROTOCOL.md`](BUS_PROTOCOL.md) — the `bus.v1` packet protocol the nodes
+  speak; proto-as-IDL keeps Rust/C node language open.
 - `daisy/` — the other in-enclosure coprocessor ([[daisy-coprocessor-arch]]); the
   host ESP32 shares the enclosure and the "talk to the Pi over USB" pattern.
