@@ -4,7 +4,7 @@
 // a plain patch object; export emits JSON or a Rust struct literal you can
 // paste into fm_stab.rs / bass.rs.
 
-import { PATCH_TYPES, defaultsFor } from '../shared/patch-schema.js';
+import { PATCH_TYPES, defaultsFor, randomizeFor } from '../shared/patch-schema.js';
 import { renderParams } from '../shared/ui.js';
 import { saveText, saveDraft, loadDraft } from '../shared/storage.js';
 import { createPreview } from '../shared/preview.js';
@@ -53,6 +53,9 @@ $('preset').onchange = (e) => {
 };
 $('reset').onclick = () => {
   patch = defaultsFor(schema); rerender(); preview.sendPatch(schema.id, patch); status('reset to default');
+};
+$('randomize').onclick = () => {
+  patch = randomizeFor(schema); rerender(); preview.sendPatch(schema.id, patch); status('randomized');
 };
 
 // --- render --------------------------------------------------------------

@@ -7,7 +7,7 @@
 use dsp::limiter::Limiter;
 use dsp::{
     AudioParam, BassPatch, FmPatch, FmStab, FrameProcessor as _, PainMaterialVoice, PingPongDelay,
-    RumbleBass,
+    RumbleBass, WtPatch, WtSynth,
 };
 
 /// Default install note for the FM stab: A5 (MIDI 81).
@@ -15,6 +15,9 @@ pub const DEFAULT_FM_NOTE: u8 = 81;
 /// Default bass note: D2 (MIDI 38) — the `D minor` install key root, an octave
 /// down via the patch's `octave_offset`.
 pub const DEFAULT_BASS_NOTE: u8 = 38;
+/// Default wavetable-voice note: C4 (MIDI 60) — the keytrack pivot, so a fresh
+/// patch plays at its written pitch.
+pub const DEFAULT_WT_NOTE: u8 = 60;
 
 /// One auditionable voice: trigger it, then render interleaved-stereo blocks.
 pub trait Rig: Send {
@@ -159,9 +162,11 @@ pub struct PreviewRig {
     send: Vec<f32>,
     wet: f32,
     bass: RumbleBass,
+    wt: WtSynth,
     limiter: Limiter,
     fm_note: u8,
     bass_note: u8,
+    wt_note: u8,
     sample_index: u64,
     sample_rate: f32,
 }
@@ -174,15 +179,19 @@ impl PreviewRig {
         delay.set_sample_rate(sample_rate);
         let mut bass = RumbleBass::new(sample_rate);
         bass.load_patch(BassPatch::default());
+        let mut wt = WtSynth::new(sample_rate);
+        wt.load_patch(WtPatch::default());
         PreviewRig {
             fm,
             delay,
             send: Vec::new(),
             wet: 0.6,
             bass,
+            wt,
             limiter: Limiter::new(sample_rate),
             fm_note: DEFAULT_FM_NOTE,
             bass_note: DEFAULT_BASS_NOTE,
+            wt_note: DEFAULT_WT_NOTE,
             sample_index: 0,
             sample_rate,
         }
@@ -194,6 +203,9 @@ impl PreviewRig {
     pub fn set_bass_patch(&mut self, patch: BassPatch) {
         self.bass.load_patch(patch);
     }
+    pub fn set_wt_patch(&mut self, patch: WtPatch) {
+        self.wt.load_patch(patch);
+    }
 
     /// Kill all audio immediately: the held bass sustain, any FM tail, and the
     /// ping-pong feedback ring. Rebuilds every voice + the delay from scratch
@@ -203,10 +215,12 @@ impl PreviewRig {
     pub fn silence(&mut self) {
         let fm_patch = *self.fm.patch();
         let bass_patch = *self.bass.patch();
+        let wt_patch = self.wt.patch().clone();
         let sr = self.sample_rate;
         *self = PreviewRig::new(sr);
         self.fm.load_patch(fm_patch);
         self.bass.load_patch(bass_patch);
+        self.wt.load_patch(wt_patch);
         self.prime();
     }
     /// Strike the stab. `note` of `None` reuses the last note.
@@ -221,6 +235,14 @@ impl PreviewRig {
             self.bass_note = n;
         }
         self.bass.note_on(self.bass_note, 1.0);
+    }
+    /// Strike the wavetable voice. It sustains (held ADSR) until `/panic`,
+    /// like the bass. `note` of `None` reuses the last note.
+    pub fn trigger_wt(&mut self, note: Option<u8>) {
+        if let Some(n) = note {
+            self.wt_note = n;
+        }
+        self.wt.note_on(self.wt_note, 1.0);
     }
 }
 
@@ -241,8 +263,9 @@ impl Rig for PreviewRig {
         for i in 0..frames {
             let s = self.fm.tick();
             let b = self.bass.tick();
-            out[2 * i] = s + b; // dry stab + dry bass on both channels
-            out[2 * i + 1] = s + b;
+            let w = self.wt.tick();
+            out[2 * i] = s + b + w; // dry stab + bass + wavetable on both channels
+            out[2 * i + 1] = s + b + w;
             self.send[2 * i] = s; // only the stab feeds the ping-pong
             self.send[2 * i + 1] = 0.0;
         }

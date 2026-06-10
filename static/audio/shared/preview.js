@@ -19,14 +19,19 @@ export function createPreview({ onStatus = () => {} } = {}) {
   let debounce = null;
   let pending = null;
 
-  function setOnline(v) { if (v !== online) { online = v; onStatus(online); } }
+  // `force` re-fires the status callback even when the state is unchanged — used
+  // by an explicit probe() so a manual "click to reconnect" always re-renders
+  // the pill (otherwise re-probing while already online would leave it stuck on
+  // a transient "connecting…" label). The frequent post()→setOnline(true) path
+  // stays change-guarded so it doesn't spam the callback.
+  function setOnline(v, force = false) { if (force || v !== online) { online = v; onStatus(online); } }
 
   /** Check whether the server is up. Safe to call repeatedly. */
   async function probe() {
     try {
       const r = await fetch(`${server}/health`, { cache: 'no-store' });
-      setOnline(r.ok);
-    } catch { setOnline(false); }
+      setOnline(r.ok, true);
+    } catch { setOnline(false, true); }
     return online;
   }
 

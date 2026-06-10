@@ -75,6 +75,38 @@ Restricted to loopback connections (`127.0.0.1` / `::1`). If
 
 Response: `200 OK` with `{"accepted": <n>}`.
 
+### `/api/presets/:type` (localhost only) — saved patch presets
+
+Backs the **Save preset** button in the audio editors
+(`static/audio/wavetable`, and the FM/bass editor when wired). The **only**
+writable surface on the server; files only ever land under
+`static/audio/presets/<type>/`. `:type` is one of `fm`, `bass`, `wt`.
+
+| Method | Path | Body | Action |
+|---|---|---|---|
+| `GET` | `/api/presets/:type` | — | `{ "<name>": <patch>, … }` for the dropdown |
+| `POST` | `/api/presets/:type` | `{"name","patch"}` | validate + write `<name>.json` |
+| `DELETE` | `/api/presets/:type/:name` | — | remove one preset |
+
+Hardening (the server binds `0.0.0.0` for the LAN visualizer, so writes are
+gated hard):
+
+- **Loopback only** — all three verbs reject non-`127.0.0.1`/`::1` callers
+  (`403`), same as `/ingest`. Never writable from the LAN.
+- **Fixed root + filename whitelist** — `:type` is whitelisted; the name must
+  match `^[A-Za-z0-9][A-Za-z0-9 _-]{0,63}$` (no `.`, `/`, or traversal). The
+  resolved path is re-checked to stay inside the type dir.
+- **Body cap** — requests over 16 KB are dropped (`413`); a patch is ~1–2 KB.
+- **Schema validation** — the JSON is checked against the real patch schema
+  (`static/audio/shared/patch-schema.js`, imported server-side): every field
+  present, correct type/range/enum, **no unknown keys** (`422` otherwise). Only
+  the re-serialized validated object is written.
+- **Atomic write** (tmp + rename), **refuses to write through a symlink**
+  (`409`), and **caps files per type** at 200 (`507`) to bound disk use.
+
+Saved presets are local user data — `static/audio/presets/.gitignore` keeps the
+directory but ignores its contents.
+
 ## Wire vocabulary
 
 Event names emitted by the Python drivers (and by `MOCK=1`) per

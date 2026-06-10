@@ -3,3 +3,7 @@ target/
 *.hex
 *.elf
 .DS_Store
+
+# Committed wavetable sample blob (source data for include_bytes!, not a build
+# artifact) — exempt from the *.bin rule above.
+!crates/dsp/src/wavetables.bin

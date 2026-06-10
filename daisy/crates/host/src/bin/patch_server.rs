@@ -1,8 +1,8 @@
-//! Live patch preview server. Runs the firmware-exact FM stab + rumble bass
-//! (`host::rigs::PreviewRig`) on the Mac's audio output and accepts patch edits
-//! over localhost HTTP, so the browser patch editor (static/audio/patches) can
-//! tune against the REAL Rust DSP — the same code that's bit-compatible with the
-//! Daisy firmware.
+//! Live patch preview server. Runs the firmware-exact FM stab + rumble bass +
+//! wavetable voice (`host::rigs::PreviewRig`) on the Mac's audio output and
+//! accepts patch edits over localhost HTTP, so the browser patch editors
+//! (static/audio/patches, static/audio/wavetable) can tune against the REAL
+//! Rust DSP — the same code that's bit-compatible with the Daisy firmware.
 //!
 //!   cargo run -p host --bin patch_server [--port=8765]
 //!
@@ -10,18 +10,20 @@
 //!   GET  /health        -> "ok"   (editor probes this to switch to live mode)
 //!   POST /fm/patch      <- FmPatch JSON;   hot-swaps the stab patch
 //!   POST /bass/patch    <- BassPatch JSON; hot-swaps the bass patch
+//!   POST /wt/patch      <- WtPatch JSON;   hot-swaps the wavetable patch
 //!   POST /fm/trigger    <- {"note":81}? (optional) strikes the stab
 //!   POST /bass/trigger  <- {"note":38}? (optional) strikes the bass
-//!   POST /panic         -> kill all audio (bass sustain, FM tail, delay ring)
+//!   POST /wt/trigger    <- {"note":60}? (optional) strikes the wavetable voice
+//!   POST /panic         -> kill all audio (bass/wt sustain, FM tail, delay ring)
 //!
 //! The JSON is the same schema the editor exports and the firmware reads off SD
-//! — FmPatch/BassPatch derive serde in the `dsp` crate.
+//! — FmPatch/BassPatch/WtPatch derive serde in the `dsp` crate.
 
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait as _, StreamTrait as _};
-use dsp::{BassPatch, FmPatch};
+use dsp::{BassPatch, FmPatch, WtPatch};
 use tiny_http::{Header, Method, Response, Server};
 
 use host::audio::{open_default_output, run_output};
@@ -98,6 +100,14 @@ fn route(method: Method, path: &str, body: &[u8], rig: &Arc<Mutex<PreviewRig>>) 
             Ok(p) => { rig.lock().unwrap().set_bass_patch(p); (200, "ok".into()) }
             Err(e) => (400, format!("bad BassPatch json: {e}")),
         },
+        (Method::Post, "/wt/patch") => match serde_json::from_slice::<WtPatch>(body) {
+            Ok(p) => { rig.lock().unwrap().set_wt_patch(p); (200, "ok".into()) }
+            Err(e) => (400, format!("bad WtPatch json: {e}")),
+        },
+        (Method::Post, "/wt/trigger") => {
+            rig.lock().unwrap().trigger_wt(note_of(body));
+            (200, "ok".into())
+        }
         (Method::Post, "/fm/trigger") => {
             rig.lock().unwrap().trigger_fm(note_of(body));
             (200, "ok".into())

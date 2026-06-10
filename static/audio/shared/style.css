@@ -47,6 +47,12 @@ button.primary { background: var(--accent); color: #04201d; border-color: var(--
 .card .tag { color: var(--hit); font-size: 11px; }
 
 /* parameter rows (ui.js) */
+.param-section {
+  margin: 16px 0 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--accent);
+  border-bottom: 1px solid var(--line); padding-bottom: 4px;
+}
+.param-section:first-child { margin-top: 0; }
 .param-row { display: grid; grid-template-columns: 130px 1fr 78px; align-items: center; gap: 10px; padding: 4px 0; }
 .param-label { color: var(--muted); }
 .param-val { text-align: right; color: var(--fg); }

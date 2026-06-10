@@ -62,3 +62,36 @@ export function loadDraft(key) {
 export function clearDraft(key) {
   try { localStorage.removeItem(DRAFT_PREFIX + key); } catch (_) {}
 }
+
+// --- saved presets (server-backed) ---------------------------------------
+// Persisted as files under static/audio/presets/<type>/ via the Node server's
+// loopback-only write API. Same-origin, so this only works when the page is
+// served by that server (not a bare static file server). All calls degrade
+// gracefully: listPresets returns {} if the API is absent, so the editor still
+// shows its built-in presets. `type` is one of 'fm' | 'bass' | 'wt'.
+const PRESET_API = '/api/presets';
+
+/** Fetch all saved presets for a type as `{ name: patch }` (empty on failure). */
+export async function listPresets(type) {
+  try {
+    const r = await fetch(`${PRESET_API}/${type}`, { cache: 'no-store' });
+    return r.ok ? await r.json() : {};
+  } catch { return {}; }
+}
+
+/** Save (or overwrite) a named preset. Throws with the server's reason on error. */
+export async function savePreset(type, name, patch) {
+  const r = await fetch(`${PRESET_API}/${type}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, patch }),
+  });
+  if (!r.ok) throw new Error((await r.text()) || `save failed (${r.status})`);
+  return r.json();
+}
+
+/** Delete a saved preset by name. */
+export async function deletePreset(type, name) {
+  const r = await fetch(`${PRESET_API}/${type}/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!r.ok) throw new Error((await r.text()) || `delete failed (${r.status})`);
+}

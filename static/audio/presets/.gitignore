@@ -1,0 +1,3 @@
+# Saved patch presets are local user data — keep the dir, ignore the contents.
+*
+!.gitignore

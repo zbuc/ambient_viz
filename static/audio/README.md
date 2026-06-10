@@ -29,7 +29,42 @@ audio/
     style.css         shared dark UI
   sequencer/          drum-grid + chord-prog editor
   patches/            FM-stab / rumble-bass parameter editor
+  wavetable/          Microwave II-style wavetable voice editor
+    wavetables.json   generated wave bank (see below)
+    waveview.js       canvas preview rendering
 ```
+
+## Wavetable editor
+
+`wavetable/` edits a **Waldorf Microwave II-style** voice — two wavetable
+oscillators (each with a graphical wavetable picker + live wave-position morph
+preview), a mixer with noise + ring mod, a multimode filter and two envelopes.
+Schema: `shared/patch-schema.js` (`WT_PATCH`).
+
+Wave data comes from the Waldorf user-wave SysEx in
+`patches/wavetables/*.mid` (decoded by `waldorf_wavetable.py`). Regenerate the
+browser bank with:
+
+```
+python3 patches/wavetables/waldorf_wavetable.py bank \
+  patches/wavetables/UW_XTUsersoundset3_and_VS-Waves.mid \
+  static/audio/wavetable/wavetables.json
+```
+
+Edits audition against the **real Rust DSP** (`dsp::WtSynth`, a Microwave
+II-style 2-osc + noise + ring-mod voice) via the same `patch_server` bridge as
+the FM/bass patch editor. Run it and the `● live` pill lights up:
+
+```
+cd daisy && cargo run -p host --bin patch_server
+```
+
+**Trigger ▶** strikes the voice (it sustains until **Stop ◼**, which panics all
+audio). With no server the editor is export-only. The `WtPatch` JSON the editor
+streams is the exact serde schema `dsp::WtPatch` parses (and the firmware will
+read off SD once the QSPI overlay lands — see `BACKLOG.md`). The Rust wavetable
+bank is generated from the same SysEx via `waldorf_wavetable.py rustbin` →
+`daisy/crates/dsp/src/wavetables.bin`.
 
 ## Format boundary (MIDI migration)
 
@@ -73,9 +108,19 @@ patch bodies are the same JSON the editor exports.
 
 ## Saving
 
-The server is read-only today, so **Save = browser download**; drop the file
-back into `static/` by hand. When a write endpoint is added, swap
-`saveText()` in `shared/storage.js` for a `fetch(POST)` — callers don't change.
+Two paths:
+
+- **Export → Download** — always available; writes the patch JSON (or a Rust
+  literal) as a file download. Works under any static server.
+- **Save preset** *(wavetable editor)* — persists a named preset server-side so
+  it shows up in the dropdown beside the built-ins (under a "Saved" group),
+  surviving reloads. This needs the **Node server** (`npm start` in `server/`)
+  and the page opened from it (`http://localhost:8080/audio/...`) — it POSTs to
+  the loopback-only `/api/presets/<type>` write API. Files land in
+  `static/audio/presets/<type>/` (git-ignored local data). With a bare static
+  file server the Save button just reports the API is unreachable; Download
+  still works. See `server/README.md` for the endpoint + its security model
+  (filename whitelist, schema validation, size/symlink/count guards).
 
 ## Scaffold status / TODO
 

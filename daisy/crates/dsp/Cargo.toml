@@ -27,5 +27,6 @@ libm = "0.2"
 serde-json-core = "0.6"
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 # Must match serde-json-core 0.6.0's transitive dep — it pins heapless 0.8
-# (the master branch tracks 0.9 but isn't released yet).
-heapless = "0.8"
+# (the master branch tracks 0.9 but isn't released yet). The `serde` feature
+# lets WtPatch's wavetable-id fields (heapless::String) round-trip as JSON.
+heapless = { version = "0.8", features = ["serde"] }

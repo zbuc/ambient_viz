@@ -50,10 +50,20 @@ export function selectRow(param, value, onChange) {
   ]);
 }
 
-/** Render every param of a schema into `container`, mutating `patch`. */
+/**
+ * Render every param of a schema into `container`, mutating `patch`.
+ * If a param carries a `section` string, a header is emitted whenever the
+ * section changes — schemas without `section` render as a flat list (FM/bass).
+ */
 export function renderParams(schema, patch, container, onChange = () => {}) {
   container.innerHTML = '';
+  let section = null;
   for (const param of schema.params) {
+    if (param.widget) continue; // bespoke widgets (e.g. wavetable picker) render elsewhere
+    if (param.section && param.section !== section) {
+      section = param.section;
+      container.appendChild(el('h3', { class: 'param-section' }, section));
+    }
     const apply = (v) => { patch[param.key] = v; onChange(param.key, v); };
     container.appendChild(
       param.options ? selectRow(param, patch[param.key], apply)
