@@ -1,4 +1,7 @@
 # Capture sessions are recorded on the kiosk and stay local by default.
-# Promote one to a tracked golden by renaming it golden-<description>/.
+# Promote one to a tracked golden by renaming it golden-<description>/
+# and gzipping events.jsonl (capture-io reads .gz transparently).
 /*/
 !/golden-*/
+# Replay runs write their own captures + reports under the golden; local only.
+golden-*/replays/

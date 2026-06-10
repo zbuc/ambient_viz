@@ -4,10 +4,19 @@
 
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
+
+// Promoted goldens live gzipped in git (an hour of kiosk JSONL is ~100 MB raw,
+// ~10x smaller compressed); live captures are plain. Read either.
+function readEvents(dir) {
+  const plain = path.join(dir, 'events.jsonl');
+  if (fs.existsSync(plain)) return fs.readFileSync(plain, 'utf8');
+  return zlib.gunzipSync(fs.readFileSync(plain + '.gz')).toString('utf8');
+}
 
 function loadSession(dir) {
   const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
-  const lines = fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8').split('\n');
+  const lines = readEvents(dir).split('\n');
   const events = [];
   let badLines = 0;
   for (const line of lines) {

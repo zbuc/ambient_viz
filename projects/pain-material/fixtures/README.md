@@ -76,7 +76,10 @@ MATCH / EXPECTED_DIFFERENCE under the declared tolerances
 
 Sessions here stay untracked by default (an hour of kiosk logs is big and
 mostly disposable). Promote a session to a tracked golden by renaming it
-`golden-<description>/` — re-record a fresh golden after every cutover.
+`golden-<description>/` and gzipping the event stream (`gzip -9
+events.jsonl`; the replay tooling reads `.gz` transparently, and an hour
+compresses ~10x). Replay runs write under `<golden>/replays/`, which stays
+local. Re-record a fresh golden after every cutover.
 
 Mock-mode (`MOCK=1`) captures are not replayable: the mock publishes directly
 onto the in-process bus, bypassing the `/ingest` boundary the harness
