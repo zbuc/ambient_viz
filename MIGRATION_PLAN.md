@@ -101,11 +101,14 @@ cutover_allowed_when:
 
 ## Phase 0 — Baseline capture (no refactor)
 
-> **Status (2026-06-10): tooling landed.** Tap (`server/src/capture.js` +
-> boundary hooks), browser snapshots, and the replay harness + four-verdict
-> comparator (`tools/replay/`) are implemented; a scripted smoke session
-> captures and replays to all-MATCH. Remaining: Deliverable 1 — record ≥ 1 h
-> on the real kiosk (`CAPTURE=1 ./run_kiosk.sh`) and replay it clean.
+> **Status (2026-06-10): COMPLETE.** Tap (`server/src/capture.js` + boundary
+> hooks), browser snapshots, replay harness + four-verdict comparator
+> (`tools/replay/`). Deliverable 1: `fixtures/golden-mock-2026-06-10T20-28-44Z-
+> pid3067/` — 63.3 min on the Pi, real Daisy, all sensors via sidecar mocks
+> (no hardware attached; `--mock`). Deliverable 2: that golden replays to
+> 12 MATCH + 1 declared EXPECTED_DIFFERENCE (random industrial timbre roll),
+> 0 REGRESSION/UNKNOWN. Re-record on real sensors before phase 4B tunes
+> tolerances. Next: phase 1.
 
 Tap, don't modify. **Captured per input/output, exactly:**
 
