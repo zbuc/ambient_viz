@@ -284,8 +284,10 @@
     setText(document.getElementById('epoch'), String(data.boot_epoch));
     const paths = Object.keys(data.paths);
     setText(document.getElementById('npaths'), String(paths.filter((p) => !p.startsWith('_meta.')).length));
+    // Signal traffic only: the bus self-publishes _meta.* at 1 Hz per path,
+    // which would make this climb forever even on a dead-quiet installation.
     let totalPackets = 0;
-    for (const p of paths) totalPackets += data.paths[p].packets;
+    for (const p of paths) if (!p.startsWith('_meta.')) totalPackets += data.paths[p].packets;
     setText(document.getElementById('npackets'), totalPackets.toLocaleString());
 
     for (const [p, s] of Object.entries(data.paths)) {

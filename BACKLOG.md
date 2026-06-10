@@ -102,6 +102,14 @@ The new foundational items below are the ones that don't exist yet:
   outputs; needs multi-output GPU / genlock hardware or a render-node cluster fed
   one clock. Tier-C, not single-Pi. *Far future.* — `ARCHITECTURE.md`
 
+- [ ] **Inspector UI library (decide at phase 3)** — `/inspector` is vanilla JS
+  with a hand-rolled keyed renderer; fine for read-only diagnostics. When phase 3
+  gives it real interaction (policy/manifest views, WARN triage), pick a
+  buildless, vendored library — **Preact + htm** (plain ESM, no compiler) or
+  **lit-html** — rather than React-with-a-bundler; the repo's no-build rule is
+  load-bearing on the Pi. Decide once, for the platform UI surface as a whole
+  (phase 8 host UI inherits it). — `static/inspector.html`, `MIGRATION_PLAN.md`
+
 #### Extraction & layout
 
 - [ ] **Extract Pain Material to `projects/pain-material/`** — migrate the
