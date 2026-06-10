@@ -24,17 +24,22 @@ module.exports = {
     song_position:          { type: 'float', eps_abs: 1e-9, eps_rel: 1e-12, latency_ms: 250 },
     freeze:                 { type: 'float', eps_abs: 1e-9, eps_rel: 1e-12, latency_ms: 250 },
     motion:                 { type: 'bool',  latency_ms: 250 },
-    humidity:               { type: 'float', eps_abs: 1e-9, eps_rel: 1e-12, latency_ms: 250 },
-    // MPR121 touch channels arrive as touch_0..touch_11 (booleans).
-    'touch_*':              { type: 'bool',  latency_ms: 250 },
+    // MPR121 electrodes arrive as one 12-bit bitmask.
+    touch_mask:             { type: 'int',   latency_ms: 250 },
+    // HR202 breath events: the value is a sidecar-side ms timestamp, but it
+    // crosses /ingest as opaque payload, so replay reproduces it exactly.
+    breath_detected:        { type: 'int',   latency_ms: 250 },
   },
 
   // --- Daisy serial CC output (the `serial_tx` stream, type 'cc') -----------
   // CC value sequences are deterministic transforms of the inputs, but the
   // 33 ms per-CC rate cap samples on wall time, so replay may keep/drop
-  // different intermediate samples near the cap. Compared as step functions:
-  // at every change point in either run, the other run's value within
-  // ±window_ms must agree within eps_value; final values within eps_value.
+  // different intermediate samples near the cap (the sidecar publishes at up
+  // to 50 Hz — faster than the cap — so this happens on every fast ramp).
+  // Compared as step functions: at every change point in either run, the
+  // other run within ±window_ms must have HELD the value (within eps_value)
+  // or TRAVERSED it (value inside the window's min..max span ± eps_value);
+  // final values within eps_value.
   cc: {
     23: { name: 'tape_failure', eps_value: 1, window_ms: 250 }, // ±1 absorbs rounding at sample boundaries
     24: { name: 'freeze',       eps_value: 1, window_ms: 250 },

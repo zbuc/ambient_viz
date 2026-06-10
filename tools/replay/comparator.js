@@ -139,11 +139,20 @@ function compareCc(golden, replay, tolerances, results) {
     }
     // Each run's change points must be explainable by the other run's step
     // function somewhere within ±window_ms (the rate cap samples wall time, so
-    // exact change points differ legitimately).
+    // exact change points differ legitimately). Two ways to explain a value:
+    // the other run HELD it (within eps), or the other run TRAVERSED it — when
+    // inputs outpace the 33 ms rate cap, which intermediate sample gets written
+    // depends on ms-level arrival timing, so one run may step 71->75 where the
+    // other wrote 73. Traversal only excuses values inside the window's
+    // [min, max] span, i.e. values the other run demonstrably passed through.
     const explained = (points, other) => {
       for (const p of points) {
         const cands = stepValuesIn(other, p.t_rel - tol.window_ms, p.t_rel + tol.window_ms);
-        if (!cands.length || !cands.some((v) => Math.abs(v - p.value) <= tol.eps_value)) {
+        const held = cands.some((v) => Math.abs(v - p.value) <= tol.eps_value);
+        const traversed = cands.length >= 2
+          && p.value >= Math.min(...cands) - tol.eps_value
+          && p.value <= Math.max(...cands) + tol.eps_value;
+        if (!held && !traversed) {
           return `value ${p.value} at t=${p.t_rel.toFixed(0)}ms unexplained by other run (±${tol.window_ms}ms, eps ${tol.eps_value})`;
         }
       }

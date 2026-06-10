@@ -18,6 +18,29 @@ as before (no directory, no extra code paths, `ready` advertises
 **Deliverable 1 (phase 0): ≥ 1 h of real kiosk session logs in this
 directory.** Record with the real Daisy + sensors + browser attached.
 
+No sensors wired? Every sidecar driver mocks (the rule: sensors must always be
+mockable). The mocks run the drivers' full pipelines — distance gets EMA
+smoothing, velocity, the empty-room learner; everything still crosses the real
+`/ingest` batching boundary — so the capture is structurally identical to a
+hardware session:
+
+```sh
+CAPTURE=1 ./run_kiosk.sh --mock           # ALL drivers synthetic (ToF, AM312, MPR121, breath)
+CAPTURE=1 ./run_kiosk.sh --mock-distance  # only the ToF mocked; other attached hardware stays real
+```
+
+(`--no-pir` / `--no-distance` / `--no-breath` / `--no-touch` skip drivers
+entirely; note that passing any args to `run_kiosk.sh` replaces its default
+`--no-pir --no-breath` set.)
+
+The synthetic feeds: a ~25 s visit cycle on distance (idle → approach → dwell
+→ retreat), motion toggling every ~10 s with jitter, seeded-random touch-mask
+walks. That exercises bell/voice/CC continuously and replays exactly like a
+hardware capture. Label such goldens (`golden-mock-*`), and re-record with
+real sensors before tuning comparator tolerances against real-world noise
+(phase 4B validates against captured CC 23 traces — synthetic traces are
+cleaner than the sensor ever is).
+
 ## Session layout
 
 ```

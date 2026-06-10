@@ -22,6 +22,10 @@ def main() -> int:
     p.add_argument("--mock", action="store_true",
                    help="Run without hardware; generate synthetic sensor data. "
                         "For Mac-side end-to-end testing of the Python→Node→browser pipeline.")
+    p.add_argument("--mock-distance", action="store_true",
+                   help="Mock ONLY the distance driver (synthetic visit cycle); other "
+                        "drivers keep their real hardware. For capture/bring-up when the "
+                        "ToF sensor is unplugged but e.g. the AM312s are live.")
     p.add_argument("--url", default=config.INGEST_URL,
                    help=f"Ingest URL (default {config.INGEST_URL})")
     p.add_argument("--debug", action="store_true", help="Verbose logging")
@@ -44,7 +48,7 @@ def main() -> int:
     if not args.no_pir:
         drivers.append(PirDriver(ingest, mock=args.mock))
     if not args.no_distance:
-        drivers.append(DistanceDriver(ingest, mock=args.mock))
+        drivers.append(DistanceDriver(ingest, mock=args.mock or args.mock_distance))
     if not args.no_breath:
         drivers.append(BreathDriver(ingest, mock=args.mock))
     if not args.no_touch:
@@ -54,7 +58,9 @@ def main() -> int:
         d.start()
 
     log.info("running (%s; %d drivers; ingest -> %s)",
-             "mock" if args.mock else "hardware",
+             "mock" if args.mock
+             else "hardware + mock distance" if args.mock_distance
+             else "hardware",
              len(drivers), args.url)
 
     stop_event = threading.Event()
