@@ -164,10 +164,15 @@
 <script>
 (function () {
   'use strict';
+  // Keyed incremental renderer: the DOM skeleton is built ONCE per path-set
+  // (new paths appear rarely — startup, first _meta tick) and every poll only
+  // patches text/classes in place. A naive full-innerHTML rebuild re-triggered
+  // the reveal animation and repainted the whole page at 2 Hz.
   const POLL_MS = 500;
   const main = document.getElementById('main');
-  const prevVals = new Map();   // path -> JSON of last value, for flash
-  const openSet = new Set();    // expanded paths persist across renders
+  const openSet = new Set();    // expanded paths persist across rebuilds
+  const rows = new Map();       // path -> {sigEl, valEl, rateTextEl, barEl, flagsEl, candBodyEl, enfEl}
+  let skeletonKey = '';         // signature of the current path set
   let metaFolded = true;
 
   const fmt = (v) => {
@@ -176,20 +181,33 @@
     if (typeof v === 'boolean') return v ? 'true' : 'false';
     return String(v);
   };
+  const domainOf = (p) => (p.startsWith('_meta.') ? '_meta' : p.split('.')[0]);
 
-  const domainOf = (p) => p.split('.')[0];
-
-  function chipFor(sig) {
+  function chipsFor(s) {
     const chips = [];
-    if (sig.resolved_holding_stale) chips.push('<span class="chip warn">HOLD·STALE</span>');
-    if (sig.rejected.type) chips.push(`<span class="chip bad">TYPE×${sig.rejected.type}</span>`);
-    if (sig.rejected.order) chips.push(`<span class="chip bad">ORDER×${sig.rejected.order}</span>`);
-    const cands = sig.writer_candidates;
-    if (cands.length > 1) chips.push(`<span class="chip info">${cands.length} WRITERS</span>`);
-    if (cands.some((c) => c.status === 'would_win_if_priority_ge_legacy'))
+    if (s.resolved_holding_stale) chips.push('<span class="chip warn">HOLD·STALE</span>');
+    if (s.rejected.type) chips.push(`<span class="chip bad">TYPE×${s.rejected.type}</span>`);
+    if (s.rejected.order) chips.push(`<span class="chip bad">ORDER×${s.rejected.order}</span>`);
+    if (s.writer_candidates.length > 1) chips.push(`<span class="chip info">${s.writer_candidates.length} WRITERS</span>`);
+    if (s.writer_candidates.some((c) => c.status === 'would_win_if_priority_ge_legacy'))
       chips.push('<span class="chip info">SHADOW READY</span>');
-    if (sig.shape === 'event') chips.push(`<span class="chip ok">Q${sig.queue_depth}${sig.drops ? ` D${sig.drops}` : ''}</span>`);
+    if (s.shape === 'event') chips.push(`<span class="chip ok">Q${s.queue_depth}${s.drops ? ` D${s.drops}` : ''}</span>`);
     return chips.join('');
+  }
+
+  function candRows(s) {
+    if (!s.writer_candidates.length) return '<tr><td colspan="8">no writers yet</td></tr>';
+    return s.writer_candidates.map((c) => `
+      <tr>
+        <td class="status-${c.status}">${c.status.replace(/_/g, ' ')}</td>
+        <td>${c.source_id.replace('spiffe://pain-material.local/', '…/')}</td>
+        <td>${c.priority}</td>
+        <td class="cand-val">${fmt(c.value)}</td>
+        <td>${c.age_ms} ms</td>
+        <td>${c.stale ? 'STALE' : 'live'}</td>
+        <td>${c.boot_epoch ?? '—'},${c.seq}</td>
+        <td>${c.seq_gaps}</td>
+      </tr>`).join('');
   }
 
   function enfLine(enf) {
@@ -199,18 +217,11 @@
     }).join(' &nbsp; ');
   }
 
-  function render(data) {
-    document.getElementById('epoch').textContent = data.boot_epoch;
-    const paths = Object.keys(data.paths);
-    document.getElementById('npaths').textContent = paths.filter((p) => !p.startsWith('_meta.')).length;
-    let totalPackets = 0;
-    for (const p of paths) totalPackets += data.paths[p].packets;
-    document.getElementById('npackets').textContent = totalPackets.toLocaleString();
-
-    // group: real domains in stable order, _meta last
+  function buildSkeleton(data) {
+    const paths = Object.keys(data.paths).sort();
     const groups = new Map();
-    for (const p of paths.sort()) {
-      const d = p.startsWith('_meta.') ? '_meta' : domainOf(p);
+    for (const p of paths) {
+      const d = domainOf(p);
       if (!groups.has(d)) groups.set(d, []);
       groups.get(d).push(p);
     }
@@ -220,36 +231,22 @@
     main.innerHTML = order.map((d) => {
       const sigs = groups.get(d).map((p) => {
         const s = data.paths[p];
-        const maxRate = s.shape === 'event' ? 30 : 60;
-        const pct = Math.min(100, (s.rate_hz / maxRate) * 100).toFixed(0);
-        const val = s.shape === 'state' ? fmt(s.current_resolved_value) : `${s.queue_depth} queued`;
         const open = openSet.has(p) ? ' open' : '';
-        const cands = s.writer_candidates.map((c) => `
-          <tr>
-            <td class="status-${c.status}">${c.status.replace(/_/g, ' ')}</td>
-            <td>${c.source_id.replace('spiffe://pain-material.local/', '…/')}</td>
-            <td>${c.priority}</td>
-            <td class="cand-val">${fmt(c.value)}</td>
-            <td>${c.age_ms} ms</td>
-            <td>${c.stale ? 'STALE' : 'live'}</td>
-            <td>${c.boot_epoch ?? '—'},${c.seq}</td>
-            <td>${c.seq_gaps}</td>
-          </tr>`).join('');
         return `
         <div class="sig${open}" data-path="${p}">
           <div class="sig-row">
             <span class="path"><span class="domain-part">${d}.</span>${p.slice(d.length + 1)}</span>
             <span class="shape">${s.shape.toUpperCase()}${s.declared_type ? ' · ' + s.declared_type : ''}</span>
-            <span class="val${s.resolved_holding_stale ? ' hold' : ''}" data-path="${p}">${val}</span>
-            <span class="rate">${s.rate_hz.toFixed(1)}<span class="ratebar" style="--pct:${pct}%"></span></span>
-            <span class="flags">${chipFor(s)}</span>
+            <span class="val"></span>
+            <span class="rate"><span class="rate-text"></span><span class="ratebar"></span></span>
+            <span class="flags"></span>
           </div>
           <div class="detail">
             <table>
-              <tr><th>status</th><th>source</th><th>pri</th><th>value</th><th>age</th><th>fresh</th><th>epoch,seq</th><th>gaps</th></tr>
-              ${cands || '<tr><td colspan="8">no writers yet</td></tr>'}
+              <thead><tr><th>status</th><th>source</th><th>pri</th><th>value</th><th>age</th><th>fresh</th><th>epoch,seq</th><th>gaps</th></tr></thead>
+              <tbody class="cand-body"></tbody>
             </table>
-            <div class="enf">${enfLine(s.enforcement)}</div>
+            <div class="enf"></div>
           </div>
         </div>`;
       }).join('');
@@ -260,15 +257,55 @@
       </section>`;
     }).join('');
 
-    // flash changed values
-    for (const el of main.querySelectorAll('.val')) {
-      const p = el.dataset.path;
-      const cur = el.textContent;
-      if (prevVals.has(p) && prevVals.get(p) !== cur) {
-        el.classList.add('flash');
-        setTimeout(() => el.classList.remove('flash'), 80);
+    rows.clear();
+    for (const sigEl of main.querySelectorAll('.sig')) {
+      const p = sigEl.dataset.path;
+      rows.set(p, {
+        sigEl,
+        valEl: sigEl.querySelector('.val'),
+        rateTextEl: sigEl.querySelector('.rate-text'),
+        barEl: sigEl.querySelector('.ratebar'),
+        flagsEl: sigEl.querySelector('.flags'),
+        candBodyEl: sigEl.querySelector('.cand-body'),
+        enfEl: sigEl.querySelector('.enf'),
+      });
+    }
+  }
+
+  function setText(el, text) {
+    if (el.textContent !== text) { el.textContent = text; return true; }
+    return false;
+  }
+  function setHTML(el, html) {
+    if (el.dataset.h !== html) { el.dataset.h = html; el.innerHTML = html; }
+  }
+
+  function update(data) {
+    setText(document.getElementById('epoch'), String(data.boot_epoch));
+    const paths = Object.keys(data.paths);
+    setText(document.getElementById('npaths'), String(paths.filter((p) => !p.startsWith('_meta.')).length));
+    let totalPackets = 0;
+    for (const p of paths) totalPackets += data.paths[p].packets;
+    setText(document.getElementById('npackets'), totalPackets.toLocaleString());
+
+    for (const [p, s] of Object.entries(data.paths)) {
+      const r = rows.get(p);
+      if (!r) continue;
+      const val = s.shape === 'state' ? fmt(s.current_resolved_value) : `${s.queue_depth} queued`;
+      if (setText(r.valEl, val)) {
+        r.valEl.classList.add('flash');
+        setTimeout(() => r.valEl.classList.remove('flash'), 80);
       }
-      prevVals.set(p, cur);
+      r.valEl.classList.toggle('hold', !!s.resolved_holding_stale);
+      setText(r.rateTextEl, s.rate_hz.toFixed(1));
+      const maxRate = s.shape === 'event' ? 30 : 60;
+      r.barEl.style.setProperty('--pct', `${Math.min(100, (s.rate_hz / maxRate) * 100).toFixed(0)}%`);
+      setHTML(r.flagsEl, chipsFor(s));
+      // candidate table + enforcement: only patch while expanded (cheap when closed)
+      if (r.sigEl.classList.contains('open')) {
+        setHTML(r.candBodyEl, candRows(s));
+        setHTML(r.enfEl, enfLine(s.enforcement));
+      }
     }
   }
 
@@ -285,13 +322,19 @@
     const p = sig.dataset.path;
     sig.classList.toggle('open');
     if (sig.classList.contains('open')) openSet.add(p); else openSet.delete(p);
+    if (lastData) update(lastData); // fill the detail immediately on expand
   });
 
+  let lastData = null;
   async function tick() {
     try {
       const r = await fetch('/inspector/state', { cache: 'no-store' });
       if (!r.ok) throw new Error(String(r.status));
-      render(await r.json());
+      const data = await r.json();
+      lastData = data;
+      const key = Object.keys(data.paths).sort().join('\n');
+      if (key !== skeletonKey) { skeletonKey = key; buildSkeleton(data); }
+      update(data);
       document.body.classList.remove('lost');
     } catch {
       document.body.classList.add('lost');
