@@ -40,9 +40,10 @@ const inputState = Object.create(null);
 // orrery bus.v1 (phase 1, pure shadow): every legacy event is dual-written as
 // a namespaced bus signal; nothing consumes the bus yet. The inspector at
 // /inspector renders it. Legacy SSE below is untouched — PM impact zero.
-const { OrreryBus } = require('./bus');
+const { OrreryBus, toValue } = require('./bus');
 const attachBusAdapter = require('./bus-adapter');
 const orreryBus = new OrreryBus();
+let busAdapter = null; // set after capture.init; holds the legacy->path MAP
 
 function publish(name, value) {
   if (typeof name !== 'string' || !name) return;
@@ -57,8 +58,59 @@ capture.init({
   config: { port: PORT, host: HOST, mock: MOCK, ingest_token: INGEST_TOKEN ? '<set>' : '' },
 });
 
-attachBusAdapter({ bus: orreryBus, inputBus });
+busAdapter = attachBusAdapter({ bus: orreryBus, inputBus });
 console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch})`);
+
+// ── bus-over-SSE (phase 2): the browser feed's transport ────────────────────
+// GET /bus/events — retained-state replay on connect (the late-joiner
+// contract, BUS_PROTOCOL.md), then live accepted packets. `_meta.*` stays off
+// this wire (the inspector polls /inspector/state; the kiosk page doesn't
+// need 60 diagnostic packets/s).
+const busClients = new Set();
+orreryBus.on('packet', (rec) => {
+  if (!rec.accepted || busClients.size === 0) return;
+  const body = rec.pkt.state || rec.pkt.event;
+  if (!body || body.path.startsWith('_meta.')) return;
+  const payload = `event: packet\ndata: ${JSON.stringify(rec.pkt)}\n\n`;
+  for (const res of busClients) {
+    try { res.write(payload); } catch { /* client gone */ }
+  }
+});
+
+function handleBusSSE(req, res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  for (const r of orreryBus.retained()) {
+    if (r.path.startsWith('_meta.')) continue;
+    const pkt = {
+      schema: 'bus.v1',
+      source: { sourceId: r.sourceId, seq: 0, bootEpoch: orreryBus.bootEpoch },
+      priority: 0,
+      state: { path: r.path, value: toValue(r.value) },
+    };
+    res.write(`event: retained\ndata: ${JSON.stringify(pkt)}\n\n`);
+  }
+  res.write(`event: ready\ndata: {"boot_epoch":${orreryBus.bootEpoch}}\n\n`);
+  busClients.add(res);
+  const heartbeat = setInterval(() => {
+    try { res.write(':keepalive\n\n'); } catch { /* */ }
+  }, 15000);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    busClients.delete(res);
+  });
+}
+
+// GET /bus/map — the legacy-name <-> bus-path mapping, served from the one
+// table in bus-adapter.js so the browser adapter can't drift from the bridge.
+function handleBusMap(req, res) {
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+  res.end(JSON.stringify({ map: busAdapter.MAP, touch: busAdapter.TOUCH }));
+}
 
 // GET /inspector/state — the signal inspector's data: per path the resolved
 // value plus every pre-resolution writer candidate and the enforcement truth
@@ -416,6 +468,8 @@ const server = http.createServer((req, res) => {
   if (req.url === '/capture/snapshot' && req.method === 'POST') return handleCaptureSnapshot(req, res);
   if (req.url === '/inspector/state' && req.method === 'GET') return handleInspectorState(req, res);
   if (req.url === '/inspector' && req.method === 'GET') { req.url = '/inspector.html'; return serveStatic(req, res); }
+  if (req.url === '/bus/events' && req.method === 'GET') return handleBusSSE(req, res);
+  if (req.url === '/bus/map' && req.method === 'GET') return handleBusMap(req, res);
 
   // Saved-preset API. The type/name regex is itself a guard: type is whitelisted
   // and name is a single non-slash segment (no path traversal in the URL).

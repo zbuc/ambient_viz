@@ -4255,11 +4255,29 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   window.AMBIENT_INPUTS = state;
   Object.defineProperty(state, '__meta', { value: meta, enumerable: false });
 
+  // ── migration_flag: feed (legacy | bus) — MIGRATION_PLAN.md phase 2 ───────
+  // The bus-derived state is ALWAYS assembled (shadow), so every session
+  // carries the live A/B in its snapshots; the flag only decides which object
+  // the visualizer reads as window.AMBIENT_INPUTS. Default: legacy
+  // (incumbent). Cutover = append &feed=bus to the kiosk URL; rollback = drop
+  // it. delete_by: phase-2 cleanup PR (with the legacy reader below).
+  const FEED = new URLSearchParams(location.search).get('feed') === 'bus' ? 'bus' : 'legacy';
+  const busState = Object.create(null);
+  Object.defineProperty(busState, '__meta', { value: meta, enumerable: false });
+  window.AMBIENT_INPUTS_BUS = busState;
+  if (FEED === 'bus') window.AMBIENT_INPUTS = busState;
+
   // Song position from the Daisy (CDC -> `song_position` topic, ~20 Hz). Capture
   // the local receive time so the frame loop can interpolate between updates and
   // hard-snap on a backward jump (loop wrap / reconnect rebases the basis).
   const song = { have: false, pos: 0, wall: 0 };
   window.AMBIENT_SONG = song;
+  const updateSong = (value) => {
+    if (typeof value !== 'number' || !isFinite(value)) return;
+    song.pos = value;
+    song.wall = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    song.have = true;
+  };
 
   if (typeof EventSource === 'undefined') return;
   if (location.protocol === 'file:') return;
@@ -4273,13 +4291,56 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
       const { name, value, ts } = JSON.parse(ev.data);
       state[name] = value;
       meta.lastEventAt = ts || Date.now();
-      if (name === 'song_position' && typeof value === 'number' && isFinite(value)) {
-        song.pos = value;
-        song.wall = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-        song.have = true;
-      }
+      // The active feed owns the song clock; the shadow feed never rebases it.
+      if (name === 'song_position' && FEED !== 'bus') updateSong(value);
     } catch { /* ignore bad frame */ }
   });
+
+  // ── bus feed (bus-over-SSE -> busState) ────────────────────────────────────
+  // Reverse mapping comes from the bridge (/bus/map) — one table, no drift.
+  // touch.pad0.e0..e11 reassemble into the legacy `touch_mask` the visualizer
+  // reads; clock.daisy.position drives the song clock when this feed is live.
+  (function busFeed() {
+    const fromValue = (val) => {
+      if (!val || typeof val !== 'object') return undefined;
+      if ('number' in val) return val.number;
+      if ('integer' in val) return val.integer;
+      if ('boolean' in val) return val.boolean;
+      if ('text' in val) return val.text;
+      if ('vec' in val) return val.vec && val.vec.elems;
+      return undefined;
+    };
+    fetch('/bus/map').then((r) => r.json()).then(({ map, touch }) => {
+      const pathToLegacy = {};
+      for (const [legacy, m] of Object.entries(map)) pathToLegacy[m.path] = legacy;
+      const touchBit = {};
+      touch.paths.forEach((p, i) => { touchBit[p] = i; });
+      let touchMask = 0;
+
+      const bes = new EventSource('/bus/events');
+      const onPacket = (ev) => {
+        try {
+          const pkt = JSON.parse(ev.data);
+          const st = pkt.state;
+          if (!st || !st.path) return;
+          const v = fromValue(st.value);
+          if (st.path in touchBit) {
+            if (v) touchMask |= 1 << touchBit[st.path];
+            else touchMask &= ~(1 << touchBit[st.path]);
+            busState.touch_mask = touchMask;
+            return;
+          }
+          const legacy = pathToLegacy[st.path];
+          if (!legacy) return;
+          busState[legacy] = v;
+          if (legacy === 'song_position' && FEED === 'bus') updateSong(v);
+        } catch { /* ignore bad frame */ }
+      };
+      bes.addEventListener('packet', onPacket);
+      bes.addEventListener('retained', onPacket);
+      // EventSource auto-reconnects; retained replay restores state on rejoin.
+    }).catch(() => { /* bridge predates /bus/map; shadow stays empty */ });
+  })();
   // Phase-0 capture (MIGRATION_PLAN.md): while the bridge is capturing, POST a
   // periodic snapshot of AMBIENT_INPUTS so the fixture records what the page
   // actually saw. page_load_id is fresh per load — a reload shows up in the
@@ -4295,7 +4356,9 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
         body: JSON.stringify({
           page_load_id: pageLoadId,
           t_page_ms: (typeof performance !== 'undefined' ? performance.now() : 0),
+          feed: FEED, // migration_flag: feed — which object the visualizer reads
           inputs: state, // __meta is non-enumerable, so this is just the input map
+          inputs_bus: busState, // the shadow feed: every capture carries the A/B
           meta: { connected: meta.connected, lastEventAt: meta.lastEventAt, error: meta.error },
           song: song.have ? { pos: song.pos, wall: song.wall } : null,
         }),

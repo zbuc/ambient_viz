@@ -179,6 +179,15 @@ two-layer resolved/candidates view and per-field enforcement truth values.
 
 ## Phase 2 — Cut over the browser feed (smallest real cutover)
 
+> **Status (2026-06-10): SHADOW LANDED, cutover pending soak.** `/bus/events`
+> (retained replay + live packets) + `/bus/map`; the page always derives the
+> bus shadow (`AMBIENT_INPUTS_BUS`), `?feed=bus` assigns it as
+> `window.AMBIENT_INPUTS` (default legacy); snapshots carry both states.
+> Gate tool: `node tools/replay/feed-ab.js --url http://<pi>:8080
+> --duration-s 3600` against a live session — all MATCH/EXPECTED required,
+> then flip the kiosk URL to `&feed=bus`, soak one full session, and the
+> cleanup PR deletes the legacy reader + the flag.
+
 The visualizer keeps reading `window.AMBIENT_INPUTS`; a browser adapter
 derives it from bus-over-SSE. `migration_flag: feed (legacy | bus)`.
 
