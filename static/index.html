@@ -1462,6 +1462,12 @@ let curBass = 0, curMid = 0, curTreble = 0, curLevel = 0, curBassFast = 0;
 let last = 0;
 let fpsAccumStart = 0, fpsAccumCount = 0, fpsValue = 0;
 let lastDebugPost = 0;
+// Whether anything on the main thread consumes the debug snapshot (dev panel,
+// fps overlay, or the automation editor). When false (the lite/kiosk default),
+// the renderer skips the per-frame fps accounting AND the 100ms debug postMessage
+// entirely — no wasted cycles drawing/serializing data nobody reads. Set by main
+// via the 'init'/'wantdebug' messages (see wantDebugNow()/postWantDebug()).
+let debugWanted = false;
 
 // === per-section profiling (opt-in via ?profile=1) ===
 // When `profileMode` is set, frame() calls _pmark() between sections; the
@@ -3355,10 +3361,14 @@ let _diagLastLog = 0;
 function frame(now) {
   // Once per ~2s, log that frame() is alive — confirms the rAF loop is
   // running on iOS (cleared by removing this block once stable).
-  _diagFrameCount++;
-  if (now - _diagLastLog > 2000) {
-    try { console.log('[ambient_viz/render] frames=' + _diagFrameCount + ' W=' + W + ' H=' + H + ' canvas=' + (canvas && canvas.width) + 'x' + (canvas && canvas.height) + ' flyouts=' + flyout.length + ' meshes3d=' + meshes3d.length + ' slices=' + slices.length); } catch (_) {}
-    _diagLastLog = now;
+  // "Render alive" heartbeat — only when debug is wanted (skips the 2s console
+  // spam + string-build on the lite/kiosk path).
+  if (debugWanted) {
+    _diagFrameCount++;
+    if (now - _diagLastLog > 2000) {
+      try { console.log('[ambient_viz/render] frames=' + _diagFrameCount + ' W=' + W + ' H=' + H + ' canvas=' + (canvas && canvas.width) + 'x' + (canvas && canvas.height) + ' flyouts=' + flyout.length + ' meshes3d=' + meshes3d.length + ' slices=' + slices.length); } catch (_) {}
+      _diagLastLog = now;
+    }
   }
   _presetFrame(performance.now());
   _pmark('state');
@@ -3372,11 +3382,15 @@ function frame(now) {
   inversionRegions.length = 0;
   monoRegions.length = 0;
 
-  fpsAccumCount++;
-  if (now - fpsAccumStart >= 500) {
-    fpsValue = fpsAccumCount * 1000 / (now - fpsAccumStart);
-    fpsAccumStart = now;
-    fpsAccumCount = 0;
+  // Only measure fps when something will display it (fps overlay / dev panel /
+  // editor) — see debugWanted. Skipped on the lite/kiosk default.
+  if (debugWanted) {
+    fpsAccumCount++;
+    if (now - fpsAccumStart >= 500) {
+      fpsValue = fpsAccumCount * 1000 / (now - fpsAccumStart);
+      fpsAccumStart = now;
+      fpsAccumCount = 0;
+    }
   }
 
   const b = { bass: curBass, mid: curMid, treble: curTreble, level: curLevel, bassFast: curBassFast };
@@ -4056,8 +4070,10 @@ function frame(now) {
 
   _pflush();
 
-  // periodic debug snapshot for the main-thread dev panel
-  if (now - lastDebugPost >= 100) {
+  // periodic debug snapshot for the main-thread dev panel / fps overlay / editor.
+  // Skipped entirely when nothing consumes it (lite/kiosk) — avoids building +
+  // structured-cloning a ~26-field object across the worker boundary 10×/sec.
+  if (debugWanted && now - lastDebugPost >= 100) {
     host.postMessage({
       type: 'debug',
       bass: b.bass, mid: b.mid, treble: b.treble, level: b.level, bassFast: b.bassFast,
@@ -4142,6 +4158,7 @@ host.onmessage = function (e) {
     H = msg.H;
     profileMode = !!msg.profile;
     noGL = !!msg.noGL;
+    debugWanted = !!msg.debug;
     recomputeViewport();
     ctx = canvas.getContext('2d');
     canvas.width = Math.floor(W * dpr);
@@ -4168,6 +4185,11 @@ host.onmessage = function (e) {
     applyParams(msg.values);
   } else if (msg.type === 'param') {
     applyParam(msg.name, msg.value);
+  } else if (msg.type === 'wantdebug') {
+    // main toggled a debug consumer (fps overlay / dev panel / editor) on/off.
+    const want = !!msg.value;
+    if (want && !debugWanted) { fpsAccumStart = performance.now(); fpsAccumCount = 0; } // clean first reading
+    debugWanted = want;
   } else if (msg.type === 'resize') {
     dpr = msg.dpr;
     W = msg.W;
@@ -6079,6 +6101,7 @@ async function init() {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     if (e.key === 'd' || e.key === 'D' || e.key === '~' || e.key === '`') {
       devOverlay.classList.toggle('hidden');
+      postWantDebug(); // panel now (in)visible -> (dis)arm the renderer's debug snapshot
     }
   });
 
@@ -6204,6 +6227,20 @@ async function init() {
     editorEl.classList.toggle('hidden', !v);
     document.body.classList.toggle('editor-visible', v);
     if (v) resizeEditor();
+    postWantDebug();
+  }
+  // The renderer only computes fps + posts its debug snapshot when something on
+  // main consumes it: the fps overlay (?fps=1), the dev panel, or the editor.
+  // These tell it; otherwise (the lite/kiosk default) it does neither. Hoisted
+  // function decls so the early keydown handlers / setEditorVisible can call them
+  // before this point textually. No-op until renderWorker exists (the 'init'
+  // message carries the initial value via wantDebugNow()).
+  function wantDebugNow() {
+    return FPS_OVERLAY || profileMode || editorVisible
+      || (devOverlay && !devOverlay.classList.contains('hidden'));
+  }
+  function postWantDebug() {
+    if (renderWorker) renderWorker.postMessage({ type: 'wantdebug', value: wantDebugNow() });
   }
   // Kiosk / lite mode: the automation lane strip is dev tooling, not part
   // of the kiosk view. Hide it by default. The `t` shortcut still toggles
@@ -6867,6 +6904,7 @@ async function init() {
       params: _initParams,
       profile: profileMode,
       noGL: noGLMode,
+      debug: wantDebugNow(),
     });
     console.log('[ambient_viz] main renderer init complete');
   }
@@ -6887,6 +6925,7 @@ async function init() {
       params: _initParams,
       profile: profileMode,
       noGL: noGLMode,
+      debug: wantDebugNow(),
     }, [_offscreen]);
   }
 
@@ -6991,8 +7030,13 @@ async function init() {
       const f = renderWorker ? workerDebug.fpsValue : fpsValue;
       fpsOverlayEl.textContent = (f || 0).toFixed(0) + ' fps  ' + (window.__audioSource || '-');
     }
-    autoCenterEditor();
-    renderEditor();
+    // Editor work only matters when the editor is shown (hidden in lite/kiosk).
+    // autoCenterEditor recomputes the visible window each frame in localaudio mode
+    // even though only renderEditor (gated) reads it — skip both when hidden.
+    if (editorVisible) {
+      autoCenterEditor();
+      renderEditor();
+    }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
