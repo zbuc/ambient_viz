@@ -114,6 +114,14 @@ flash-sdmmc-bulk-rtt = ["run", "-p", "firmware", "--target", "thumbv7em-none-eab
 flash-sdmmc-lean-rtt = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "usb-uac-lean,rtt-diag,sd-sdmmc"]
 
 # --- QSPI XIP builds (run from external QSPI via the Daisy bootloader) --------
+# !!! PREREQUISITE: the Daisy BOOTLOADER must be present in internal flash
+# (0x08000000). It's what opens the power-cycle DFU window these aliases wait for
+# AND what jumps to the QSPI app at 0x90040000. The probe-rs internal-flash
+# aliases (flash-sdmmc*, flash-spi*) flash the app to 0x08000000 and OVERWRITE the
+# bootloader — after running any of those, `flash-qspi-*` will hang at "waiting for
+# the bootloader DFU window" forever. To recover: re-flash the Daisy bootloader
+# (BOOT+RESET -> STM32 system DFU -> `dfu-util -a 0 -s 0x08000000:leave -D
+# <daisy_bootloader.bin>`, or Electrosmith's web programmer), then retry. !!!
 # No probe-rs `run` alias: the app is loaded into QSPI over the bootloader's USB
 # DFU, NOT internal flash. Build the .bin, then load with:
 #   dfu-util -a 0 -s 0x90040000:leave -D target/firmware-qspi-uac.bin
