@@ -43,14 +43,19 @@ default). The shipping kiosk firmware strips them with `--no-default-features`
 panic handler just halts:
 
 ```bash
-# Production DFU image -> target/firmware-prod.bin (no UART debug traffic)
-cargo bin-prod
+# Production DFU image, internal flash (no UART debug traffic):
+cargo bin-sdmmc-uac-prod        # -> target/firmware-sdmmc-uac-prod.bin
 # hold BOOT, tap RESET, release BOOT
-dfu-util -a 0 -s 0x08000000:leave -D target/firmware-prod.bin
+dfu-util -a 0 -s 0x08000000:leave -D target/firmware-sdmmc-uac-prod.bin
 
 # Or flash directly with a probe:
-cargo flash-prod
+cargo flash-sdmmc-uac-prod
 ```
+
+The full-feature exhibit images run from external QSPI flash (no 128 KB ceiling)
+— see the `*-qspi-*` aliases in `.cargo/config.toml`; e.g. `cargo flash-qspi-bulk`
+for the bell+voice image with live WebUSB capture. `-uac` = UAC iso audio source,
+`-bulk` = WebUSB vendor-bulk capture (`?usbaudio=1`).
 
 ## Prerequisites
 

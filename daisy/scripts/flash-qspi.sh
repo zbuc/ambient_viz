@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# QSPI flash runner — invoked by cargo's `target.runner` from the `flash-qspi`
+# QSPI flash runner — invoked by cargo's `target.runner` from the `flash-qspi-uac`
 # and `flash-qspi-debug` aliases (see daisy/.cargo/config.toml). cargo builds the
 # firmware ELF and passes its path as the final arg; we objcopy it to a raw .bin,
 # wait for the Daisy bootloader's DFU window (a USB power-cycle opens it), flash

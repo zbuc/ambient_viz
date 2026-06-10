@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CLI test for the Daisy WebUSB-bulk audio capture path.
 
-Firmware: build with the `usb-bulk` feature (`cargo flash-sdmmc-bulk`), which
+Firmware: build with the `usb-bulk` feature (`cargo flash-sdmmc-bulk-rtt`), which
 exposes audio on a vendor (class 0xFF) BULK IN endpoint instead of the UAC iso
 source. This script is a faithful proxy for the browser: WebUSB does exactly what
 libusb/pyusb does here — claim the vendor interface and read the bulk IN endpoint.
@@ -74,7 +74,7 @@ def main():
 
     dev = usb.core.find(idVendor=VID, idProduct=PID)
     if dev is None:
-        sys.exit(f"device {VID:04x}:{PID:04x} not found (flash `cargo flash-sdmmc-bulk`?)")
+        sys.exit(f"device {VID:04x}:{PID:04x} not found (flash `cargo flash-sdmmc-bulk-rtt`?)")
 
     # Do NOT set_configuration — it would reset the device and drop CDC. Read the
     # already-active config the host set at enumeration.

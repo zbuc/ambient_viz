@@ -29,49 +29,44 @@ DEFMT_LOG = "debug"
 # a TEMPORARY workaround — drop the --config once QSPI lifts the flash limit (see
 # PLAN_QSPI_BOOTLOADER.md). Caveat: 'z' can slow hot DSP loops; watch
 # CB_FULL_US / SAI_ERR on hardware.
+# ============================================================================
+# Firmware build aliases — naming convention:
+#   Backend:  sd-sdmmc = DEFAULT + live hardware. sd-spi = legacy SPI module,
+#             via the explicit `*-spi-*` aliases only.
+#   Capture:  `-uac`  = UAC1 iso audio source (Pi sees a USB mic).
+#             `-bulk` = vendor BULK IN endpoint for the browser's ?usbaudio=1 —
+#             the Pi 4 VL805 can't clock FS iso, so bulk is the exhibit capture
+#             path (daisy/PLAN_USB_CAPTURE.md).
+#   Flash:    internal 128 KB (needs opt-level='z' to fit; 'z' can slow hot DSP
+#             loops — watch CB_FULL_US/SAI_ERR) vs QSPI XIP (`qspi`, opt-s, fits
+#             ALL features; flashed over the bootloader's USB DFU).
+#   Debug:    `-rtt` = rtt-diag heartbeat over the SWD probe (probe-rs run streams
+#             diag(rtt): live; 4-bit SD; no D2 adapter). `debug-uart` = USART3 log
+#             on D2 (forces 1-bit SD — D2/PC10 is the TX pin).
+# INVARIANT: every flash-X / bin-X pair stays in feature parity.
+# ============================================================================
 [alias]
+# --- Plain dev: default features (debug-uart + sd-sdmmc) = 1-bit SD bring-up --
 firmware = ["build", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--config", "profile.release.opt-level=\"z\""]
 flash    = ["run",   "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--config", "profile.release.opt-level=\"z\""]
 # `cargo bin` produces target/firmware.bin for DFU flashing.
 # Requires `cargo install cargo-binutils` once.
 bin = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware.bin"]
 
-# --- Production build ----------------------------------------------------
-# `--no-default-features` drops the `debug-uart` feature: no USART3 boot log,
-# health heartbeat, chip-temperature readout, or panic print — the shipping
-# kiosk firmware carries zero debug UART traffic. `--features bell,voice` adds
-# the entry chime + the "pain material" speech voice (the exhibit needs both).
-# Use these instead of the plain `flash` / `bin` aliases when building the
-# exhibit image. NOTE: debug-uart + bell + voice together overflow the 128 KB
-# flash; the bell+voice exhibit image only fits WITHOUT debug-uart (these prod
-# aliases) — ~112 KB, ~19 KB free. See PLAN_QSPI_BOOTLOADER.md for the lift.
-#
-# INVARIANT: flash-prod and bin-prod MUST stay in parity — same crate, target,
-# profile, and feature flags. They differ ONLY in the action (probe-flash vs
-# emit a .bin); both produce the identical shipping image. If you change the
-# feature set or flags on one, change the other in the same edit.
-#
-# *** OVERFLOW: as of the DSP-opt-s audio fix (commit 4e789ac), bell+voice TOGETHER
-# no longer fit the 128 KB internal flash at opt-s (overflow ~5 KB; measured
-# 2026-06-09, see BENCH_QSPI.md). The full bell+voice exhibit image is now
-# QSPI-ONLY — build it with `cargo bin-qspi` (XIP, app @ 0x90040000). These two
-# aliases are kept as the canonical full-feature reference but WILL FAIL to link
-# for internal flash. For an internal-flash deployment, pick a PARED variant
-# below (bell OR voice — not both). ***
-flash-prod = "run -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,voice,sd-spi"
-bin-prod = "objcopy -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,voice,sd-spi -- -O binary target/firmware-prod.bin"
-
-# --- PARED internal-flash production images (one of bell/voice, fits 128 KB) ---
-# The full bell+voice set is QSPI-only (above), so a SHIPPING internal-flash image
-# must drop one. Both pared sets fit at opt-s with sd-spi (measured 2026-06-09):
-#   bell-only  : ~108 KB (comfortable)   voice-only : ~131 KB (≈100 B to spare)
-# Choose by which interaction the degraded fallback should keep — the entry chime
-# (bell) or the "pain material" speech (voice). INVARIANT: keep each flash-/bin-
-# pair in parity. (voice + sd-sdmmc overflows by 240 B → sd-spi only for voice.)
-flash-prod-bell  = "run -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,sd-spi"
-bin-prod-bell    = "objcopy -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features bell,sd-spi -- -O binary target/firmware-prod-bell.bin"
-flash-prod-voice = "run -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features voice,sd-spi"
-bin-prod-voice   = "objcopy -p firmware --target thumbv7em-none-eabihf --release --no-default-features --features voice,sd-spi -- -O binary target/firmware-prod-voice.bin"
+# --- Legacy SPI SD module exhibit images -------------------------------------
+# The old 6-pin SPI module (BREAKOUT.md §4.3); live hardware is sd-sdmmc (use the
+# *-sdmmc-* / *-qspi-* aliases). Full bell+voice OVERFLOWS internal flash on SPI,
+# so these are PARED (one of bell/voice) at opt-s:
+#   bell  : ~108 KB (comfortable)
+#   voice : ~131 KB (~100 B to spare — sd-spi ONLY; voice+sd-sdmmc overflows 240 B)
+# For full bell+voice on the SPI module, build a QSPI image with sd-spi instead:
+#   --features bell,voice,usb-bulk,sd-spi,qspi  (QSPI lifts the 128 KB ceiling).
+# (The old full-bell+voice internal-flash `flash-prod` was removed — it could not
+# link.) INVARIANT: keep each flash-/bin- pair in parity.
+flash-spi-bell  = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,sd-spi"]
+bin-spi-bell    = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,sd-spi", "--", "-O", "binary", "target/firmware-spi-bell.bin"]
+flash-spi-voice = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "voice,sd-spi"]
+bin-spi-voice   = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "voice,sd-spi", "--", "-O", "binary", "target/firmware-spi-voice.bin"]
 
 # --- SDMMC backend builds ------------------------------------------------
 # Drive the native SDMMC1 peripheral instead of the SPI SD module (needs a
@@ -89,50 +84,46 @@ bin-prod-voice   = "objcopy -p firmware --target thumbv7em-none-eabihf --release
 # Caveat: 'z' can slow hot DSP loops — watch CB_FULL_US / SAI_ERR on hardware.
 #
 # `flash-sdmmc` / `bin-sdmmc`: bring-up — debug-uart (so dbg_uart! logs print)
-# ⇒ 1-bit. `flash-sdmmc-prod` / `bin-sdmmc-prod`: 4-bit exhibit image (bell,
-# voice, no debug-uart). INVARIANT: keep each flash-/bin- pair in parity.
+# ⇒ 1-bit. The 4-bit exhibit images below carry bell,voice (no debug-uart): the
+# `-uac-prod` pair uses the UAC iso audio source, the `-bulk-prod` pair the
+# WebUSB vendor-bulk endpoint (?usbaudio=1). INVARIANT: keep each flash-/bin-
+# pair in parity. (QSPI versions are roomier + faster — prefer them; see below.)
 flash-sdmmc = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "debug-uart,sd-sdmmc", "--config", "profile.release.opt-level=\"z\""]
 bin-sdmmc = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "debug-uart,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc.bin"]
-flash-sdmmc-prod = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\""]
-bin-sdmmc-prod = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc-prod.bin"]
+flash-sdmmc-uac-prod = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\""]
+bin-sdmmc-uac-prod = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc-uac-prod.bin"]
 # `flash-sdmmc-bulk-prod` / `bin-sdmmc-bulk-prod`: the exhibit image WITH live
-# WebUSB-bulk capture — bell,voice + usb-bulk (vendor bulk IN audio for the
+# WebUSB-bulk capture — `-uac-prod` plus usb-bulk (vendor bulk IN audio for the
 # browser's ?usbaudio=1, instead of the UAC iso source the Pi 4 VL805 can't
-# clock). Same as flash-sdmmc-prod plus usb-bulk. INVARIANT: keep this flash-/bin-
-# pair in parity (and matched to flash-sdmmc-prod minus the audio path).
+# clock). INVARIANT: keep this flash-/bin- pair in parity (and matched to
+# flash-sdmmc-uac-prod minus the audio path).
 flash-sdmmc-bulk-prod = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,usb-bulk,sd-sdmmc", "--config", "profile.release.opt-level=\"z\""]
 bin-sdmmc-bulk-prod = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,usb-bulk,sd-sdmmc", "--config", "profile.release.opt-level=\"z\"", "--", "-O", "binary", "target/firmware-sdmmc-bulk-prod.bin"]
 
-# `flash-sdmmc-rtt`: USB-capture benchmark image. rtt-diag (heartbeat over the
-# SWD probe, NO D2 adapter) + sd-sdmmc at FULL 4-bit (no debug-uart, so D2 stays
-# SDMMC1_D2). probe-rs `run` streams the `diag(rtt):` line live — watch usb_drop
-# / usb_pktmax while the Pi captures (`?mic=1`). This is the production SD timing,
-# unlike flash-sdmmc (debug-uart ⇒ 1-bit). No bell/voice: isolates SD↔USB
-# executor contention from DSP load.
-flash-sdmmc-rtt = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "rtt-diag,sd-sdmmc"]
-
-# `flash-sdmmc-bulk`: WebUSB-bulk capture path (vendor 0xFF BULK IN instead of the
-# UAC iso source) + rtt-diag, 4-bit SD. Use to test/benchmark live capture over
-# navigator.usb on the Pi, where the UAC iso path is starved by the VL805
-# (PLAN_USB_CAPTURE.md). probe-rs `run` streams the diag(rtt): heartbeat live.
-flash-sdmmc-bulk = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "usb-bulk,rtt-diag,sd-sdmmc"]
-
-# `flash-sdmmc-lean`: UAC iso source stripped to a conformant single-iso-EP async
-# source (no feedback EP) + rtt-diag, 4-bit SD. Cheap test of whether lighter iso
-# load lets UAC+CDC survive on the Pi 4 VL805 before falling back to usb-bulk.
-flash-sdmmc-lean = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "usb-uac-lean,rtt-diag,sd-sdmmc"]
+# RTT capture-debug trio: rtt-diag heartbeat over the SWD probe (NO D2 adapter),
+# sd-sdmmc at FULL 4-bit (production SD timing, unlike flash-sdmmc's 1-bit). probe-rs
+# `run` streams the `diag(rtt):` line live — watch usb_drop / usb_pktmax while the
+# Pi captures. No bell/voice: isolates the SD↔USB capture path from DSP load. No
+# bin- pair (these stream live, they aren't DFU images).
+#   `-uac-rtt`  : UAC iso source.
+#   `-bulk-rtt` : WebUSB vendor-bulk endpoint (the working exhibit path).
+#   `-lean-rtt` : UAC stripped to a single iso EP (no feedback) — a dead-end test
+#                 (didn't help the VL805), kept behind its flag for re-measurement.
+flash-sdmmc-uac-rtt = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "rtt-diag,sd-sdmmc"]
+flash-sdmmc-bulk-rtt = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "usb-bulk,rtt-diag,sd-sdmmc"]
+flash-sdmmc-lean-rtt = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "usb-uac-lean,rtt-diag,sd-sdmmc"]
 
 # --- QSPI XIP builds (run from external QSPI via the Daisy bootloader) --------
 # No probe-rs `run` alias: the app is loaded into QSPI over the bootloader's USB
 # DFU, NOT internal flash. Build the .bin, then load with:
-#   dfu-util -a 0 -s 0x90040000:leave -D target/firmware-qspi.bin
+#   dfu-util -a 0 -s 0x90040000:leave -D target/firmware-qspi-uac.bin
 # Then attach for RTT/logs over the STLINK: `probe-rs attach --chip STM32H750IBKx
 # target/thumbv7em-none-eabihf/release/firmware`.
 # opt-s everywhere (QSPI lifts the 128 KB ceiling, so NO opt-z workaround), and
 # ALL features — the whole point of the port. `qspi` swaps the linker layout to
-# 0x90040000 and sets VTOR.
-bin-qspi = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc,qspi", "--", "-O", "binary", "target/firmware-qspi.bin"]
-# `bin-qspi-bulk` / `flash-qspi-bulk` (below): bin-qspi PLUS `usb-bulk` — the
+# 0x90040000 and sets VTOR. `-uac` = UAC iso audio; `-bulk` = WebUSB capture.
+bin-qspi-uac = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc,qspi", "--", "-O", "binary", "target/firmware-qspi-uac.bin"]
+# `bin-qspi-bulk` / `flash-qspi-bulk` (below): bin-qspi-uac PLUS `usb-bulk` — the
 # PREFERRED exhibit-with-live-capture image. Full bell+voice + the vendor bulk
 # audio endpoint for the browser's ?usbaudio=1, from QSPI XIP (no 128 KB ceiling,
 # no opt-z), so the internal-flash headroom worry of flash-sdmmc-bulk-prod is
@@ -165,15 +156,16 @@ bin-qspi-debug = ["objcopy", "-p", "firmware", "--target", "thumbv7em-none-eabih
 # `runner` with the freshly-built ELF — so these override the runner to point at
 # scripts/flash-qspi.sh, which objcopies the ELF, waits for the bootloader DFU
 # window (POWER-CYCLE the Daisy when prompted), flashes with retries, and verifies
-# the boot. `flash-qspi` = production set (no debug-uart). `flash-qspi-debug` adds
-# debug-uart AND auto-attaches `probe-rs` for the live RTT heartbeat after boot.
+# the boot. `flash-qspi-uac` = production UAC set (no debug-uart); `flash-qspi-bulk`
+# = production WebUSB-capture set; `flash-qspi-debug` adds debug-uart AND
+# auto-attaches `probe-rs` for the live RTT heartbeat after boot.
 # Run these from the `daisy/` workspace root (the runner path is relative to it).
 # NOTE: the runner override MUST be the string form (`runner='bash …'`). The TOML
 # *array* form (`runner=['bash',…]`) makes cargo refuse to merge the CLI `target`
 # table over the one in this file ("failed to merge key `target`"). cargo splits
 # the string on whitespace and appends the built ELF path as the final arg, so the
 # script sees: $1 = mode, $2 = ELF.
-flash-qspi = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc,qspi", "--config", "target.thumbv7em-none-eabihf.runner='bash scripts/flash-qspi.sh noattach'"]
+flash-qspi-uac = ["run", "-p", "firmware", "--target", "thumbv7em-none-eabihf", "--release", "--no-default-features", "--features", "bell,voice,sd-sdmmc,qspi", "--config", "target.thumbv7em-none-eabihf.runner='bash scripts/flash-qspi.sh noattach'"]
 # Preferred exhibit-with-live-capture image: full features + usb-bulk over QSPI
 # XIP. Parity with bin-qspi-bulk. Same dfu flow as flash-qspi (power-cycle when
 # prompted). Kiosk then launches ?usbaudio=1 (see PI_KIOSK_BRINGUP.md / kiosk/).

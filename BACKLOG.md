@@ -39,11 +39,11 @@ failure live control, SAI audio path) are intentionally excluded.
   the SDMMC1 socket wired (4-bit, D1–D6 — see "KiCad PCB design" under Hardware / PCB).
   — mem `daisy-uac-async-sd-future`, `daisy-usb-capture-clicks`, `daisy-sd-connector-roadmap`
 - [x] **Bootloader + QSPI XIP** — DONE (2026-06-09). Runs from external QSPI (app @
-  `0x90040000`) via the Daisy bootloader behind the `qspi` feature; `cargo flash-qspi` /
+  `0x90040000`) via the Daisy bootloader behind the `qspi` feature; `cargo flash-qspi-uac` /
   `flash-qspi-debug` build+flash via dfu on a USB power-cycle. Lifts the 128 KB ceiling →
   full `bell+voice` (which no longer fits internal flash) runs at opt-s. Benchmarked:
   +26 % on `tape` (I-cache contention) but `SAI_ERR≈0` → real-time-viable. Internal flash
-  is now PARED (`flash-prod-bell`/`flash-prod-voice`); the opt-z workaround still applies
+  is now PARED (`flash-spi-bell`/`flash-spi-voice`); the opt-z workaround still applies
   to the internal-flash builds, dropped for QSPI. Future: ITCM-ramfunc `tape` if DSP load
   grows. — `daisy/BENCH_QSPI.md`, `daisy/PLAN_QSPI_BOOTLOADER.md`, mem `daisy-qspi-flash-future`
 - [ ] **SAI RX `Overrun` restarts (startup-only, low priority)** — the audio loop
@@ -88,6 +88,45 @@ failure live control, SAI audio path) are intentionally excluded.
 - [ ] **Synth/sampler Engine path** *(optional, non-exhibit)* — `Engine::handle_midi`
   (currently a sine stub), dsp sampler, host MIDI input. Confirm it's wanted first. —
   `daisy/README.md` roadmap
+
+### Waldorf wavetable oscillator (format decided, conversation 2026-06-09)
+
+Decoded the Waldorf Microwave II/XT user-wave dumps in
+`patches/wavetables/*.mid` (215 waves, UW1035–UW1249) — they're SMF-wrapped
+SysEx (`F0 3E 0E dd 12 hh ll <64 nibble-pair samples> cc F7`; 8-bit
+antisymmetric half-waves, checksum `sum&0x7F`). Zero-dep parser/exporter at
+`patches/wavetables/waldorf_wavetable.py`. Below is the **recommended on-device
+format** if we add a wavetable osc voice to the `dsp` core — nothing built yet.
+
+- [ ] **Store the wave bank as native `i8`, not `f32`** — the source is genuinely
+  8-bit (0–255, 128 = zero), so `f32` storage 4×'s the flash for precision that
+  doesn't exist. Signed 8-bit is lossless and ~26.9 KiB for the full 215-wave bank
+  (vs 53.8 KiB i16 / 107.5 KiB f32). One wave = 128 bytes.
+- [ ] **Pre-mirror to the full 128-sample cycle at build time** (apply the
+  point-symmetry `wave[127-i] = 255-wave[i]` in the generator) so the audio callback
+  does zero reconstruction. 128 is a power of two → phase wrap is a mask (`& 127`),
+  not a modulo.
+- [ ] **Bake as a flash-resident `static [[i8; 128]; 215]`** — matches the existing
+  `const [f32; N]` table convention (`hihat.rs`, `sequencer.rs`) and the `&'static`
+  sample-loading model; no heap. Generate `crates/dsp/src/wavetable_bank.rs` from the
+  `.mid` via the existing `crates/firmware/build.rs` codegen path (reuse
+  `waldorf_wavetable.py`; emit `i8 = sample - 128`).
+- [ ] **Normalize to `f32` in the oscillator** with a single `× (1.0/128.0)` (exact),
+  keeping the rest of the core in its stereo-`f32` [-1,1] convention. Phase-accumulator
+  + linear interp, no per-sample transcendentals → clears the Seed real-time bar.
+- [ ] **QSPI XIP placement decision** — in `qspi` builds `.rodata` lives in external
+  flash and per-sample wavetable reads eat the measured +26% XIP cache-miss penalty.
+  Either `#[link_section]` the bank into internal flash (same knapsack trick as the
+  `.itcm` placement) or — since a scanning osc only touches 1–2 waves at a time —
+  `memcpy` the active wave (128 B) into AXI SRAM on wave-change so the inner loop
+  always hits cached SRAM. Prefer the copy: surgical, indifferent to bank location.
+  See mem `daisy-qspi-flash-future`, `daisy-modular-itcm-perbuild`.
+- [ ] **Optional: morphing wavetable-scan osc** — two indices + a morph float that
+  crossfades `WAVES[a] → WAVES[b]`, reproducing the Microwave's signature sweep at the
+  cost of one extra interp + lerp per sample (~256 B resident).
+- [ ] **Aliasing (deferred)** — raw single-cycle 8-bit waves alias if pitched up;
+  fine for slow low-register ambient pads. If it bites, add octave **mip-maps**
+  (bandlimited variants), which multiplies storage — a deliberate follow-up, not v1.
 
 ### Cortex-M7 utilization (audit, conversation 2026-06-08)
 

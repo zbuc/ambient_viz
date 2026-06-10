@@ -142,7 +142,7 @@ pub use imp::{init, write_fmt};
 // UserLed; PC7 is configured as output very early in main (board init) before
 // anything that can panic here, so the port is clocked and the writes land.
 // A defmt marker is also emitted for the case a probe IS attached (cargo
-// flash-prod); it's a fixed string interned in the non-loaded `.defmt` section,
+// flash-sdmmc-uac-prod); it's a fixed string interned in the non-loaded `.defmt` section,
 // so it costs ~0 flash and avoids the ~25 KB `info.location()` retention.
 // ---------------------------------------------------------------------------
 // Diagnostic panic-location stash (bench/qspi builds only). Flash is plentiful on

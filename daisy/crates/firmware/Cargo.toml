@@ -9,21 +9,21 @@ edition = "2024"
 # and the panic-message print. Every `dbg_uart!` is a no-op without it, the UART
 # is never initialised, and the panic handler just halts — so the production
 # build (`--no-default-features`) carries zero debug UART traffic or code.
-default = ["debug-uart", "sd-spi"]
+default = ["debug-uart", "sd-sdmmc"]
 debug-uart = []
 # --- SD backend (pick EXACTLY one; `sd.rs` compile_error!s otherwise) --------
-# `sd-spi` (default): SPI1 + embedded-sdmmc, for the 6-pin WWZMDiB prototype
-# module. See daisy/BREAKOUT.md §4.3.
-sd-spi = []
-# `sd-sdmmc`: native SDMMC1 peripheral (embassy `Sdmmc`) bridged into the same
-# embedded-sdmmc VolumeManager via a block_on adapter. Bus width auto-selects:
-# 1-bit when `debug-uart` is on (4-bit needs D2/PC10, which is the USART3
-# debug-TX pin — a hard collision), 4-bit otherwise. The production aliases
-# (`--no-default-features`) get 4-bit; the debug `flash`/`bin` aliases get 1-bit.
-# Still blocks the executor like SPI does — the true async/DMA win is the
-# separate BACKLOG "async/DMA SD reads" item. Needs the SDMMC1-wired socket
-# (Adafruit #4682 proto / GCT MEM2075 prod).
+# `sd-sdmmc` (DEFAULT): native SDMMC1 peripheral (embassy `Sdmmc`) bridged into
+# the same embedded-sdmmc VolumeManager via a block_on adapter — the live
+# hardware (SDMMC1-wired socket: Adafruit #4682 proto / GCT MEM2075 prod). Bus
+# width auto-selects: 1-bit when `debug-uart` is on (4-bit needs D2/PC10, which is
+# the USART3 debug-TX pin — a hard collision), 4-bit otherwise. Production aliases
+# (`--no-default-features` + bell,voice,sd-sdmmc) get 4-bit. Still blocks the
+# executor; true async/DMA SD is a separate BACKLOG item.
 sd-sdmmc = []
+# `sd-spi`: LEGACY SPI1 + embedded-sdmmc, for the old 6-pin WWZMDiB module
+# (BREAKOUT.md §4.3). Supported via the explicit `*-spi-*` cargo aliases only;
+# the live hardware is sd-sdmmc.
+sd-spi = []
 # `freeze` (OFF by default) compiles the master "freeze" parallel send: the grain
 # hold ring -> glitch tape -> return summed under the master. It's opt-in because
 # we don't currently like how it sounds; without it (the default) the ring
