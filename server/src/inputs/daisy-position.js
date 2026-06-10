@@ -19,6 +19,7 @@
 // tty has one clean reader/writer; concurrent writers corrupt MIDI frames.
 
 const { SerialPort, ReadlineParser } = require('serialport');
+const capture = require('../capture'); // phase-0 boundary tap; no-op when off
 
 // macOS has no stable device name (it's /dev/cu.usbmodemXXXX); the Pi is
 // /dev/ttyACM0. Require an explicit DAISY_SERIAL on macOS.
@@ -210,13 +211,23 @@ function motionPresent(nowMs) {
   return motionActive || (nowMs - lastMotionMs) <= MOTION_HOLD_MS;
 }
 
+// Tapped serial write: the capture's serial_tx events ARE the Daisy output
+// boundary, in write order, with the write callback surfacing flush/write
+// errors (the 'error' event path only covers port-level failures).
+function portWrite(buf, decoded) {
+  capture.event('serial_tx', { hex: buf.toString('hex'), decoded });
+  port.write(buf, (err) => {
+    if (err) capture.event('serial_err', { op: 'write', hex: buf.toString('hex'), message: err.message });
+  });
+}
+
 function writeCc(cc, value) {
   const v = clamp(Math.round(value), 0, 127);
   if (lastCc[cc] === v) return; // on-change only
   const now = Date.now();
   if (now - (lastWriteAt[cc] || 0) < MIN_WRITE_MS) return; // rate cap
   if (!port || !port.isOpen) return;
-  port.write(Buffer.from([0xb0, cc, v]));
+  portWrite(Buffer.from([0xb0, cc, v]), { type: 'cc', cc, value: v });
   lastCc[cc] = v;
   lastWriteAt[cc] = now;
 }
@@ -227,7 +238,8 @@ function writeNoteOn(note, velocity, channel = 0) {
   // selects the FM timbre on the firmware's shared bank (0 = bell, 1 = industrial).
   const n = clamp(Math.round(note), 0, 127);
   const v = clamp(Math.round(velocity), 1, 127);
-  port.write(Buffer.from([0x90 | (clamp(Math.round(channel), 0, 15)), n, v]));
+  const ch = clamp(Math.round(channel), 0, 15);
+  portWrite(Buffer.from([0x90 | ch, n, v]), { type: 'note_on', ch, note: n, vel: v });
 }
 
 // Roll the next toll to a random point in [TOLL_MIN_S, TOLL_MAX_S].
@@ -244,6 +256,9 @@ function strikeBell(nowMs, reason) {
   else writeNoteOn(BELL_NOTE, BELL_VELOCITY, 0);
   lastBellMs = nowMs;
   if (roomOccupied) scheduleNextToll(nowMs);
+  // The reason rides along so replay can tell deterministic strikes (entry)
+  // from the Math.random-scheduled ones (toll) when comparing.
+  capture.event('trigger', { what: industrial ? 'industrial' : 'bell', reason });
   console.log(`daisy-position: ${industrial ? 'industrial' : 'bell'} (${reason})`);
 }
 
@@ -345,6 +360,7 @@ function speakPhrase(nowMs, reason) {
   const phrase = Math.floor(Math.random() * VOICE_PHRASES.length);
   writeNoteOn(phrase, VOICE_VELOCITY, 2); // ch2 = speech voice; note = phrase index
   lastVoiceMs = nowMs;
+  capture.event('trigger', { what: 'voice', reason, phrase: VOICE_PHRASES[phrase] });
   console.log(`daisy-position: voice "${VOICE_PHRASES[phrase]}" (${reason})`);
 }
 
@@ -386,6 +402,7 @@ function updateVoiceMurmur(nowMs) {
   if (nowMs - lastVoiceMs < VOICE_MIN_GAP_S * 1000) return; // don't stack on a recent utterance
   if (Math.random() < VOICE_TOLL_SKIP_PROB) {
     scheduleNextMurmur(nowMs);
+    capture.event('trigger', { what: 'murmur_skip' });
     console.log('daisy-position: voice murmur skipped');
     return;
   }
@@ -403,6 +420,7 @@ function updateToll(nowMs) {
   if (nowMs - lastBellMs < BELL_COOLDOWN_S * 1000) { scheduleNextToll(nowMs); return; }
   if (Math.random() < TOLL_SKIP_PROB) {
     scheduleNextToll(nowMs);
+    capture.event('trigger', { what: 'toll_skip' });
     console.log('daisy-position: toll skipped');
     return;
   }
@@ -474,19 +492,35 @@ module.exports = ({ publish, bus }) => {
 
   const open = () => {
     port = new SerialPort({ path: portPath, baudRate: 115200 }, (err) => {
-      if (err) { scheduleReopen(); return; }
+      if (err) { capture.event('serial_err', { op: 'open', message: err.message }); scheduleReopen(); return; }
       // Assert DTR: the firmware only emits POS once the host opens the port
       // (its `wait_connection` waits on the DTR line state).
       try { port.set({ dtr: true, rts: true }, () => {}); } catch { /* */ }
+      capture.event('serial_open', { path: portPath });
       console.log(`daisy-position: reading + writing ${portPath}`);
     });
     port.pipe(new ReadlineParser({ delimiter: '\n' })).on('data', (line) => {
-      const m = LINE_RE.exec(String(line).trim());
+      const trimmed = String(line).trim();
+      const m = LINE_RE.exec(trimmed);
+      // Raw line + decoded form, including lines the bridge ignores —
+      // malformed input is counted and logged raw, not silently dropped.
+      capture.event('serial_rx', {
+        raw: trimmed,
+        decoded: m
+          ? { type: trimmed.startsWith('RESET') ? 'reset' : 'pos', sec: parseFloat(m[1]) }
+          : { type: 'unmatched' },
+      });
       if (m) publish('song_position', parseFloat(m[1]));
     });
     // Hot-plug resilience: reopen on any error/close (unplug, Daisy reboot).
-    port.on('error', scheduleReopen);
-    port.on('close', scheduleReopen);
+    port.on('error', (err) => {
+      capture.event('serial_err', { op: 'port', message: err && err.message ? err.message : String(err) });
+      scheduleReopen();
+    });
+    port.on('close', () => {
+      capture.event('serial_close', {});
+      scheduleReopen();
+    });
   };
 
   // Tunnel distance_cm / freeze back to the Daisy as CC; ring the bell on entry

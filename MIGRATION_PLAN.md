@@ -101,6 +101,12 @@ cutover_allowed_when:
 
 ## Phase 0 — Baseline capture (no refactor)
 
+> **Status (2026-06-10): tooling landed.** Tap (`server/src/capture.js` +
+> boundary hooks), browser snapshots, and the replay harness + four-verdict
+> comparator (`tools/replay/`) are implemented; a scripted smoke session
+> captures and replays to all-MATCH. Remaining: Deliverable 1 — record ≥ 1 h
+> on the real kiosk (`CAPTURE=1 ./run_kiosk.sh`) and replay it clean.
+
 Tap, don't modify. **Captured per input/output, exactly:**
 
 - monotonic receive time at the bridge, for every input;

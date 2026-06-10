@@ -124,7 +124,9 @@ simulator and one real Pain Material migration.
 **Canonical: [`MIGRATION_PLAN.md`](MIGRATION_PLAN.md)** — the same cut,
 re-sequenced as strangler-fig vertical slices that keep Pain Material live
 throughout (shadow-by-priority, per-phase cutover/rollback, golden-trace
-validation). The capability summary below is retained for orientation:
+validation). *Phase 0 tooling landed 2026-06-10 (capture tap + replay harness,
+`tools/replay/`); next: ≥ 1 h kiosk capture, then phase 1.* The capability
+summary below is retained for orientation:
 
 1. **Schemas + inspector, no router compiler.** `common.v1` + `bus.v1` codegen
    (ts-proto / prost+serde), proto-JSON logging, retained state, event-queue

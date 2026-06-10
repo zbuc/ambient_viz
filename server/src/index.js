@@ -12,6 +12,10 @@ const MOCK = process.env.MOCK === '1' || process.env.MOCK === 'true';
 const INGEST_TOKEN = process.env.INGEST_TOKEN || '';
 const INGEST_MAX_BYTES = 65536;
 
+// Phase-0 baseline capture (MIGRATION_PLAN.md) — read-only boundary tap,
+// enabled by CAPTURE=1 / CAPTURE_DIR. No-ops entirely when off.
+const capture = require('./capture');
+
 // --- Saved patch presets (the audio editors' "Save preset") -----------------
 // The ONLY writable surface on this server. Hardened against the obvious risks
 // for a local dev write endpoint (the server binds 0.0.0.0 for the LAN-facing
@@ -42,6 +46,10 @@ function publish(name, value) {
   inputBus.emit('change', entry);
 }
 
+capture.init({
+  config: { port: PORT, host: HOST, mock: MOCK, ingest_token: INGEST_TOKEN ? '<set>' : '' },
+});
+
 if (MOCK) {
   require('./inputs/mock')({ publish });
   console.log('mock source: enabled');
@@ -60,11 +68,15 @@ if (DAISY) {
 const sseClients = new Set();
 inputBus.on('change', (entry) => {
   const payload = `event: change\ndata: ${JSON.stringify(entry)}\n\n`;
+  // The logical output stream: one event per broadcast, regardless of how
+  // many clients (or none) were listening at that moment.
+  capture.event('sse_out', { entry, n_clients: sseClients.size });
   for (const res of sseClients) {
     try { res.write(payload); } catch { /* client gone */ }
   }
 });
 
+let sseClientSeq = 0;
 function handleSSE(req, res) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -72,10 +84,19 @@ function handleSSE(req, res) {
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  for (const entry of Object.values(inputState)) {
+  const clientId = ++sseClientSeq;
+  const initEntries = Object.values(inputState);
+  capture.event('sse_connect', {
+    client: clientId,
+    remote: req.socket.remoteAddress || '',
+    ua: req.headers['user-agent'] || '',
+    init_entries: initEntries,
+  });
+  for (const entry of initEntries) {
     res.write(`event: change\ndata: ${JSON.stringify(entry)}\n\n`);
   }
-  res.write(`event: ready\ndata: {}\n\n`);
+  // `capture` tells the kiosk page to start POSTing AMBIENT_INPUTS snapshots.
+  res.write(`event: ready\ndata: {"capture":${capture.enabled}}\n\n`);
   sseClients.add(res);
   const heartbeat = setInterval(() => {
     try { res.write(':keepalive\n\n'); } catch { /* */ }
@@ -83,6 +104,7 @@ function handleSSE(req, res) {
   req.on('close', () => {
     clearInterval(heartbeat);
     sseClients.delete(res);
+    capture.event('sse_disconnect', { client: clientId });
   });
 }
 
@@ -99,9 +121,11 @@ function isLoopback(req) {
 
 function handleIngest(req, res) {
   if (!isLoopback(req)) {
+    capture.event('ingest_drop', { reason: 'non_loopback', remote: req.socket.remoteAddress || '' });
     res.writeHead(403); res.end('localhost only'); return;
   }
   if (INGEST_TOKEN && req.headers['x-ingest-token'] !== INGEST_TOKEN) {
+    capture.event('ingest_drop', { reason: 'bad_token', remote: req.socket.remoteAddress || '' });
     res.writeHead(401); res.end('bad token'); return;
   }
   let total = 0;
@@ -109,6 +133,7 @@ function handleIngest(req, res) {
   req.on('data', (chunk) => {
     total += chunk.length;
     if (total > INGEST_MAX_BYTES) {
+      capture.event('ingest_drop', { reason: 'payload_too_large', bytes_seen: total, ...capture.rawField(Buffer.concat(chunks)) });
       res.writeHead(413); res.end('payload too large');
       req.destroy();
       return;
@@ -117,9 +142,13 @@ function handleIngest(req, res) {
   });
   req.on('end', () => {
     if (res.writableEnded) return;
+    const body = Buffer.concat(chunks);
     let parsed;
-    try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-    catch { res.writeHead(400); res.end('bad json'); return; }
+    try { parsed = JSON.parse(body.toString('utf8')); }
+    catch {
+      capture.event('ingest_drop', { reason: 'bad_json', ...capture.rawField(body) });
+      res.writeHead(400); res.end('bad json'); return;
+    }
     const items = Array.isArray(parsed) ? parsed : [parsed];
     let accepted = 0;
     for (const item of items) {
@@ -128,8 +157,42 @@ function handleIngest(req, res) {
         accepted++;
       }
     }
+    // Raw bytes AND decoded form, so a decode bug is discoverable from the
+    // capture alone. Malformed items inside an otherwise-good batch are
+    // counted here and visible in `raw`.
+    capture.event('ingest', {
+      ...capture.rawField(body),
+      items,
+      accepted,
+      items_rejected: items.length - accepted,
+    });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ accepted }));
+  });
+}
+
+// POST /capture/snapshot — periodic window.AMBIENT_INPUTS snapshots from the
+// kiosk page while capture is on (the page only POSTs when the SSE `ready`
+// frame says capture is enabled). Loopback-only like /ingest; a 204 no-op when
+// capture is off so a stale tab can't error-spam.
+function handleCaptureSnapshot(req, res) {
+  if (!isLoopback(req)) { res.writeHead(403); res.end('localhost only'); return; }
+  let total = 0;
+  const chunks = [];
+  req.on('data', (chunk) => {
+    total += chunk.length;
+    if (total > INGEST_MAX_BYTES) { res.writeHead(413); res.end('payload too large'); req.destroy(); return; }
+    chunks.push(chunk);
+  });
+  req.on('end', () => {
+    if (res.writableEnded) return;
+    if (capture.enabled) {
+      const body = Buffer.concat(chunks);
+      let parsed = null;
+      try { parsed = JSON.parse(body.toString('utf8')); } catch { /* keep raw only */ }
+      capture.event('browser_snapshot', { ...capture.rawField(body), snapshot: parsed });
+    }
+    res.writeHead(204); res.end();
   });
 }
 
@@ -326,6 +389,7 @@ function serveStatic(req, res) {
 const server = http.createServer((req, res) => {
   if (req.url === '/events' && req.method === 'GET') return handleSSE(req, res);
   if (req.url === '/ingest' && req.method === 'POST') return handleIngest(req, res);
+  if (req.url === '/capture/snapshot' && req.method === 'POST') return handleCaptureSnapshot(req, res);
 
   // Saved-preset API. The type/name regex is itself a guard: type is whitelisted
   // and name is a single non-slash segment (no path traversal in the URL).

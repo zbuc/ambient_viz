@@ -4280,7 +4280,39 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
       }
     } catch { /* ignore bad frame */ }
   });
-  es.addEventListener('ready', () => { meta.connected = true; meta.error = null; });
+  // Phase-0 capture (MIGRATION_PLAN.md): while the bridge is capturing, POST a
+  // periodic snapshot of AMBIENT_INPUTS so the fixture records what the page
+  // actually saw. page_load_id is fresh per load — a reload shows up in the
+  // capture as a new id (plus the SSE disconnect/connect pair at the bridge).
+  const SNAPSHOT_MS = 10000;
+  const pageLoadId = Math.random().toString(36).slice(2, 10) + '-' + Date.now().toString(36);
+  let snapshotTimer = null;
+  function postSnapshot() {
+    try {
+      fetch('/capture/snapshot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          page_load_id: pageLoadId,
+          t_page_ms: (typeof performance !== 'undefined' ? performance.now() : 0),
+          inputs: state, // __meta is non-enumerable, so this is just the input map
+          meta: { connected: meta.connected, lastEventAt: meta.lastEventAt, error: meta.error },
+          song: song.have ? { pos: song.pos, wall: song.wall } : null,
+        }),
+      }).catch(() => { /* capture is best-effort */ });
+    } catch { /* never let the tap touch the visualizer */ }
+  }
+
+  es.addEventListener('ready', (ev) => {
+    meta.connected = true;
+    meta.error = null;
+    let captureOn = false;
+    try { captureOn = JSON.parse(ev.data || '{}').capture === true; } catch { /* old server */ }
+    if (captureOn && snapshotTimer === null) {
+      postSnapshot(); // one immediately, so reconnect/reload boundaries are tight
+      snapshotTimer = setInterval(postSnapshot, SNAPSHOT_MS);
+    }
+  });
   es.addEventListener('error', () => {
     meta.connected = false;
     meta.error = 'disconnected';

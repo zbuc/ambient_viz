@@ -1,0 +1,4 @@
+# Capture sessions are recorded on the kiosk and stay local by default.
+# Promote one to a tracked golden by renaming it golden-<description>/.
+/*/
+!/golden-*/
