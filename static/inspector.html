@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orrery — signal inspector</title>
+<style>
+  :root {
+    --bg: #070b08;
+    --bg-raise: #0c120e;
+    --bg-row: #0a100c;
+    --line: #1c2a20;
+    --ink: #9adfae;
+    --ink-dim: #4e7a5c;
+    --ink-faint: #2e4a38;
+    --green: #6fff9e;
+    --cyan: #6fd8ff;
+    --amber: #ffb454;
+    --red: #ff5c5c;
+    --mono: "Berkeley Mono", "JetBrains Mono", "IBM Plex Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--bg); }
+  body {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--ink);
+    min-height: 100vh;
+    background:
+      radial-gradient(ellipse 120% 80% at 50% -20%, #0d1810 0%, transparent 60%),
+      var(--bg);
+  }
+  /* phosphor scanlines + vignette, very quiet */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,.18) 0 1px, transparent 1px 3px);
+    mix-blend-mode: multiply;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9;
+    box-shadow: inset 0 0 18vmin rgba(0,0,0,.7);
+  }
+
+  /* ── nameplate ─────────────────────────────────────────── */
+  header {
+    display: flex; align-items: baseline; gap: 1.5em; flex-wrap: wrap;
+    padding: 14px 20px 10px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #0e1510, var(--bg));
+    position: sticky; top: 0; z-index: 10;
+  }
+  h1 {
+    font-size: 13px; font-weight: 700; letter-spacing: .35em;
+    text-transform: uppercase; color: var(--green);
+    text-shadow: 0 0 12px rgba(111,255,158,.45);
+  }
+  h1 .sep { color: var(--ink-faint); padding: 0 .4em; }
+  h1 .sub { color: var(--ink-dim); font-weight: 400; letter-spacing: .2em; }
+  .stat { color: var(--ink-dim); letter-spacing: .05em; white-space: nowrap; }
+  .stat b { color: var(--ink); font-weight: 400; }
+  #live {
+    margin-left: auto; display: flex; align-items: center; gap: .5em;
+    color: var(--ink-dim); letter-spacing: .15em; font-size: 11px;
+  }
+  #live .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green); box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: .35; } }
+  body.lost #live .dot { background: var(--red); box-shadow: 0 0 8px var(--red); animation: blink .5s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  body.lost #live .label::after { content: " LOST"; color: var(--red); }
+
+  main { padding: 10px 20px 60px; max-width: 1280px; }
+
+  /* ── domain groups ─────────────────────────────────────── */
+  .domain { margin-top: 22px; animation: reveal .35s ease both; }
+  .domain:nth-child(2) { animation-delay: .05s } .domain:nth-child(3) { animation-delay: .1s }
+  .domain:nth-child(4) { animation-delay: .15s } .domain:nth-child(5) { animation-delay: .2s }
+  @keyframes reveal { from { opacity: 0; transform: translateY(4px); } }
+  .domain > h2 {
+    font-size: 11px; font-weight: 400; letter-spacing: .3em; text-transform: uppercase;
+    color: var(--ink-dim); padding-bottom: 4px; border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between;
+  }
+  .domain > h2 .n { color: var(--ink-faint); letter-spacing: .1em; }
+
+  /* ── signal rows ───────────────────────────────────────── */
+  .sig { border-bottom: 1px dotted var(--ink-faint); }
+  .sig-row {
+    display: grid; grid-template-columns: minmax(220px,1.4fr) 110px 1fr 70px 90px;
+    gap: 12px; align-items: baseline; padding: 5px 0 3px;
+    cursor: pointer;
+  }
+  .sig-row:hover { background: var(--bg-raise); }
+  .path { color: var(--ink); letter-spacing: .03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .path .domain-part { color: var(--ink-dim); }
+  .shape { color: var(--ink-faint); font-size: 10px; letter-spacing: .2em; }
+  .val {
+    color: var(--green); text-align: right; font-variant-numeric: tabular-nums;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: text-shadow .6s ease, color .6s ease;
+  }
+  .val.flash { color: #d8ffe4; text-shadow: 0 0 10px rgba(111,255,158,.8); transition: none; }
+  .val.hold { color: var(--amber); }
+  .rate { color: var(--ink-dim); text-align: right; font-variant-numeric: tabular-nums; }
+  .ratebar { display: inline-block; width: 34px; height: 7px; margin-left: 6px;
+    background: linear-gradient(90deg, var(--green) var(--pct,0%), var(--ink-faint) var(--pct,0%));
+    opacity: .8; }
+  .flags { text-align: right; white-space: nowrap; }
+  .chip {
+    display: inline-block; padding: 0 .45em; font-size: 10px; letter-spacing: .1em;
+    border: 1px solid currentColor; border-radius: 2px; margin-left: 4px;
+  }
+  .chip.ok    { color: var(--ink-dim); }
+  .chip.warn  { color: var(--amber); }
+  .chip.bad   { color: var(--red); }
+  .chip.info  { color: var(--cyan); }
+
+  /* ── expanded detail: candidates + enforcement ─────────── */
+  .detail { display: none; padding: 6px 0 10px 18px; }
+  .sig.open .detail { display: block; }
+  .detail table { border-collapse: collapse; width: 100%; }
+  .detail th, .detail td { text-align: left; padding: 2px 14px 2px 0; font-size: 11px; white-space: nowrap; }
+  .detail th { color: var(--ink-faint); font-weight: 400; letter-spacing: .15em; text-transform: uppercase; font-size: 9px; }
+  .detail td { color: var(--ink-dim); }
+  .detail td.cand-val { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .status-winner { color: var(--green) !important; }
+  .status-would_win_if_priority_ge_legacy { color: var(--cyan) !important; }
+  .status-stale { color: var(--amber) !important; }
+  .status-type_rejected, .status-released { color: var(--red) !important; }
+  .enf { margin-top: 7px; color: var(--ink-faint); font-size: 10px; letter-spacing: .04em; }
+  .enf b { color: var(--ink-dim); font-weight: 400; }
+  .enf .skipped { color: var(--amber); opacity: .75; }
+  .enf .checked { color: var(--green); opacity: .8; }
+
+  /* meta domain folded by default */
+  .domain.meta-domain > h2 { cursor: pointer; }
+  .domain.meta-domain.folded .sig { display: none; }
+  .domain.meta-domain > h2 .fold::before { content: "▾ "; }
+  .domain.meta-domain.folded > h2 .fold::before { content: "▸ "; }
+
+  footer {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
+    padding: 5px 20px; font-size: 10px; letter-spacing: .2em;
+    color: var(--ink-faint); border-top: 1px solid var(--line);
+    background: var(--bg); text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>orrery<span class="sep">//</span><span class="sub">signal inspector</span></h1>
+  <span class="stat">boot_epoch <b id="epoch">—</b></span>
+  <span class="stat">paths <b id="npaths">—</b></span>
+  <span class="stat">packets <b id="npackets">—</b></span>
+  <span id="live"><span class="dot"></span><span class="label">LINK</span></span>
+</header>
+<main id="main"></main>
+<footer>every candidate visible pre-resolution — bus.v1 shadow / phase 1 / enforcement off, displayed honestly</footer>
+
+<script>
+(function () {
+  'use strict';
+  const POLL_MS = 500;
+  const main = document.getElementById('main');
+  const prevVals = new Map();   // path -> JSON of last value, for flash
+  const openSet = new Set();    // expanded paths persist across renders
+  let metaFolded = true;
+
+  const fmt = (v) => {
+    if (v === null || v === undefined) return '—';
+    if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(3);
+    if (typeof v === 'boolean') return v ? 'true' : 'false';
+    return String(v);
+  };
+
+  const domainOf = (p) => p.split('.')[0];
+
+  function chipFor(sig) {
+    const chips = [];
+    if (sig.resolved_holding_stale) chips.push('<span class="chip warn">HOLD·STALE</span>');
+    if (sig.rejected.type) chips.push(`<span class="chip bad">TYPE×${sig.rejected.type}</span>`);
+    if (sig.rejected.order) chips.push(`<span class="chip bad">ORDER×${sig.rejected.order}</span>`);
+    const cands = sig.writer_candidates;
+    if (cands.length > 1) chips.push(`<span class="chip info">${cands.length} WRITERS</span>`);
+    if (cands.some((c) => c.status === 'would_win_if_priority_ge_legacy'))
+      chips.push('<span class="chip info">SHADOW READY</span>');
+    if (sig.shape === 'event') chips.push(`<span class="chip ok">Q${sig.queue_depth}${sig.drops ? ` D${sig.drops}` : ''}</span>`);
+    return chips.join('');
+  }
+
+  function enfLine(enf) {
+    return Object.entries(enf).map(([k, v]) => {
+      const cls = /^SKIPPED|^UNCHECKED|^NONE/.test(v) ? 'skipped' : 'checked';
+      return `<b>${k}</b>=<span class="${cls}">${v}</span>`;
+    }).join(' &nbsp; ');
+  }
+
+  function render(data) {
+    document.getElementById('epoch').textContent = data.boot_epoch;
+    const paths = Object.keys(data.paths);
+    document.getElementById('npaths').textContent = paths.filter((p) => !p.startsWith('_meta.')).length;
+    let totalPackets = 0;
+    for (const p of paths) totalPackets += data.paths[p].packets;
+    document.getElementById('npackets').textContent = totalPackets.toLocaleString();
+
+    // group: real domains in stable order, _meta last
+    const groups = new Map();
+    for (const p of paths.sort()) {
+      const d = p.startsWith('_meta.') ? '_meta' : domainOf(p);
+      if (!groups.has(d)) groups.set(d, []);
+      groups.get(d).push(p);
+    }
+    const order = [...groups.keys()].sort((a, b) =>
+      (a === '_meta') - (b === '_meta') || a.localeCompare(b));
+
+    main.innerHTML = order.map((d) => {
+      const sigs = groups.get(d).map((p) => {
+        const s = data.paths[p];
+        const maxRate = s.shape === 'event' ? 30 : 60;
+        const pct = Math.min(100, (s.rate_hz / maxRate) * 100).toFixed(0);
+        const val = s.shape === 'state' ? fmt(s.current_resolved_value) : `${s.queue_depth} queued`;
+        const open = openSet.has(p) ? ' open' : '';
+        const cands = s.writer_candidates.map((c) => `
+          <tr>
+            <td class="status-${c.status}">${c.status.replace(/_/g, ' ')}</td>
+            <td>${c.source_id.replace('spiffe://pain-material.local/', '…/')}</td>
+            <td>${c.priority}</td>
+            <td class="cand-val">${fmt(c.value)}</td>
+            <td>${c.age_ms} ms</td>
+            <td>${c.stale ? 'STALE' : 'live'}</td>
+            <td>${c.boot_epoch ?? '—'},${c.seq}</td>
+            <td>${c.seq_gaps}</td>
+          </tr>`).join('');
+        return `
+        <div class="sig${open}" data-path="${p}">
+          <div class="sig-row">
+            <span class="path"><span class="domain-part">${d}.</span>${p.slice(d.length + 1)}</span>
+            <span class="shape">${s.shape.toUpperCase()}${s.declared_type ? ' · ' + s.declared_type : ''}</span>
+            <span class="val${s.resolved_holding_stale ? ' hold' : ''}" data-path="${p}">${val}</span>
+            <span class="rate">${s.rate_hz.toFixed(1)}<span class="ratebar" style="--pct:${pct}%"></span></span>
+            <span class="flags">${chipFor(s)}</span>
+          </div>
+          <div class="detail">
+            <table>
+              <tr><th>status</th><th>source</th><th>pri</th><th>value</th><th>age</th><th>fresh</th><th>epoch,seq</th><th>gaps</th></tr>
+              ${cands || '<tr><td colspan="8">no writers yet</td></tr>'}
+            </table>
+            <div class="enf">${enfLine(s.enforcement)}</div>
+          </div>
+        </div>`;
+      }).join('');
+      const meta = d === '_meta' ? ` meta-domain${metaFolded ? ' folded' : ''}` : '';
+      return `<section class="domain${meta}" data-domain="${d}">
+        <h2><span>${d === '_meta' ? '<span class="fold"></span>_meta (bus diagnostics)' : d}</span><span class="n">${groups.get(d).length} paths</span></h2>
+        ${sigs}
+      </section>`;
+    }).join('');
+
+    // flash changed values
+    for (const el of main.querySelectorAll('.val')) {
+      const p = el.dataset.path;
+      const cur = el.textContent;
+      if (prevVals.has(p) && prevVals.get(p) !== cur) {
+        el.classList.add('flash');
+        setTimeout(() => el.classList.remove('flash'), 80);
+      }
+      prevVals.set(p, cur);
+    }
+  }
+
+  main.addEventListener('click', (ev) => {
+    const h2 = ev.target.closest('.meta-domain > h2');
+    if (h2) {
+      metaFolded = !metaFolded;
+      h2.parentElement.classList.toggle('folded', metaFolded);
+      return;
+    }
+    const row = ev.target.closest('.sig-row');
+    if (!row) return;
+    const sig = row.parentElement;
+    const p = sig.dataset.path;
+    sig.classList.toggle('open');
+    if (sig.classList.contains('open')) openSet.add(p); else openSet.delete(p);
+  });
+
+  async function tick() {
+    try {
+      const r = await fetch('/inspector/state', { cache: 'no-store' });
+      if (!r.ok) throw new Error(String(r.status));
+      render(await r.json());
+      document.body.classList.remove('lost');
+    } catch {
+      document.body.classList.add('lost');
+    }
+  }
+  tick();
+  setInterval(tick, POLL_MS);
+})();
+</script>
+</body>
+</html>

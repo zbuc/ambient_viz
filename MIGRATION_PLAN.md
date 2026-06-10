@@ -158,6 +158,15 @@ Every comparison yields one of four verdicts:
 
 ## Phase 1 — `bus.v1` inside the bridge + the inspector (pure shadow)
 
+> **Status (2026-06-10): COMPLETE.** `proto/{common,bus}.proto` (verbatim from
+> the spec docs) + ts-proto codegen (committed CJS in `server/src/gen/`);
+> in-process bus (`server/src/bus.js`: retention, `(boot_epoch, seq)` ordering,
+> priority arbitration + release, stale HOLD, bounded event queues, 1 Hz
+> `_meta`); dual-write adapter (`server/src/bus-adapter.js`, IR_SKETCH paths);
+> inspector at `/inspector` (two-layer resolved/candidates, honest enforcement
+> truth values). Validated: 10/10 semantics tests, live traffic, and the
+> phase-0 golden replays clean with the bus on. Next: phase 2.
+
 Codegen `common.v1` + `bus.v1` (ts-proto only — defer the Rust mirror until a
 non-JS node speaks bus; the sidecar keeps POSTing JSON, the bridge ingest
 adapter translates). In-process bus in the bridge: dual-write legacy events as

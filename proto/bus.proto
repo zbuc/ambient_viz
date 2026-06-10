@@ -1,0 +1,88 @@
+// orrery.bus.v1 — control-bus packets.
+// Schema-of-record: BUS_PROTOCOL.md (this file is its verbatim IDL).
+
+syntax = "proto3";
+package orrery.bus.v1;
+import "common.proto";  // orrery.common.v1.Value
+
+// ─────────────────────────────────────────────────────────────
+//  Routing address vs. identity (deliberately separate)
+//    SignalPath  = `domain.instance.field` — WHERE a value goes (a string field
+//                  below); instance ALWAYS explicit, no collapse to flat names.
+//    SourceId    = durable publisher identity (SPIFFE-style), survives renames.
+// ─────────────────────────────────────────────────────────────
+
+message Source {
+  string source_id        = 1;  // "spiffe://pain-material.local/sensor/door-01"
+  uint64 seq              = 2;  // monotonic per source WITHIN one boot_epoch —
+                                // ordering + dedup even with enforcement OFF
+  optional bytes  sig              = 3;  // signature/HMAC; ignored while OFF
+  optional string cert_fingerprint = 4;  // enrolled-cert tie; ignored while OFF
+  uint32 boot_epoch       = 5;  // increments (persisted counter) or re-randomizes
+                                // each boot. Ordering key = (boot_epoch, seq):
+                                // without it, a rebooted node's fresh seq=1 loses
+                                // to its own pre-reboot packets and the node goes
+                                // silent from the bus's point of view.
+}
+
+// A timestamp tagged with its timebase. Domains are NOT interchangeable;
+// cross-domain conversion is an explicit (initially no-op) step.
+message TimePoint {
+  oneof domain {
+    AudioSample audio_sample = 1;
+    Musical     musical      = 2;
+    Monotonic   monotonic    = 3;
+    Wall        wall         = 4;
+    RenderFrame render_frame = 5;
+  }
+  message AudioSample { string device = 1; uint64 sample = 2; uint32 sample_rate = 3; }
+  message Musical     { double beat = 1; optional uint32 bar = 2; optional double tempo = 3; }
+  message Monotonic   { string device = 1; uint64 nanos = 2; }
+  message Wall        { uint64 unix_nanos = 1; }
+  message RenderFrame { string group = 1; uint64 frame = 2; }
+}
+
+// Value / Vec live in common.proto (orrery.common.v1) — shared with manifest +
+// plugin. Compact, MCU-friendly: scalars + vectors cover almost everything;
+// `blob` carries a structured/typed payload decoded per the path's schema.
+
+// ─────────────────────────────────────────────────────────────
+//  The packet: shared envelope + one of three transport shapes
+// ─────────────────────────────────────────────────────────────
+
+message SignalPacket {
+  // envelope — on every packet
+  string    schema   = 1;  // "bus.v1" (mirrors the package version; runtime-checkable across encodings)
+  Source    source   = 2;
+  TimePoint time     = 3;  // when this packet's content is timestamped
+  uint32    priority = 4;  // authority-ladder value; resolver picks highest live writer per sink
+
+  oneof body {
+    State  state  = 10;  // latest value replaces previous
+    Event  event  = 11;  // append-only, ordered, never collapsed/dropped
+    Bundle bundle = 12;  // atomic group, one execution time
+  }
+}
+
+message State {
+  string path = 1;
+  orrery.common.v1.Value value = 2;
+  optional TimePoint valid_until = 3;  // explicit staleness horizon; else manifest stale_after_ms
+  bool release = 4;                    // writer relinquishes this path NOW (sACN "stream
+                                       // terminated"): leave arbitration immediately,
+                                       // don't wait out the writer timeout
+}
+
+message Event {
+  string path = 1;
+  optional orrery.common.v1.Value payload = 2;
+  optional string    dedupe_key  = 3;  // dedupe replays by (source.id, seq) or this
+  optional TimePoint target_time = 4;  // single scheduled event ("fire at beat 32.0")
+}
+
+message Bundle {
+  repeated Item     items        = 1;  // applied together; inherit the parent SignalPacket's source/time/priority
+  optional TimePoint target_time = 2;
+  bool              atomic       = 3;  // true = apply all at target_time, or none
+  message Item { oneof item { State state = 1; Event event = 2; } }  // sub-items are state/event only (never nested bundles)
+}

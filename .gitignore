@@ -13,3 +13,9 @@ node_modules/
 
 # raw audio
 AMBIENT.RAW
+# orrery bus boot-epoch counter (per-node runtime state)
+server/.orrery-boot-epoch
+
+# proto codegen intermediates (generated JS in server/src/gen IS committed)
+proto/.gen-ts/
+proto/node_modules/

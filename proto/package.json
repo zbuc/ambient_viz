@@ -1,0 +1,13 @@
+{
+  "name": "orrery-proto",
+  "version": "0.1.0",
+  "private": true,
+  "description": "orrery.*.v1 schema codegen (ts-proto). Generated CJS is committed under server/src/gen/ so the bridge stays no-build.",
+  "scripts": {
+    "gen": "./gen.sh"
+  },
+  "devDependencies": {
+    "ts-proto": "^2.2.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,57 @@
+// orrery.common.v1 — shared schema vocabulary.
+// Schema-of-record: COMMON_PROTO.md (this file is its verbatim IDL).
+// Import graph is a star: bus/manifest/router/plugin each import this file;
+// none import each other.
+
+syntax = "proto3";
+package orrery.common.v1;
+
+// ── values ──────────────────────────────────────────────────
+message Value {
+  oneof v {
+    double number  = 1;
+    sint64 integer = 2;
+    bool   boolean = 3;
+    string text    = 4;
+    Vec    vec     = 5;  // colors / positions / vectors
+    bytes  blob    = 6;  // typed payload, schema-per-path
+  }
+}
+message Vec { repeated float elems = 1 [packed = true]; }
+
+// ── signal typing ───────────────────────────────────────────
+enum ValueType {
+  VALUE_TYPE_UNSPECIFIED = 0;
+  VALUE_TYPE_FLOAT = 1;
+  VALUE_TYPE_INT   = 2;
+  VALUE_TYPE_BOOL  = 3;
+  VALUE_TYPE_TEXT  = 4;
+  VALUE_TYPE_VEC   = 5;
+  VALUE_TYPE_BLOB  = 6;
+}
+enum Shape {
+  SHAPE_UNSPECIFIED = 0;
+  SHAPE_STATE = 1;  // latest-replaces
+  SHAPE_EVENT = 2;  // append-only, ordered
+}
+message Range { double min = 1; double max = 2; }
+
+// ── rate domains (a node's / signal's tick rate) ────────────
+enum RateDomain {
+  RATE_DOMAIN_UNSPECIFIED = 0;
+  RATE_CONTROL      = 1;  // arrival-driven / async, low rate — NO tick.
+                          // Activation semantics: ROUTER_IR.md → Execution semantics
+  RATE_RENDER_FRAME = 2;  // per visual frame
+  RATE_AUDIO_SAMPLE = 3;  // sample-rate
+  RATE_MUSICAL      = 4;  // per musical subdivision; tick granularity is declared
+                          // by the clock driver (default 24 ticks/beat — MIDI precedent)
+}
+
+// ── per-member context selector (render-plane groups) ───────
+enum MemberParam {
+  MEMBER_PARAM_UNSPECIFIED = 0;
+  MEMBER_INDEX    = 1;
+  MEMBER_COUNT    = 2;
+  MEMBER_LOGICAL  = 3;
+  MEMBER_POSITION = 4;
+}
