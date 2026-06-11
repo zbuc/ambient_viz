@@ -498,7 +498,11 @@ impl ProcGen {
         // Stab — chord-change downbeats voice the new chord whole; otherwise
         // the Markov melody fires on a per-bar-rotated Euclidean gate.
         let strong = sib % STEPS_PER_BEAT == 0;
-        if sib == 0 && self.conductor.chord_changed() {
+        // Chord strikes: every harmonic move — and step 0, so the seeded
+        // opening chord is actually VOICED with a drawn hold of its own
+        // (otherwise the piece opens on bass+melody alone and the first
+        // drawn chord duration only arrives at the first change).
+        if sib == 0 && (self.conductor.chord_changed() || step == 0) {
             // Per-hit character, like the melody path: a drawn voicing
             // (root / first inversion / spread third), tone/velocity jitter,
             // and a GATED duration — the chord sustains for a drawn number
@@ -697,12 +701,13 @@ mod tests {
         // listen, because it is the audible output's identity.
         let events = run(&mut make(96.0), 8, 96.0);
         let d = digest(&events);
-        // Bumped 2026-06-11 (×4): seeded musical start (key/mode/opening
+        // Bumped 2026-06-11 (×5): seeded musical start (key/mode/opening
         // degree), seeded opening-hold phase, per-hit chord character
-        // (voicing/tone/velocity), then gated durations (chord + melody
-        // holds with note-offs) — intended audible changes.
+        // (voicing/tone/velocity), gated durations (chord + melody holds
+        // with note-offs), then the opening chord struck at step 0 with a
+        // drawn hold — intended audible changes.
         assert_eq!(
-            d, 0x81d9f25a6e5191cd,
+            d, 0xb97c6e97b627c959,
             "golden digest mismatch — actual {d:#018x}"
         );
     }
@@ -875,6 +880,43 @@ mod tests {
             bars.len() >= 3,
             "10 seeds gave only {} distinct opening-chord durations: {bars:?}",
             bars.len()
+        );
+    }
+
+    #[test]
+    fn opening_chord_is_struck_with_a_seed_drawn_hold() {
+        // The seeded opening chord must be voiced at step 0 (gated), and its
+        // hold length must vary across seeds like any other chord hit.
+        fn opening_hold(seed: u64) -> u32 {
+            let mut pg = ProcGen::new(SR, seed);
+            pg.set_fixed_bpm(240.0);
+            let mut g = Genome::default();
+            g.density = 0.0; // melody silent — chord offs are unambiguous
+            pg.set_genome(g);
+            let mut struck: Option<std::vec::Vec<u8>> = None;
+            for _ in 0..(48_000 * 60) {
+                let evt = pg.advance();
+                let fired = pg.step().wrapping_sub(1);
+                if let Some(s) = evt.stab {
+                    assert!(struck.is_some() || fired == 0, "first strike must be step 0");
+                    if struck.is_none() {
+                        assert!(s.gate && s.chord.notes().len() >= 3, "opening chord gated triad");
+                        struck = Some(s.chord.notes().to_vec());
+                    }
+                }
+                if let (Some(notes), Some(off)) = (&struck, evt.stab_off) {
+                    if off.notes().iter().any(|n| notes.contains(n)) {
+                        return fired;
+                    }
+                }
+            }
+            panic!("opening chord never released");
+        }
+        let holds: std::collections::HashSet<u32> = (0..8u64).map(opening_hold).collect();
+        assert!(
+            holds.len() >= 3,
+            "8 seeds gave only {} distinct opening-chord holds: {holds:?}",
+            holds.len()
         );
     }
 
