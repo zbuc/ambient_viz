@@ -137,6 +137,48 @@ try {
     + 'no legacy fallback since 4F. Fix the graph/manifests or redeploy the previous release.');
 }
 
+// Plugin host (phase 6.0, MIGRATION_PLAN.md): plugin.v1 code assets hosted in
+// the bridge, instantiated from manifest/plugins/ (one file per instance —
+// ship/cut/delete independently, same doctrine as graphs/). Phase 6.0 hosts
+// only the toy_timer prove-out: a seeded random-interval pulse on
+// seq.toy.pulse that nothing consumes — it exists to soak host tick, seeded
+// PRNG, snapshot/restore, replay, and candidate-path inspection before the
+// 6.1 trigger-stack port. Emissions are tapped into the capture (`plugin_tx`)
+// so recorded sessions carry the candidate stream for offline diffing; seeds
+// are recorded at boot (`plugin_init`) — a fixture without its seed is not
+// replayable. A broken binding degrades loudly to that instance not running.
+let pluginHost = null;
+try {
+  const { createPluginHost, loadBindingDir } = require('./plugin-host');
+  const pluginsDir = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest', 'plugins');
+  const { bindings, failures: loadFailures } = loadBindingDir(pluginsDir);
+  const declared = new Map();
+  if (registry) {
+    for (const rec of registry.bySourceId.values()) {
+      for (const [p, d] of rec.declared) declared.set(p, d);
+    }
+  }
+  pluginHost = createPluginHost({
+    bus: orreryBus,
+    bindings,
+    declared: registry ? declared : null,
+    roles: registry ? new Map(registry.policy.roles.map((r) => [r.name, r])) : null,
+    tap: (instance, sigPath, payload) => capture.event('plugin_tx', { instance, path: sigPath, payload }),
+  });
+  for (const f of [...loadFailures, ...pluginHost.failures]) {
+    console.error(`orrery plugin-host: ${f.file} NOT RUNNING (${f.errors.join('; ')}) — its outputs stay silent.`);
+  }
+  for (const w of pluginHost.warnings) console.warn(`orrery plugin-host WARN: ${w}`);
+  for (const inst of pluginHost.instances) {
+    capture.event('plugin_init', { instance: inst.name, asset: inst.assetKey, seed: inst.seed, params: inst.params });
+    console.log(`orrery plugin-host: LIVE — "${inst.name}" (${inst.assetKey}, seed ${inst.seed}) -> `
+      + [...inst.outputs.values()].map((o) => o.path).join(', '));
+  }
+  if (!pluginHost.instances.length) console.warn('orrery plugin-host: no instances running');
+} catch (e) {
+  console.error(`orrery plugin-host: NOT RUNNING (${e.message}) — plugin outputs stay silent.`);
+}
+
 // ── bus-over-SSE (phase 2): the browser feed's transport ────────────────────
 // GET /bus/events — retained-state replay on connect (the late-joiner
 // contract, BUS_PROTOCOL.md), then live accepted packets. `_meta.*` stays off
@@ -210,6 +252,21 @@ function handleInspectorState(req, res) {
       recent_warns: orreryBus.warns.slice(-20),
     } : null,
     paths: orreryBus.snapshot(),
+  });
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+  res.end(body);
+}
+
+// GET /plugins/state — the plugin host's inspection view: per instance the
+// execution-contract truth values, seed + PRNG state, tick/emit/quarantine
+// counters, the recent-emission ring (the candidate stream), and a live state
+// snapshot. Read-only, LAN-readable like /inspector/state.
+function handlePluginsState(req, res) {
+  const body = JSON.stringify({
+    running: !!pluginHost,
+    instances: pluginHost ? pluginHost.inspect() : [],
+    failures: pluginHost ? pluginHost.failures : [],
+    warnings: pluginHost ? pluginHost.warnings : [],
   });
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
   res.end(body);
@@ -559,6 +616,7 @@ const server = http.createServer((req, res) => {
   if (req.url === '/capture/snapshot' && req.method === 'POST') return handleCaptureSnapshot(req, res);
   if (req.url === '/inspector/state' && req.method === 'GET') return handleInspectorState(req, res);
   if (req.url === '/inspector' && req.method === 'GET') { req.url = '/inspector.html'; return serveStatic(req, res); }
+  if (req.url === '/plugins/state' && req.method === 'GET') return handlePluginsState(req, res);
   if (req.url === '/bus/events' && req.method === 'GET') return handleBusSSE(req, res);
   if (req.url === '/bus/map' && req.method === 'GET') return handleBusMap(req, res);
 

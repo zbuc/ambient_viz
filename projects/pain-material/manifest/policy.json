@@ -40,6 +40,13 @@
       "maxPriority": 300
     },
     {
+      "name": "plugin_host",
+      "canPublish": ["seq.*"],
+      "cannotPublish": ["clock.*", "safety.*", "sensor.*", "touch.*", "ui.*", "transport.*", "fx.*"],
+      "canSubscribe": ["sensor.*", "touch.*", "clock.*", "ui.*", "timeline.*", "fx.*"],
+      "maxPriority": 300
+    },
+    {
       "name": "defaults",
       "canPublish": ["sensor.door.near_cm", "sensor.door.far_cm"],
       "cannotPublish": ["clock.*", "safety.*", "transport.*"],
@@ -55,6 +62,7 @@
     { "stableId": "spiffe://pain-material.local/daisy/serial", "role": "clock_source", "instanceId": "daisy" },
     { "stableId": "spiffe://pain-material.local/browser/ui", "role": "local_ui", "instanceId": "browser" },
     { "stableId": "spiffe://pain-material.local/bridge/router", "role": "router", "instanceId": "main" },
+    { "stableId": "spiffe://pain-material.local/bridge/plugin-host", "role": "plugin_host", "instanceId": "plugins" },
     { "stableId": "spiffe://pain-material.local/bridge/defaults", "role": "defaults", "instanceId": "defaults" }
   ],
   "groups": [],

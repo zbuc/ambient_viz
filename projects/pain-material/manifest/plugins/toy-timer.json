@@ -1,0 +1,11 @@
+{
+  "instance": "toy",
+  "seed": 1118481,
+  "authorityRole": "plugin_host",
+  "priority": 300,
+  "binding": {
+    "asset": "toy_timer.v1",
+    "inputs": {},
+    "params": { "min_interval_s": 20, "max_interval_s": 45, "skip_prob": 0.25 }
+  }
+}

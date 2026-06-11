@@ -19,7 +19,7 @@ protoc \
   --ts_proto_opt=esModuleInterop=true \
   --ts_proto_opt=forceLong=number \
   --proto_path=. \
-  common.proto bus.proto manifest.proto router.proto
+  common.proto bus.proto manifest.proto router.proto plugin.proto
 
 ./node_modules/.bin/tsc \
   --module commonjs --target es2020 --declaration \

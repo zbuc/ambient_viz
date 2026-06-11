@@ -93,3 +93,32 @@ alignment luck.
 
 Next: 4D — the MIDI adapter consumes the resolved `fx.tape.failure` (legacy
 still winning), after a full kiosk session soaks the 4C shadow.
+
+## Phase 5 — visualizer mapping gates
+
+```sh
+node tools/sim/validate-twist.js  projects/pain-material/fixtures/<golden>/
+node tools/sim/validate-bitmap.js projects/pain-material/fixtures/<golden>/
+```
+
+Shared machinery in `viz-gate.js`; since the phase-5 cutover deleted the
+in-page ramps, each validator's frame-clocked legacy model is the **frozen
+spec** of the deleted browser math, and these are the standing regression
+gates for `fx.viz.twist_gain` / `fx.viz.bitmap_x`.
+
+## Phase 6.0 — plugin host gate
+
+```sh
+node tools/sim/validate-plugin.js projects/pain-material/fixtures/<golden>/
+```
+
+Three legs over the golden's virtual timeline, with the production
+manifests + policy + bus-adapter live: **replay** (two from-scratch runs of
+every hosted plugin instance must emit byte-identically — seeded PRNG,
+host-tick discipline), **resume** (snapshot all instances at the midpoint,
+discard the host, rebuild with deliberately wrong seeds, restore, continue —
+the tail must equal the straight run's exactly, proving snapshots carry
+plugin state AND PRNG state), and **hygiene** (zero crashes / publish
+rejects / policy WARNs / queue drops). Passed 2026-06-11 on all three
+goldens (mock 63-min: 93 emissions; cutover: 7; viz-cutover: 1). Host unit
+tests: `server/test/plugin-host.test.js`.

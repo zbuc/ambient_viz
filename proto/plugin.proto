@@ -1,0 +1,83 @@
+// orrery plugin.v1 — the stable interface a versioned code asset exposes.
+// Schema-of-record: PLUGIN_CONTRACT.md (this file is its verbatim IDL).
+// The router's PluginBinding (router.v1) is validated against this manifest;
+// runtime lifecycle (init/tick/snapshot signatures) is a host-API concern,
+// deliberately NOT in this schema.
+
+syntax = "proto3";
+package orrery.plugin.v1;
+
+import "common.proto";  // orrery.common.v1.{Value, ValueType, Shape, Range, RateDomain, MemberParam}
+
+message PluginManifest {
+  string asset          = 1;   // "wave" — stable asset name; bind target is "<asset>.v<version>"
+  uint32 version        = 2;   // major version = contract-compatibility boundary
+  Kind   kind           = 3;
+  string human_label    = 4;
+  string schema_version = 5;   // "plugin.v1"
+
+  repeated Port  inputs  = 6;   // bound by PluginBinding.inputs
+  repeated Param params  = 7;   // set  by PluginBinding.params
+  repeated Port  outputs = 8;   // where results go (emitter / bus / per-member)
+
+  // per-member context the runtime supplies automatically (choreographies):
+  repeated orrery.common.v1.MemberParam member_needs = 9;  // MEMBER_INDEX/COUNT/LOGICAL/POSITION
+  orrery.common.v1.RateDomain rate_domain = 10;
+
+  // execution contract — what the host must provide and the simulator can prove:
+  bool requires_host_tick = 11;  // plugin has self-scheduled behavior (timers,
+                                 // cooldowns, random intervals): the host MUST
+                                 // drive it on a tick even with no input packets.
+                                 // false = purely input/frame-reactive.
+  Determinism determinism = 12;
+  StateModel  state_model = 13;
+
+  enum Determinism {
+    DETERMINISM_UNSPECIFIED = 0;  // → REPLAYABLE (the default obligation)
+    REPLAYABLE       = 1;  // same seed + input trace → same outputs; golden-traceable
+    REALTIME_ONLY    = 2;  // depends on real timing (live audio callback); simulator
+                           // can check invariants but not exact outputs
+    EXTERNAL_IO      = 3;  // touches the world (filesystem/network/devices) —
+                           // not replayable; quarantined from golden traces
+  }
+  enum StateModel {
+    STATE_MODEL_UNSPECIFIED = 0;  // → OPAQUE
+    STATELESS     = 1;  // pure f(inputs, member ctx) — trivially reloadable
+    SNAPSHOTTABLE = 2;  // host can snapshot/restore state (reload/replay-resume)
+    OPAQUE        = 3;  // state exists but can't be captured — reload = reinit + ramp
+  }
+
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    SCENE_RASTER = 1;  // raster scene → screen emitter (+ optional abstract field)
+    CHOREOGRAPHY = 2;  // per-member render (the wave) → emitter-group members
+    VECTOR_LASER = 3;  // field/frame → ILDA vector path
+    FX           = 4;  // audio-plane FX choreography
+    GENERATOR    = 5;  // emits seq.*/control back onto the bus
+  }
+}
+
+message Port {
+  string name = 1;                                    // local port name = the binding key
+  orrery.common.v1.ValueType value_type = 2;
+  orrery.common.v1.Shape     shape      = 3;         // STATE | EVENT
+  string unit = 4;
+  optional orrery.common.v1.Range range = 5;
+  bool   required = 6;                                 // input: must be bound; output: always produced
+
+  // outputs only:
+  Dest   dest  = 7;                                   // EMITTER | BUS | MEMBER
+  Media  media = 8;                                   // what kind of thing this output is
+  optional string bus_path = 9;                       // dest=BUS → published path (may use ${group})
+
+  enum Dest  { DEST_UNSPECIFIED=0; EMITTER=1; BUS=2; MEMBER=3; }
+  enum Media { MEDIA_UNSPECIFIED=0; RASTER_FRAME=1; ABSTRACT_FIELD=2; VECTOR_PATH=3; PER_MEMBER_VALUE=4; SIGNAL=5; }
+}
+
+message Param {
+  string name = 1;
+  orrery.common.v1.ValueType value_type = 2;
+  optional orrery.common.v1.Value default = 3;       // absent default → required
+  optional orrery.common.v1.Range range = 4;
+  repeated string enum_values = 5;                     // for enumerated params
+}

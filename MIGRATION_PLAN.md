@@ -564,6 +564,59 @@ clock contract in early.
 
 ## Phase 6 — `presence_choreography.v1` (the plugin host arrives)
 
+> **Status (2026-06-11): 6.0 COMPLETE — toy plugin live, all five proofs
+> green.** `proto/plugin.proto` (verbatim from PLUGIN_CONTRACT.md) + codegen;
+> the **plugin host** (`server/src/plugin-host.js`) runs plugin.v1 assets in
+> the bridge, instantiated one-file-per-instance from `manifest/plugins/`
+> (the graphs-dir ship/cut/delete doctrine). Design decisions, stated for
+> the record:
+>
+> - **Instantiation is host config, not new schema.** Each file carries a
+>   router.v1 `PluginBinding` (codec-validated) in a host envelope
+>   {instance, seed, authorityRole, priority} — the fields PLUGIN_CONTRACT.md
+>   explicitly assigns to instantiation/host-API. `Replicated`-sited bindings
+>   stay unbuilt until something needs groups. Binding validation mirrors the
+>   contract's compiler-validation list: inputs (declared/required/typed),
+>   params (range + defaults), version resolution, member_needs rejected,
+>   BUS-only outputs authorized rule-8-style (role globs + priority ceiling).
+>   Scope errors are loud: RATE_CONTROL only, REPLAYABLE only, no emitter.
+> - **The host owns time and randomness.** One injectable tick
+>   (250 ms, bus.nowMono — the clock the sim already drives virtually);
+>   per-instance seeded mulberry32 whose 32-bit state is part of the host
+>   snapshot, so replay-resume continues the random stream bit-exactly. Seeds
+>   are recorded at boot (`plugin_init` capture event) — a fixture without
+>   its seed is not replayable. STATE inputs read the arbitrated RESOLVED
+>   value (the 4C/4D rule, third consumer); EVENT inputs get the full drain
+>   since last tick, never coalesced. Crash = instance disabled loudly,
+>   EVENT outputs fall silent, STATE outputs released (failsafe
+>   approximation until manifests carry per-sink failsafe values);
+>   non-finite emissions quarantined + counted (rule 13).
+> - **The toy** (`server/src/plugins/toy-timer.js`, `toy_timer.v1`,
+>   GENERATOR): seeded random-interval pulse with a skip roll — the toll's
+>   irregular-recurrence shape, zero installation logic — emitting
+>   `seq.toy.pulse` (EVENT int, new `plugin_host` role/manifest/allowlist
+>   entry, "count" unit token) that nothing consumes. Emissions are tapped
+>   into the capture (`plugin_tx`) and ride /bus/events; until a real
+>   consumer binds (6.1), the host's inspection ring is the declared drainer
+>   of its own output queues (drop counters stay honest).
+> - **Inspection:** `/plugins/state` + an inspector panel (instance status,
+>   seed/PRNG state, tick/emit/quarantine counters, recent emissions, live
+>   state snapshot). En route fix: bus.snapshot() now labels EVENT writers
+>   `event_writer` — the STATE shadow vocabulary ("shadowed", "would win")
+>   was a lie on event paths.
+>
+> **Proof (`tools/sim/validate-plugin.js`, three legs × three goldens, all
+> MATCH):** replay — two from-scratch virtual-time runs byte-identical
+> (mock 63-min: 93 emissions; cutover: 7; viz-cutover: 1); resume — host
+> snapshotted mid-timeline, DISCARDED, rebuilt with wrong seeds, restored:
+> tails exactly equal the straight runs'; hygiene — zero crashes/rejects/
+> WARNs/drops everywhere. 65/65 server tests (13 new); tape/twist/bitmap
+> gates + identity sim re-verified MATCH post-change; live bridge soak
+> showed a real pulse on the bus, type-checked, policy-clean. **Next: 6.1**
+> — port the trigger stack (bell/toll/voice/murmur) onto this host;
+> occupancy conditioning into the router graph; decision-level comparison
+> via the debug-event instrumentation below.
+
 The riskiest phase; it gets a de-risking precursor:
 
 - **6.0 — toy plugin first.** Before porting anything: a trivial plugin that

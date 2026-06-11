@@ -1,0 +1,19 @@
+{
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://pain-material.local/bridge/plugin-host",
+    "instanceId": "plugins",
+    "humanLabel": "Plugin host (bridge-hosted, phase 6+)",
+    "type": "plugin-host",
+    "firmwareVersion": "bridge",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "plugin_host",
+  "publishes": [
+    { "path": "seq.toy.pulse", "valueType": "VALUE_TYPE_INT", "shape": "SHAPE_EVENT", "unit": "count",
+      "nominalRateHz": 0.5, "maxRateHz": 4,
+      "maxQueue": 64, "overflowPolicy": "OVERFLOW_DROP_OLDEST",
+      "dedupe": true }
+  ],
+  "subscribes": []
+}

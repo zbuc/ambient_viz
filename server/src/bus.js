@@ -361,6 +361,9 @@ class OrreryBus extends EventEmitter {
         let status;
         if (w.released) status = 'released';
         else if (stale) status = 'stale';
+        // EVENT writers never arbitrate — the STATE shadow vocabulary below
+        // ("shadowed", "would win") would be a lie on an event path.
+        else if (entry.shape === 'event') status = 'event_writer';
         else if (w.lastTypeRejectAt && now - w.lastTypeRejectAt < 5000) status = 'type_rejected';
         else if (w.sourceId === winnerId) status = 'winner';
         else if (incumbent && w.priority < incumbent.priority) {

@@ -149,6 +149,22 @@
     background: var(--bg); text-transform: uppercase;
   }
 
+  /* ── plugin host panel (phase 6) ───────────────────────── */
+  #plugins { padding: 0 20px; max-width: 1280px; }
+  #plugins .domain > h2 { margin-top: 22px; }
+  .plug {
+    border-bottom: 1px dotted var(--ink-faint); padding: 5px 0 6px;
+    display: grid; grid-template-columns: minmax(180px,1fr) 2fr; gap: 4px 16px;
+  }
+  .plug .head { color: var(--ink); white-space: nowrap; }
+  .plug .head .asset { color: var(--ink-dim); }
+  .plug .head .crashed { color: var(--red); letter-spacing: .15em; }
+  .plug .meta { color: var(--ink-dim); font-size: 11px; }
+  .plug .meta b { color: var(--ink); font-weight: 400; font-variant-numeric: tabular-nums; }
+  .plug .emits { grid-column: 1 / -1; color: var(--ink-faint); font-size: 10px; letter-spacing: .04em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .plug .emits b { color: var(--cyan); font-weight: 400; }
+
   /* permissive-mode banner: staged enforcement must never LOOK enforced */
   #banner {
     display: none; padding: 4px 20px; font-size: 10px; letter-spacing: .2em;
@@ -168,6 +184,7 @@
   <span id="live"><span class="dot"></span><span class="label">LINK</span></span>
 </header>
 <div id="banner"></div>
+<div id="plugins"></div>
 <main id="main"></main>
 <footer>every candidate visible pre-resolution — bus.v1 shadow / phase 1 / enforcement off, displayed honestly</footer>
 
@@ -359,6 +376,27 @@
     if (lastData) update(lastData); // fill the detail immediately on expand
   });
 
+  // Plugin host panel (phase 6): per instance the execution-contract status,
+  // seed + PRNG state (the replayability handles), counters, and the recent
+  // candidate emissions. Small fixed DOM — rebuilt via setHTML (no-op when
+  // unchanged).
+  const plugEl = document.getElementById('plugins');
+  function updatePlugins(pd) {
+    if (!pd || (!pd.instances.length && !pd.failures.length)) { setHTML(plugEl, ''); return; }
+    const insts = pd.instances.map((i) => {
+      const emits = i.recent_emits.slice(-5).map((e) =>
+        `<b>${fmt(e.payload)}</b>@${(e.t / 1000).toFixed(1)}s`).join(' · ');
+      return `<div class="plug">
+        <span class="head">${i.instance} <span class="asset">· ${i.asset}</span>${i.crashed ? ` <span class="crashed">CRASHED: ${i.crashed.message}</span>` : ''}</span>
+        <span class="meta">seed <b>${i.seed}</b> · prng <b>${i.prng_state}</b> · ticks <b>${i.ticks}</b> · emitted <b>${i.emitted}</b>${i.publish_rejects ? ` · rejects <b>${i.publish_rejects}</b>` : ''}${i.nonfinite_quarantined ? ` · non-finite <b>${i.nonfinite_quarantined}</b>` : ''} · ${i.state_model} · ${i.determinism}</span>
+        <span class="emits">${[...Object.entries(i.state || {})].map(([k, v]) => `${k}=${fmt(v)}`).join(' ')}${emits ? ` &nbsp;|&nbsp; ${emits}` : ''}</span>
+      </div>`;
+    }).join('');
+    const fails = pd.failures.map((f) =>
+      `<div class="plug"><span class="head"><span class="crashed">NOT RUNNING</span> ${f.file}</span><span class="meta">${f.errors.join('; ')}</span></div>`).join('');
+    setHTML(plugEl, `<section class="domain"><h2><span>plugin host</span><span class="n">${pd.instances.length} instances</span></h2>${insts}${fails}</section>`);
+  }
+
   let lastData = null;
   async function tick() {
     try {
@@ -370,6 +408,10 @@
       if (key !== skeletonKey) { skeletonKey = key; buildSkeleton(data); }
       update(data);
       document.body.classList.remove('lost');
+      try {
+        const pr = await fetch('/plugins/state', { cache: 'no-store' });
+        updatePlugins(pr.ok ? await pr.json() : null);
+      } catch { updatePlugins(null); }
     } catch {
       document.body.classList.add('lost');
     }
