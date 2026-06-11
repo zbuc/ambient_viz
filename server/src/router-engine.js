@@ -2,8 +2,10 @@
 //
 // RATE_CONTROL execution semantics from ROUTER_IR.md: an accepted bus STATE
 // packet immediately evaluates its downstream nodes, in the compiled
-// topological order; everything in the 4A op set is a pure function, so the
-// re-entrant evaluation is hazard-free.
+// topological order. Everything outside the declared stateful set (rule 4 —
+// here, phase 5's Smooth) is a pure function, so the re-entrant evaluation
+// is hazard-free; Smooth holds its filter memory in the engine's node-state
+// store and is timestamp-driven (no control tick).
 //
 // One rule the spec implies but the implementation must state: the engine
 // NEVER reacts to its own writes (source_id match). In-process, a graph whose
@@ -17,13 +19,21 @@
 
 const { fromValue } = require('./bus');
 
-// op -> pure evaluation (the 4B set; extended alongside graph.js DEPS).
-// `output` is handled in _evaluate (it is a side effect, not a value).
+// op -> evaluation (the 4B set + phase-5 Smooth; extended alongside graph.js
+// DEPS). `output` is handled in _evaluate (it is a side effect, not a value).
 // Contract shared by every evaluator: any undefined operand -> undefined
 // (the value hasn't arrived; Outputs stay silent), and rule 13 (ROUTER_IR.md)
 // — never emit NaN/Inf; degenerate parameterizations step, they don't poison.
+// Evaluators receive (node, values, ctx); ctx carries the engine clock and
+// the declared-stateful-node store (rule 4: state lives ONLY there).
 
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
+
+// Smooth's Δt clamp (ROUTER_IR.md "Execution semantics": a late, reordered,
+// or bad-clock packet must not produce a negative or ten-minute filter
+// step). 500 ms matches the legacy browser EMA's per-frame dt clamp, so the
+// migrated filter degrades the same way across stalls.
+const SMOOTH_DT_MAX_MS = 500;
 
 // Curve easings over normalized u in [0,1].
 const EASE = {
@@ -87,6 +97,37 @@ const EVAL = {
     return outMin + (outMax - outMin) * e;
   },
 
+  // Smooth ONE_POLE in RATE_CONTROL is TIMESTAMP-DRIVEN (ROUTER_IR.md,
+  // "Execution semantics"): no tick means no fixed dt, so the coefficient is
+  // the dt-aware α = 1 − e^(−Δt/τ), Δt taken from the engine clock at
+  // evaluation (== the triggering packet's arrival; virtual time in the sim).
+  // The first sample SEEDS the filter (no step up from a phantom zero), and
+  // Δt = 0 (a same-millisecond burst) is a no-op rather than the legacy
+  // browser's snap-to-raw — bursts smooth through instead of teleporting.
+  // Between packets the filter HOLDS: arrival-driven semantics, stated in the
+  // phase-5 plan entry (the legacy per-frame EMA keeps converging on a still
+  // signal; the bounded divergence is the comparator's lag/eps allowance).
+  smooth: (node, values, ctx) => {
+    const x = values.get(node.def.input);
+    if (x === undefined) return undefined;
+    const now = ctx.now();
+    let st = ctx.state.get(node.id);
+    if (!st) {
+      st = { y: x, t: now };
+      ctx.state.set(node.id, st);
+      return st.y;
+    }
+    const dt = Math.min(SMOOTH_DT_MAX_MS, Math.max(0, now - st.t));
+    st.t = now;
+    if (dt > 0) {
+      // Rule 13 structural guard: commit only a finite step, so one poisoned
+      // computation can never corrupt the filter memory permanently.
+      const y2 = st.y + (x - st.y) * (1 - Math.exp(-dt / node.def.timeConstantMs));
+      if (Number.isFinite(y2)) st.y = y2;
+    }
+    return st.y;
+  },
+
   combine: (node, values) => {
     const xs = [];
     for (const id of node.def.inputs) {
@@ -116,6 +157,12 @@ class GraphEngine {
     this.published = 0;
     this.publishRejects = 0;
     this.nonfiniteDropped = 0; // rule 13: poisoned samples quarantined, counted
+    // The declared-stateful-node store (rule 4) + the engine clock the
+    // timestamp-driven evaluators read. bus.nowMono is the ONE clock the
+    // bridge already injects virtually in the sim — borrowing it keeps every
+    // stateful node deterministic under replay for free.
+    this.nodeState = new Map();
+    this._ctx = { now: () => this.bus.nowMono(), state: this.nodeState };
     // Const nodes are value sources with no arrival: seed them up front so
     // they are readable the moment a live dep fires their consumers.
     for (const node of compiled.nodes.values()) {
@@ -167,7 +214,7 @@ class GraphEngine {
         if (!rec.accepted) this.publishRejects += 1;
         else if (this.tap) this.tap(node.def.target, v);
       } else {
-        const v = EVAL[node.op](node, this.values);
+        const v = EVAL[node.op](node, this.values, this._ctx);
         // Rule 13 egress: a node must emit finite values; a poisoned result is
         // quarantined (previous value holds) rather than propagated.
         if (typeof v === 'number' && !Number.isFinite(v)) { this.nonfiniteDropped += 1; continue; }

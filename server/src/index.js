@@ -78,23 +78,25 @@ try {
 busAdapter = attachBusAdapter({ bus: orreryBus, inputBus });
 console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch})`);
 
-// The compiled router graph (migration phase 4, complete): it OWNS
-// fx.tape.failure at the sensor rung (300) and the MIDI adapter consumes
-// the RESOLVED value — CC 23 IS the graph's output; the legacy ramp was
-// deleted in 4F, so rollback is artifact-level (redeploy the previous
-// release). A graph load failure now silences the tape effect entirely —
-// the catch below is correspondingly loud.
-// Its writes are tapped into the capture stream (`bus_tx`) so any recorded
-// session carries the live graph output for offline diffing
-// (tools/sim/validate-tape.js compares it against the simulated graph and
-// the captured CC 23). Failure to load degrades loudly to no-router — same
-// doctrine as the registry above.
-let routerEngine = null;
+// The compiled router graphs (phase 4 tape cutover, phase 5 visualizer
+// mappings): ONE GRAPH FILE PER MAPPING under manifest/graphs/, each running
+// as its own engine over the shared bus, so a mapping ships, rolls back, and
+// is deleted independently.
+//   - tape-failure.json OWNS fx.tape.failure @300 — CC 23 IS its output (the
+//     legacy ramp died in 4F; rollback is artifact-level).
+//   - viz-twist.json publishes fx.viz.twist_gain @300 (sole writer) — the
+//     kiosk page consumes it behind the phase-5 `twist` migration_flag while
+//     the legacy in-browser ramp remains the incumbent A/B side.
+// Every engine's writes are tapped into the capture stream (`bus_tx`) so a
+// recorded session carries each live graph output for offline diffing
+// (tools/sim/validate-tape.js, validate-twist.js). A graph that fails to
+// compile degrades loudly to not-running WITHOUT taking the other graphs
+// down — same doctrine as the registry above.
+const routerEngines = [];
 try {
-  const { compileGraph } = require('./router-graph');
+  const { loadGraphDir } = require('./router-graph');
   const { GraphEngine } = require('./router-engine');
-  const graphPath = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest', 'graphs', 'tape-failure.json');
-  const graphJson = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+  const graphsDir = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest', 'graphs');
   const compileOpts = { instanceId: 'main' };
   if (registry) {
     compileOpts.declaredPaths = new Set();
@@ -103,18 +105,32 @@ try {
     }
     compileOpts.roles = new Map(registry.policy.roles.map((r) => [r.name, r]));
   }
-  const compiled = compileGraph(graphJson, compileOpts);
-  if (!compiled.ok) throw new Error(compiled.errors.join('; '));
-  for (const w of compiled.warnings) console.warn(`orrery router WARN: ${w}`);
-  routerEngine = new GraphEngine({
-    compiled,
-    bus: orreryBus,
-    sourceId: 'spiffe://pain-material.local/bridge/router',
-    tap: (target, value) => capture.event('bus_tx', { path: target, value }),
-  });
-  routerEngine.start();
-  console.log(`orrery router: LIVE — ${compiled.nodes.size} nodes from ${path.basename(graphPath)}, `
-    + 'fx.tape.failure @300 drives CC 23 via the resolved-value binding (sole writer since 4F)');
+  const { graphs, failures } = loadGraphDir(graphsDir, compileOpts);
+  for (const f of failures) {
+    console.error(`orrery router: ${f.file} NOT RUNNING (${f.errors.join('; ')})`
+      + (f.file === 'tape-failure.json'
+        ? ' — CC 23 (tape failure) WILL NOT MOVE; no legacy fallback since 4F.'
+        : ' — its output paths stay silent.')
+      + ' Fix the graph/manifests or redeploy the previous release.');
+  }
+  for (const g of graphs) {
+    for (const w of g.compiled.warnings) console.warn(`orrery router WARN [${g.file}]: ${w}`);
+    const engine = new GraphEngine({
+      compiled: g.compiled,
+      bus: orreryBus,
+      sourceId: 'spiffe://pain-material.local/bridge/router',
+      tap: (target, value) => capture.event('bus_tx', { path: target, value }),
+    });
+    engine.start();
+    routerEngines.push({ file: g.file, engine });
+    const sinks = g.compiled.outputs
+      .map((id) => { const o = g.compiled.nodes.get(id).def; return `${o.target}@${o.priority || 0}`; })
+      .join(', ');
+    console.log(`orrery router: LIVE — ${g.compiled.nodes.size} nodes from ${g.file} -> ${sinks}`);
+  }
+  if (!graphs.length) {
+    console.error('orrery router: NO GRAPHS RUNNING — every graph-driven mapping (CC 23 tape, viz twist) is silent.');
+  }
 } catch (e) {
   console.error(`orrery router: NOT RUNNING (${e.message}) — CC 23 (tape failure) WILL NOT MOVE; `
     + 'no legacy fallback since 4F. Fix the graph/manifests or redeploy the previous release.');

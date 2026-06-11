@@ -1,0 +1,22 @@
+{
+  "schema": "router.v1",
+  "nodes": [
+    { "id": "d",    "rateDomain": "RATE_CONTROL", "input": { "path": "sensor.door.distance_cm" } },
+    { "id": "near", "rateDomain": "RATE_CONTROL", "input": { "path": "sensor.door.near_cm" } },
+    { "id": "far",  "rateDomain": "RATE_CONTROL", "input": { "path": "sensor.door.far_cm" } },
+
+    { "id": "d_smooth", "rateDomain": "RATE_CONTROL",
+      "smooth": { "input": "d", "kind": "ONE_POLE", "timeConstantMs": 250 } },
+
+    { "id": "nearness", "rateDomain": "RATE_CONTROL",
+      "normalize": { "input": "d_smooth", "lo": "near", "hi": "far", "invert": true } },
+
+    { "id": "gain", "rateDomain": "RATE_CONTROL",
+      "curve": { "input": "nearness", "kind": "EASE_IN_QUAD",
+                 "inMin": 0, "inMax": 1, "outMin": 0, "outMax": 1, "clamp": true } },
+
+    { "id": "twist_out", "rateDomain": "RATE_CONTROL",
+      "output": { "input": "gain", "target": "fx.viz.twist_gain", "shape": "STATE",
+                  "priority": 300, "authorityRole": "router" } }
+  ]
+}

@@ -4267,6 +4267,28 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   window.AMBIENT_INPUTS_BUS = busState;
   if (FEED === 'bus') window.AMBIENT_INPUTS = busState;
 
+  // ── migration_flag: twist (legacy | bus) — MIGRATION_PLAN.md phase 5 ──────
+  // Which twistGain multiplies maxTwistDeg in applyAutomation: the legacy
+  // in-browser ramp (incumbent) or the router graph's fx.viz.twist_gain.
+  // BOTH are computed every tick regardless (shadow), and the twist_trace
+  // ring below carries the paired A/B into every capture snapshot. Cutover =
+  // append &twist=bus to the kiosk URL; rollback = drop it. delete_by: the
+  // phase-5 distance→twist cleanup PR (with the legacy ramp).
+  const TWIST_SOURCE = new URLSearchParams(location.search).get('twist') === 'bus' ? 'bus' : 'legacy';
+  window.AMBIENT_FLAGS = { feed: FEED, twist: TWIST_SOURCE };
+
+  // fx.* router-graph outputs land on their own surface (they have no legacy
+  // SSE name to map to), keyed by path tail: fx.viz.twist_gain ->
+  // AMBIENT_FX['viz.twist_gain']. Assembled from the always-on bus shadow
+  // feed below, regardless of either flag.
+  const fxState = Object.create(null);
+  window.AMBIENT_FX = fxState;
+
+  // Paired twist A/B samples ({t, d, legacy, bus}) pushed by applyAutomation
+  // at <= 4 Hz on change; postSnapshot drains it. Ring-capped so an
+  // uncaptured session never grows it unboundedly.
+  window.__twistTrace = [];
+
   // Song position from the Daisy (CDC -> `song_position` topic, ~20 Hz). Capture
   // the local receive time so the frame loop can interpolate between updates and
   // hard-snap on a backward jump (loop wrap / reconnect rebases the basis).
@@ -4324,6 +4346,10 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
           const st = pkt.state;
           if (!st || !st.path) return;
           const v = fromValue(st.value);
+          // Sole-writer fx.* paths: the packet payload IS the resolved value.
+          // The moment a second writer lands on fx.viz.*, this feed must
+          // start carrying resolved values before anything consumes it.
+          if (st.path.startsWith('fx.')) { fxState[st.path.slice(3)] = v; return; }
           if (st.path in touchBit) {
             if (v) touchMask |= 1 << touchBit[st.path];
             else touchMask &= ~(1 << touchBit[st.path]);
@@ -4357,8 +4383,13 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
           page_load_id: pageLoadId,
           t_page_ms: (typeof performance !== 'undefined' ? performance.now() : 0),
           feed: FEED, // migration_flag: feed — which object the visualizer reads
+          twist: TWIST_SOURCE, // migration_flag: twist — which gain multiplies maxTwistDeg
           inputs: state, // __meta is non-enumerable, so this is just the input map
           inputs_bus: busState, // the shadow feed: every capture carries the A/B
+          inputs_fx: fxState, // router-graph outputs as last seen by the page
+          // The paired twist A/B since the last snapshot (drained here so
+          // samples are recorded exactly once).
+          twist_trace: window.__twistTrace.length ? window.__twistTrace.splice(0) : null,
           meta: { connected: meta.connected, lastEventAt: meta.lastEventAt, error: meta.error },
           song: song.have ? { pos: song.pos, wall: song.wall } : null,
         }),
@@ -5681,6 +5712,14 @@ async function init() {
   let _smoothedDistance = null;
   let _lastDistanceSmoothT = 0;
 
+  // Phase-5 twist A/B trace state (paired legacy/bus gain samples pushed
+  // into window.__twistTrace for the capture snapshots). On-change, <= 4 Hz.
+  const TWIST_TRACE_MIN_MS = 250;
+  const TWIST_TRACE_CAP = 256;
+  let _twistTraceLastMs = 0;
+  let _twistTraceLastLegacy = null;
+  let _twistTraceLastBus = null;
+
   // Visible debug overlay (top-right) when URL has ?debug=1. Created here
   // before applyAutomation so the function's closure binding resolves at
   // call time. Survives lite mode (CSS hides body.lite-kiosk overlays but
@@ -5707,11 +5746,20 @@ async function init() {
   function applyAutomation(t) {
     let dirty = false;
     for (const k in _automationBatch) delete _automationBatch[k];
-    // VL53L1X distance gain: 0.0 close (≤75cm), 1.0 far (≥100cm), quadratic
-    // ease-in between. Multiplies the authored maxTwistDeg before posting
-    // to the worker — slider/lane authoring still sees the ceiling value.
-    // When no SSE distance is published (sensor offline / not yet wired),
-    // gain stays 1 so the visualizer behaves as if the sensor weren't there.
+    // Distance→twist gain, REVERSED geometry (see the block comment above):
+    // 1.0 at/within NEAR (max twist), 0.0 at/beyond FAR, (1-x)² between.
+    // Multiplies the authored maxTwistDeg before posting to the worker —
+    // slider/lane authoring still sees the ceiling value. When no distance is
+    // published (sensor offline / not yet wired), gain stays 1 so the
+    // visualizer behaves as if the sensor weren't there.
+    //
+    // migration_flag: twist (MIGRATION_PLAN.md phase 5) — this in-browser
+    // ramp is the LEGACY side; the router graph publishes the candidate as
+    // fx.viz.twist_gain (graphs/viz-twist.json: Smooth 250ms → Normalize
+    // invert → EASE_IN_QUAD — the same math, bridge-hosted). Both are
+    // computed every tick; ?twist=bus applies the graph's. delete_by: the
+    // phase-5 twist cleanup PR (this ramp + the smoothing state above die
+    // there).
     let twistGain = 1;
     // dt-based EMA so the smoothing tau is wall-clock-correct even if
     // applyAutomation runs at varying frame rates or skips a tick.
@@ -5740,6 +5788,34 @@ async function init() {
       } else {
         const x = (d - nearCm) / (farCm - nearCm);
         twistGain = (1 - x) * (1 - x);
+      }
+    }
+    // Phase-5 A/B: the router graph's candidate gain from the always-on bus
+    // shadow feed. Router-silent semantics mirror legacy sensor-offline
+    // semantics (no published gain yet -> 1). The flag picks which side
+    // multiplies maxTwistDeg; the paired sample feeds the snapshot trace.
+    const legacyTwistGain = twistGain;
+    const busTwistGainRaw = window.AMBIENT_FX && window.AMBIENT_FX['viz.twist_gain'];
+    const busTwistGain = (typeof busTwistGainRaw === 'number' && isFinite(busTwistGainRaw))
+      ? busTwistGainRaw : 1;
+    const _twistFlag = window.AMBIENT_FLAGS && window.AMBIENT_FLAGS.twist;
+    if (_twistFlag === 'bus') twistGain = busTwistGain;
+    const _trace = window.__twistTrace;
+    if (_trace) {
+      const nowMs = performance.now();
+      if (nowMs - _twistTraceLastMs >= TWIST_TRACE_MIN_MS
+          && (legacyTwistGain !== _twistTraceLastLegacy || busTwistGain !== _twistTraceLastBus)) {
+        _twistTraceLastMs = nowMs;
+        _twistTraceLastLegacy = legacyTwistGain;
+        _twistTraceLastBus = busTwistGain;
+        if (_trace.length >= TWIST_TRACE_CAP) _trace.shift();
+        _trace.push({
+          t: Math.round(nowMs),
+          d: (typeof dRaw === 'number') ? Math.round(dRaw * 10) / 10 : null,
+          legacy: Math.round(legacyTwistGain * 10000) / 10000,
+          // null = router silent (absent ≠ 1 — availability is part of the A/B)
+          bus: (typeof busTwistGainRaw === 'number') ? Math.round(busTwistGainRaw * 10000) / 10000 : null,
+        });
       }
     }
     let resolvedBitmap = null;
@@ -5792,6 +5868,9 @@ async function init() {
       lastApplied: _lastEffectiveBitmap,
       bitmapHeightVar: bitmapHeight,
       twistGain: twistGain,
+      twistSource: _twistFlag === 'bus' ? 'bus' : 'legacy',
+      twistGainLegacy: legacyTwistGain,
+      twistGainBus: (typeof busTwistGainRaw === 'number') ? busTwistGainRaw : null,
       nearCm: nearCm,
       farCm: farCm,
     };
@@ -5809,7 +5888,9 @@ async function init() {
         ' bh=' + bitmapHeight +
         ' near=' + nearCm.toFixed(0) +
         ' far=' + farCm.toFixed(0) +
-        ' tg=' + twistGain.toFixed(2) +
+        ' tg=' + twistGain.toFixed(2) + '(' + (_twistFlag === 'bus' ? 'bus' : 'leg') + ')' +
+        ' tgL=' + legacyTwistGain.toFixed(2) +
+        ' tgB=' + (typeof busTwistGainRaw === 'number' ? busTwistGainRaw.toFixed(2) : '-') +
         ' lvl=' + ((window.__level || 0).toFixed(3));
     }
   }

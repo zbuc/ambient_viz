@@ -17,6 +17,9 @@
 
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
 const routerGen = require('./gen/router');
 const { globToRegex } = require('./registry');
 
@@ -25,10 +28,13 @@ const SHAPE_STATE = 1;  // router.v1 Output.Shape.STATE
 
 const OP_KEYS = ['input', 'const', 'curve', 'scale', 'smooth', 'gate', 'combine', 'select',
   'delay', 'member', 'output', 'envelope', 'trigger', 'latch', 'normalize'];
-// The 4B compiler surface (MIGRATION_PLAN.md): the tape-failure mapping's op
-// set. Stateful/temporal nodes and Select/Gate stay compile errors until the
-// phase that needs them.
-const IMPLEMENTED = new Set(['input', 'const', 'curve', 'scale', 'combine', 'normalize', 'output']);
+// The compiler surface (MIGRATION_PLAN.md): the 4B tape-failure op set plus
+// phase 5's Smooth (ONE_POLE only — the viz-twist mapping migrates the legacy
+// browser EMA). Everything else stays a compile error until the phase that
+// needs it.
+const IMPLEMENTED = new Set(['input', 'const', 'curve', 'scale', 'smooth', 'combine', 'normalize', 'output']);
+
+const SMOOTH_ONE_POLE = 1; // router.v1 Smooth.Kind.ONE_POLE
 
 const COMBINE_ARITY_CAP = 16; // rule 6: bounded fan-in, over-cap is an error
 
@@ -39,6 +45,7 @@ const DEPS = {
   const: () => [],
   scale: (op) => [op.input],
   curve: (op) => [op.input],
+  smooth: (op) => [op.input],
   normalize: (op) => [op.input, op.lo, op.hi],
   combine: (op) => op.inputs || [],
   output: (op) => [op.input],
@@ -109,6 +116,17 @@ function compileGraph(graphJson, { declaredPaths = null, roles = null, instanceI
       if (c.kind === 6 && (!c.lut || c.lut.length < 2)) errors.push(`curve "${node.id}": LUT needs >= 2 points`);
       if (![c.inMin, c.inMax, c.outMin, c.outMax].every(Number.isFinite)) {
         errors.push(`curve "${node.id}": in/out range must be finite`);
+      }
+    } else if (node.op === 'smooth') {
+      // Phase 5 implements ONE_POLE only; SLEW/ONE_EURO arrive with the first
+      // mapping that needs them. In RATE_CONTROL the filter is
+      // timestamp-driven (ROUTER_IR.md "Execution semantics"), so the time
+      // constant must be a real duration.
+      if (node.def.kind !== SMOOTH_ONE_POLE) {
+        errors.push(`smooth "${node.id}": only ONE_POLE is implemented in phase 5 (kind ${node.def.kind})`);
+      }
+      if (!(Number.isFinite(node.def.timeConstantMs) && node.def.timeConstantMs > 0)) {
+        errors.push(`smooth "${node.id}": time_constant_ms must be finite and > 0`);
       }
     } else if (node.op === 'normalize') {
       for (const ref of ['input', 'lo', 'hi']) {
@@ -187,4 +205,31 @@ function compileGraph(graphJson, { declaredPaths = null, roles = null, instanceI
   return { ok: errors.length === 0, errors, warnings, nodes, topo, inputsByPath, outputs, dependents };
 }
 
-module.exports = { compileGraph, RATE_CONTROL, SHAPE_STATE };
+// Load + compile every graph in a directory (phase 5: ONE GRAPH FILE PER
+// MAPPING, so each mapping ships, cuts over, rolls back, and is deleted
+// independently — the per-mapping migration_flag doctrine made physical).
+// Deterministic order (sorted filenames); one broken graph never blocks the
+// rest — the caller decides how loudly each failure degrades.
+function loadGraphDir(dir, compileOpts = {}) {
+  const graphs = [];
+  const failures = [];
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+  } catch (e) {
+    return { graphs, failures: [{ file: path.basename(dir), errors: [`graph dir unreadable: ${e.message}`] }] };
+  }
+  for (const file of files) {
+    try {
+      const json = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+      const compiled = compileGraph(json, compileOpts);
+      if (compiled.ok) graphs.push({ file, compiled });
+      else failures.push({ file, errors: compiled.errors });
+    } catch (e) {
+      failures.push({ file, errors: [e.message] });
+    }
+  }
+  return { graphs, failures };
+}
+
+module.exports = { compileGraph, loadGraphDir, RATE_CONTROL, SHAPE_STATE };

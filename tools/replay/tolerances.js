@@ -54,6 +54,33 @@ module.exports = {
     24: { name: 'freeze',       eps_value: 1, window_ms: 250, transient_max_ms: 150, transient_budget: 5 },
   },
 
+  // --- Router-graph candidate trajectories (phase 5) ------------------------
+  // The "derived/smoothed value" comparator row: tolerance PLUS a phase/
+  // latency bound. The candidate is the bridge-hosted graph; the reference is
+  // the legacy in-browser math reconstructed frame-clocked from the capture.
+  // The two legitimately differ in sampling discipline — the browser EMA
+  // keeps converging every frame (and holds through SSE transport delay),
+  // the arrival-driven graph filter steps once per packet and HOLDS between
+  // packets (ROUTER_IR.md execution semantics) — so a grid point passes if
+  // the values agree within eps_abs at the same instant OR within lag_ms
+  // (phase allowance). Sustained divergence beyond both is a REGRESSION.
+  // transient_*: the SETTLE-HOLD class (measured on the cutover golden,
+  // 2026-06-11). When the bridge dedupes a stilled sensor, packets stop: the
+  // graph's arrival-driven Smooth freezes mid-convergence while the
+  // browser's per-frame EMA settles to the held target, so a brief
+  // boundary-sized residual (legacy 1.0 vs graph 0.95 at the near endpoint)
+  // persists until the next packet. Observed: runs <= 150 ms, err <= 0.109,
+  // 0.33% of grid points. A violating run is excused if it lasts <=
+  // transient_max_ms with err <= transient_eps_abs, and the excused total
+  // stays under transient_grid_frac_max — sustained divergence (a logic
+  // difference) blows through all three immediately.
+  derived: {
+    'fx.viz.twist_gain': {
+      eps_abs: 0.05, lag_ms: 250, grid_ms: 50,
+      transient_eps_abs: 0.15, transient_max_ms: 400, transient_grid_frac_max: 0.01,
+    },
+  },
+
   // --- Daisy note events (the `serial_tx` stream, type 'note_on') -----------
   // Classified via the adjacent capture `trigger` event (reason recorded at
   // strike time). Deterministic classes must correspond 1:1 within window_ms;

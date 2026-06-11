@@ -378,6 +378,60 @@ then the **MPR121 tint envelopes** (twelve explicit chains; `Replicated` only
 if its absence actually hurts). Each mapping is a `migration_flag` with
 `delete_by` its own cleanup PR. `applyAutomation()` shrinks until empty.
 
+> **Status (2026-06-11): distance→twist SHADOW LANDED — kiosk A/B session
+> pending.** Design decisions, stated for the record:
+>
+> - **Shadow shape.** For visualizer mappings the legacy side lives *inside
+>   the consumer* (applyAutomation) and never publishes, so shadow-by-priority
+>   degenerates to the phase-2 pattern: the graph is the **sole writer** of a
+>   new path (`fx.viz.twist_gain` @300, role `router` — no policy change) and
+>   the **browser holds the A/B**: both gains are computed every tick, a
+>   `migration_flag: twist (legacy | bus)` (`?twist=bus`, default legacy)
+>   picks which one multiplies `maxTwistDeg`, and every capture snapshot
+>   carries paired `twist_trace` samples (`{t, d, legacy, bus}`, on-change
+>   ≤ 4 Hz). Invariant 3 is honored by the inspector (sole-writer status) +
+>   the trace.
+> - **Boundary.** The graph owns the *mapping* — Smooth(ONE_POLE 250 ms) →
+>   Normalize(live near/far, `invert: true` — the visualizer's half of the
+>   `ce577ea` reversal debt now lives in the graph artifact) →
+>   Curve(EASE_IN_QUAD) — i.e. gain 0..1. The multiply by the *authored*
+>   `maxTwistDeg` stays in the browser host (adapter conduct, like writeCc's
+>   quantize): no `timeline.*` publish needed for this mapping, so the
+>   `Combine MUL` directorial clamp waits for the mapping that actually
+>   needs timeline values on the bus.
+> - **Smooth is the phase-5 op addition** (spec'd in ROUTER_IR.md; ONE_POLE
+>   only, SLEW/ONE_EURO stay compile errors). RATE_CONTROL Smooth is
+>   timestamp-driven per the spec (α = 1−e^(−Δt/τ), Δt clamped [0, 500 ms],
+>   seed on first sample) off the bus clock — virtual-clock deterministic in
+>   the sim. Consequence, measured and declared: when the bridge dedupes a
+>   stilled sensor the graph filter HOLDS mid-convergence while the legacy
+>   per-frame EMA settles — the SETTLE-HOLD transient class in
+>   `tolerances.js → derived` (eps 0.05 + 250 ms lag; transient runs
+>   ≤ 400 ms at err ≤ 0.15, ≤ 1% of grid points; observed on the cutover
+>   golden: 6 runs, ≤ 150 ms, max 0.109, 0.33%).
+> - **One graph file per mapping** (`manifest/graphs/*.json`, bridge scans
+>   the dir, one engine per graph): ship/cut/delete each mapping
+>   independently; a broken graph degrades loudly alone.
+>
+> **Proof so far (offline gate, `tools/sim/validate-twist.js`):** capture
+> inputs → sim (manifests + policy + viz-twist graph) → `fx.viz.twist_gain`
+> trajectory, compared against a frame-clocked model of the legacy browser
+> math over the capture's `sse_out` stream — **MATCH on all three goldens**
+> (cutover: lag-max err 0.062–0.109 within the declared class; mock 63-min:
+> MATCH incl. the far=50 conditioning reject). Bridge replay of the cutover
+> golden through the two-graph boot: all phase-4 lanes unchanged. 50/50
+> tests.
+>
+> **Remaining for distance→twist:** (1) a kiosk session with the shadow live
+> — judge `bus_tx` via validate-twist's live lane and the browser A/B via
+> `tools/replay/twist-ab.js` (all MATCH required); (2) cutover = `&twist=bus`
+> on the kiosk URL, soak one full session; (3) cleanup PR deletes the legacy
+> in-browser ramp + EMA state + the flag (the snapshot trace stays until the
+> phase exit). Then **distance→bitmap** (same template; harmonic interp needs
+> a `Curve LUT` or a second Normalize/Scale chain — decide when cut), then
+> the **tint envelopes** (12 chains; the AR envelope wants `Envelope` —
+> implement from spec like Smooth, or hold browser-side; decide then).
+
 **Boundary (keeps clock work out of this phase):** phase 5 consumes
 `timeline.*` as **ordinary STATE only** (the `Combine MUL` directorial clamp
 needs values, not time semantics). It must **not** depend on `clock.*`

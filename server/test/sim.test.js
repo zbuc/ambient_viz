@@ -37,7 +37,7 @@ test('compile: rejections', () => {
     [{ schema: 'router.v1', nodes: [{ id: 'a', rateDomain: 'RATE_CONTROL' }] }, /exactly one op/],
     [{ schema: 'router.v1', nodes: [OUT('b', 'ghost', 's.x')] }, /unknown node "ghost"/],
     [{ schema: 'router.v1', nodes: [{ id: 'a', rateDomain: 'RATE_RENDER_FRAME', input: { path: 's.x' } }] }, /RATE_CONTROL/],
-    [{ schema: 'router.v1', nodes: [{ id: 'a', rateDomain: 'RATE_CONTROL', smooth: { input: 'a', kind: 'ONE_POLE' } }] }, /not implemented in 4A/],
+    [{ schema: 'router.v1', nodes: [{ id: 'a', rateDomain: 'RATE_CONTROL', envelope: { input: 'a', mode: 'ATTACK_RELEASE' } }] }, /not implemented in 4A/],
     [{ schema: 'router.v1', nodes: [IN('a', 'audio.*.bass')] }, /wildcards/],
     [{ schema: 'router.v1', nodes: [IN('a', '_meta.s.rate_hz')] }, /_meta/],
     [{ schema: 'router.v1', nodes: [IN('a', 's.x'), { id: 'b', rateDomain: 'RATE_CONTROL', output: { input: 'a', target: 's.x', shape: 'EVENT', priority: 1, authorityRole: 'r' } }] }, /STATE outputs/],

@@ -199,3 +199,150 @@ test('4C ingest-boundary conditioning: defaults writer + invalid claims never re
 
   adapter.stop(); bus.stop();
 });
+
+// ── phase 5: Smooth (ONE_POLE) — timestamp-driven in RATE_CONTROL ───────────
+
+const { loadGraphDir } = require('../src/router-graph');
+
+// run() with a controllable engine clock: feeds are [path, value, tMs] and
+// the bus's injected nowMono (the one clock the engine reads) follows them.
+function runClocked(nodes, feeds) {
+  const compiled = compileGraph({ schema: 'router.v1', nodes }, { roles: ROLES });
+  assert.ok(compiled.ok, compiled.errors.join('; '));
+  const clock = { t: 0 };
+  const bus = new OrreryBus({
+    nowMono: () => clock.t,
+    bootEpochFile: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'smooth-')), 'epoch'),
+  });
+  bus.stop();
+  const out = [];
+  bus.on('packet', (rec) => {
+    if (rec.accepted && rec.pkt.state && rec.pkt.source.sourceId === SRC) {
+      out.push(require('../src/bus').fromValue(rec.pkt.state.value));
+    }
+  });
+  const engine = new GraphEngine({ compiled, bus, sourceId: SRC });
+  engine.start();
+  for (const [p, v, t] of feeds) {
+    clock.t = t;
+    bus.publishState(p, v, { sourceId: 'spiffe://test/pump', priority: 300 });
+  }
+  engine.stop();
+  return out;
+}
+
+const SMOOTH = (id, input, tau) => ({ id, rateDomain: 'RATE_CONTROL', smooth: { input, kind: 'ONE_POLE', timeConstantMs: tau } });
+
+test('smooth: seeds on first sample, then dt-aware one-pole steps', () => {
+  const nodes = [IN('d', 's.d'), SMOOTH('sm', 'd', 250), OUT('o', 'sm')];
+  const out = runClocked(nodes, [['s.d', 100, 0], ['s.d', 200, 100], ['s.d', 200, 200]]);
+  const a = 1 - Math.exp(-100 / 250);
+  const y1 = 100 + (200 - 100) * a;
+  const y2 = y1 + (200 - y1) * a;
+  assert.strictEqual(out[0], 100); // seed, no step up from a phantom zero
+  assert.ok(Math.abs(out[1] - y1) < 1e-12, `${out[1]} != ${y1}`);
+  assert.ok(Math.abs(out[2] - y2) < 1e-12, `${out[2]} != ${y2}`);
+});
+
+test('smooth: two steps toward a held target compose exactly like one (exp additivity)', () => {
+  const nodes = [IN('d', 's.d'), SMOOTH('sm', 'd', 250), OUT('o', 'sm')];
+  const twoSteps = runClocked(nodes, [['s.d', 0, 0], ['s.d', 100, 50], ['s.d', 100, 100]]);
+  const oneStep = runClocked(nodes, [['s.d', 0, 0], ['s.d', 100, 100]]);
+  // Stepping 0->100 at t=50 then holding to t=100 must land exactly where a
+  // single 100 ms step lands — divergence from the per-frame browser EMA
+  // comes only from VALUE changes mid-interval, never from step partitioning.
+  assert.ok(Math.abs(twoSteps[2] - oneStep[1]) < 1e-12, `${twoSteps[2]} != ${oneStep[1]}`);
+});
+
+test('smooth: dt clamps at 500 ms (a stale gap is one bounded step, not a snap)', () => {
+  const nodes = [IN('d', 's.d'), SMOOTH('sm', 'd', 250), OUT('o', 'sm')];
+  const out = runClocked(nodes, [['s.d', 0, 0], ['s.d', 100, 10000]]);
+  const expected = 100 * (1 - Math.exp(-500 / 250)); // dt 10 s -> clamped 500 ms
+  assert.ok(Math.abs(out[1] - expected) < 1e-12, `${out[1]} != ${expected}`);
+});
+
+test('smooth: a same-millisecond burst is a no-op step, not the legacy snap', () => {
+  const nodes = [IN('d', 's.d'), SMOOTH('sm', 'd', 250), OUT('o', 'sm')];
+  const out = runClocked(nodes, [['s.d', 0, 0], ['s.d', 50, 100], ['s.d', 100, 100]]);
+  // The dt=0 packet updates the input store but must not teleport the filter.
+  assert.strictEqual(out[2], out[1]);
+});
+
+test('smooth: rule-13 ingress quarantine holds filter memory across a poisoned sample', () => {
+  const nodes = [IN('d', 's.d'), SMOOTH('sm', 'd', 250), OUT('o', 'sm')];
+  const out = runClocked(nodes, [['s.d', 100, 0], ['s.d', NaN, 100], ['s.d', 100, 200]]);
+  // NaN never enters the graph (engine ingress drops it); the next good
+  // sample steps from intact memory toward an unchanged target.
+  assert.strictEqual(out[0], 100);
+  assert.strictEqual(out[out.length - 1], 100);
+  assert.ok(out.every(Number.isFinite));
+});
+
+test('smooth: compile gates — ONE_POLE only, real time constant required', () => {
+  const bad1 = compileGraph({ schema: 'router.v1', nodes: [IN('d', 's.d'),
+    { id: 'sm', rateDomain: 'RATE_CONTROL', smooth: { input: 'd', kind: 'SLEW', slewPerS: 10 } }, OUT('o', 'sm')] }, { roles: ROLES });
+  assert.ok(!bad1.ok && bad1.errors.some((e) => e.includes('only ONE_POLE')));
+  const bad2 = compileGraph({ schema: 'router.v1', nodes: [IN('d', 's.d'),
+    { id: 'sm', rateDomain: 'RATE_CONTROL', smooth: { input: 'd', kind: 'ONE_POLE' } }, OUT('o', 'sm')] }, { roles: ROLES });
+  assert.ok(!bad2.ok && bad2.errors.some((e) => e.includes('time_constant_ms')));
+});
+
+// ── phase 5: the viz-twist graph end-to-end + the per-mapping graph dir ─────
+
+const MANIFEST_DIR = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest');
+
+test('viz-twist graph: legacy reversed quadratic ramp, live endpoints, smoothed', () => {
+  const graphJson = JSON.parse(fs.readFileSync(path.join(MANIFEST_DIR, 'graphs', 'viz-twist.json'), 'utf8'));
+  const compiled = compileGraph(graphJson, {
+    roles: new Map([['router', { name: 'router', canPublish: ['fx.*'], cannotPublish: [], maxPriority: 300 }]]),
+  });
+  assert.ok(compiled.ok, compiled.errors.join('; '));
+
+  const clock = { t: 0 };
+  const bus = new OrreryBus({ nowMono: () => clock.t, bootEpochFile: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'twist-')), 'epoch') });
+  bus.stop();
+  const out = [];
+  bus.on('packet', (rec) => {
+    if (rec.accepted && rec.pkt.state && rec.pkt.state.path === 'fx.viz.twist_gain') {
+      out.push(require('../src/bus').fromValue(rec.pkt.state.value));
+    }
+  });
+  const engine = new GraphEngine({ compiled, bus, sourceId: SRC });
+  engine.start();
+  const feed = (name, v, t) => { clock.t = t; bus.publishState(name, v, { sourceId: 'spiffe://test/pump', priority: 300 }); };
+  feed('sensor.door.near_cm', 75, 0);
+  feed('sensor.door.far_cm', 170, 0);
+  feed('sensor.door.distance_cm', 122.5, 0);   // seed: exactly mid-span
+  feed('sensor.door.distance_cm', 122.5, 1000); // converged (held target)
+  feed('sensor.door.distance_cm', 75, 2000);    // long gap -> clamped step toward near
+  // Legacy formula: x=(d-near)/(far-near); gain=(1-x)^2. Mid-span -> 0.25.
+  assert.ok(Math.abs(out[0] - 0.25) < 1e-12, `seed gain ${out[0]} != 0.25`);
+  assert.ok(Math.abs(out[1] - 0.25) < 1e-12, 'held target must not drift');
+  // d=75 after a clamped 500 ms step: smoothed = 122.5 + (75-122.5)*(1-e^-2)
+  const sm = 122.5 + (75 - 122.5) * (1 - Math.exp(-500 / 250));
+  const x = (sm - 75) / 95;
+  const expected = (1 - x) * (1 - x);
+  assert.ok(Math.abs(out[2] - expected) < 1e-12, `${out[2]} != ${expected}`);
+  engine.stop();
+});
+
+test('loadGraphDir: every project graph compiles; one broken file degrades alone', () => {
+  const declaredPaths = new Set([
+    'sensor.door.distance_cm', 'sensor.door.near_cm', 'sensor.door.far_cm',
+    'fx.tape.failure', 'fx.viz.twist_gain',
+  ]);
+  const roles = new Map([['router', { name: 'router', canPublish: ['fx.*'], cannotPublish: [], maxPriority: 300 }]]);
+  const real = loadGraphDir(path.join(MANIFEST_DIR, 'graphs'), { declaredPaths, roles });
+  assert.deepStrictEqual(real.failures, []);
+  assert.deepStrictEqual(real.graphs.map((g) => g.file), ['tape-failure.json', 'viz-twist.json']);
+  for (const g of real.graphs) assert.deepStrictEqual(g.compiled.warnings, []);
+
+  // A directory where one graph is broken: the rest still compile.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'graphdir-'));
+  fs.copyFileSync(path.join(MANIFEST_DIR, 'graphs', 'viz-twist.json'), path.join(dir, 'b-good.json'));
+  fs.writeFileSync(path.join(dir, 'a-broken.json'), '{"schema":"router.v1","nodes":[{"id":"x","rateDomain":"RATE_CONTROL","delay":{"input":"x","frames":1}}]}');
+  const mixed = loadGraphDir(dir, { roles });
+  assert.strictEqual(mixed.failures.length, 1);
+  assert.strictEqual(mixed.failures[0].file, 'a-broken.json');
+  assert.deepStrictEqual(mixed.graphs.map((g) => g.file), ['b-good.json']);
+});
