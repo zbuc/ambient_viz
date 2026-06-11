@@ -326,6 +326,30 @@ publisher is flagged. **PM impact:** zero.
 > delete the legacy ramp, the `legacy-tape` module/role, the `tape_cc` flag,
 > and the `ce577ea` reversed-hardcode debt** (direction then lives only in
 > the graph's `invert: true` — flip it there, one artifact).
+>
+> **Status (2026-06-11): SOAK ACCEPTED + 4F COMPLETE — PHASE 4 DONE.** The
+> soak: a 5.4 min live kiosk session (real sensors, touch + freeze traffic,
+> entry bell + toll), accepted by Chris as the gate session. Its verdicts:
+> replay all MATCH except two pre-declared stochastic lanes (industrial
+> timbre roll, toll interval); tape validation MATCH with the live lane
+> exact (**1344 = 1344** changes, `bus_tx` vs sim) — graph == sim == Daisy
+> during a real session. Promoted as
+> `fixtures/golden-cutover-2026-06-11T14-08-29Z-pid2793/`, the first
+> post-cutover golden (CC 23 in it is the graph's output) and the canonical
+> trace for phase 5+. **4F (pure deletion):** the in-process ramp in
+> daisy-position, the `bridge/legacy-tape` identity + `legacy_ramp`
+> role/manifest, and the `tape_cc` flag are gone; the `ce577ea` reversal for
+> CC 23 now lives only in the graph's `invert: true` (the visualizer's two
+> reversed ramps go with their phase-5 mappings). `fx.tape.failure` has one
+> producer (graph @300) and one consumer (the resolved-value binding);
+> near/far locals in daisy-position survive only as trigger-threshold
+> parameters. A router load failure now silences the tape effect — the boot
+> degrade message says so loudly; rollback is artifact-level from here
+> (invariant 4). Re-proof post-deletion: soak golden replayed through the
+> ramp-less bridge — CC 23 MATCH 750/747, CC 24 exact 44/44, live lane
+> MATCH; 42/42 tests. **Next: phase 5** (distance→twist, then
+> distance→bitmap, then the MPR121 tint envelopes — shadow-by-priority per
+> mapping, each its own `migration_flag`).
 
 The public phase is one phase; **internally it lands as six gated
 milestones**, so simulator, compiler, adapter, and arbitration bugs are never

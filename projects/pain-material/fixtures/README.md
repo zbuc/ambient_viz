@@ -100,3 +100,12 @@ re-injects. Capture real or scripted sessions (`tools/replay/smoke-session.js`).
   + 3 entry bells + 2 exit voices; identity sim MATCH; 4B tape validation
   MATCH (1218 predicted / 1220 captured). The real-sensor golden the 4E
   tolerance tuning draws from.
+- **`golden-cutover-2026-06-11T14-08-29Z-pid2793/`** — 5.4 min on the kiosk,
+  real sensors + Daisy + browser (touch + freeze traffic, entry bell, toll);
+  the **4E soak session and the first post-cutover golden**: CC 23 in it was
+  produced by the router graph (sole writer of `fx.tape.failure` since 4F),
+  and it is the first capture carrying `bus_tx` aboard. Verified 2026-06-11:
+  replay (speed 1, through the ramp-less 4F bridge) all MATCH/EXPECTED incl.
+  CC 23 750/747 + CC 24 freeze 44/44 exact; tape validation MATCH with the
+  live lane exact (1344 = 1344 value changes, capture `bus_tx` vs sim). The
+  canonical golden for phase 5+.

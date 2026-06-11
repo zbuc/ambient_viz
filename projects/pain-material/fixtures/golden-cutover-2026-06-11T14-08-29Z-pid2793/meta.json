@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "session_id": "2026-06-11T14-08-29Z-pid2793",
+  "boot_epoch_ms": 1781186909450,
+  "boot_mono_ms": 384.845,
+  "pid": 2793,
+  "node": "v20.19.2",
+  "platform": "linux/arm64",
+  "git_sha": "b3d7b95c5111c0d0fdb85fbf5f4955c1b3401ccb",
+  "env": {
+    "MOTION_PRESENCE": "1",
+    "DAISY": "1",
+    "CAPTURE": "1"
+  },
+  "config": {
+    "port": 8080,
+    "host": "0.0.0.0",
+    "mock": false,
+    "ingest_token": ""
+  }
+}
