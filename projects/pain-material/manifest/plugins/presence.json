@@ -1,0 +1,17 @@
+{
+  "instance": "presence",
+  "seed": 599479,
+  "authorityRole": "plugin_host",
+  "priority": 300,
+  "binding": {
+    "asset": "presence_choreography.v1",
+    "inputs": {
+      "occupied": "derived.room.occupied",
+      "distance_cm": "sensor.door.distance_cm",
+      "velocity_cm_s": "sensor.door.velocity_cm_s",
+      "far_cm": "sensor.door.far_cm",
+      "motion": "sensor.room.motion"
+    },
+    "params": { "motion_presence": 1 }
+  }
+}

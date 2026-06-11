@@ -56,6 +56,15 @@
 //     never packet payloads); EVENT inputs receive the drained queue since
 //     the last invocation — possibly empty, possibly several, never a
 //     collapsed latest (the contract's no-coalescing clause).
+//   - ARRIVAL-DRIVEN DELIVERY (phase 6.1, Chris's ruling): a plugin that
+//     implements onInput(port, value, ctx) is additionally invoked
+//     SYNCHRONOUSLY on every accepted STATE packet for a bound input port,
+//     in bus arrival order, with the post-packet RESOLVED value — the same
+//     activation rule as the graph engine. This exists because choreography
+//     like the bell's consecutive-fresh-sample approach gate counts SAMPLES;
+//     a 250 ms ZOH tick would collapse sensor bursts and count differently
+//     than the legacy onChange path. The tick still drives self-scheduled
+//     time; onInput never fires for the host's own publishes.
 //
 // Crash discipline (contract: a crash drops outputs to failsafe): a throwing
 // tick disables the instance — EVENT outputs simply stop; STATE outputs are
@@ -107,7 +116,7 @@ function mulberry32(seed) {
 // asset.vN -> { manifest (codec-validated), create }. One contract, many
 // impls is the eventual shape; this registry holds the bridge's JS impls.
 function builtinAssets() {
-  const modules = [require('./plugins/toy-timer')];
+  const modules = [require('./plugins/toy-timer'), require('./plugins/presence-choreography')];
   const assets = new Map();
   for (const mod of modules) {
     const manifest = pluginGen.PluginManifest.fromJSON(mod.manifest); // schema-of-record validation
@@ -372,6 +381,12 @@ function createPluginHost({
       // Publishes carry the HOST's module identity (the allowlisted stableId);
       // instances are host-internal — per-instance identity would need its own
       // manifest/allowlist entry, which nothing requires yet.
+      // Vec payloads (e.g. a note_on [ch, note, vel]) get the same rule-13
+      // quarantine, element-wise.
+      if (Array.isArray(payload) && payload.some((x) => typeof x === 'number' && !Number.isFinite(x))) {
+        inst.nonfiniteQuarantined += 1;
+        return;
+      }
       const opts = { sourceId, priority: inst.priority };
       const rec = out.shape === SHAPE_EVENT
         ? bus.publishEvent(out.path, payload, opts)
@@ -385,20 +400,23 @@ function createPluginHost({
     };
   }
 
+  function makeCtx(inst, now) {
+    const { state, events } = gatherInputs(inst);
+    return {
+      now,
+      rand: inst.prng.rand,
+      emit: makeEmit(inst, now),
+      state: (port) => state[port],
+      events: (port) => events[port] || [],
+    };
+  }
+
   function tickOnce() {
     const now = bus.nowMono();
     for (const inst of instances) {
       if (inst.crashed || !inst.manifest.requiresHostTick) continue;
-      const { state, events } = gatherInputs(inst);
-      const ctx = {
-        now,
-        rand: inst.prng.rand,
-        emit: makeEmit(inst, now),
-        state: (port) => state[port],
-        events: (port) => events[port] || [],
-      };
       try {
-        inst.impl.tick(ctx);
+        inst.impl.tick(makeCtx(inst, now));
         inst.ticks += 1;
       } catch (e) {
         crash(inst, e);
@@ -407,6 +425,53 @@ function createPluginHost({
   }
 
   const cancelTick = scheduleRepeating(tickOnce, tickMs);
+
+  // Arrival-driven delivery (see header): path -> [{inst, port}] for plugins
+  // that implement onInput, STATE ports only (EVENT inputs stay tick-drained
+  // until something needs per-arrival events).
+  const arrivalRoutes = new Map();
+  for (const inst of instances) {
+    if (typeof inst.impl.onInput !== 'function') continue;
+    for (const [port, p] of inst.inputs) {
+      const decl = inst.manifest.inputs.find((d) => d.name === port);
+      if (decl && decl.shape === SHAPE_EVENT) continue;
+      if (!arrivalRoutes.has(p)) arrivalRoutes.set(p, []);
+      arrivalRoutes.get(p).push({ inst, port });
+    }
+  }
+  const deliver = (path, v) => {
+    const now = bus.nowMono();
+    for (const { inst, port } of arrivalRoutes.get(path)) {
+      if (inst.crashed) continue;
+      try {
+        inst.impl.onInput(port, v, makeCtx(inst, now));
+        inst.arrivals = (inst.arrivals || 0) + 1;
+      } catch (e) {
+        crash(inst, e);
+      }
+    }
+  };
+  const onPacket = (rec) => {
+    if (!rec.accepted || !rec.pkt.state) return;
+    const src = rec.pkt.source;
+    if (src && src.sourceId === sourceId) return; // never our own publishes
+    if (!arrivalRoutes.has(rec.pkt.state.path)) return;
+    const entry = bus.paths.get(rec.pkt.state.path);
+    if (!entry || !entry.resolved) return;
+    deliver(rec.pkt.state.path, entry.resolved.value); // arbitrated, never the payload
+  };
+  if (arrivalRoutes.size) {
+    bus.on('packet', onPacket);
+    // Late-joiner priming (the bus retained contract, BUS_PROTOCOL.md): the
+    // host may attach after writers already claimed state (the adapter's
+    // boot defaults, a graph's seeded occupancy) — deliver the current
+    // resolved values once at creation, in path-sorted order (deterministic),
+    // so an onInput plugin never starts blind to retained state.
+    for (const path of [...arrivalRoutes.keys()].sort()) {
+      const entry = bus.paths.get(path);
+      if (entry && entry.shape === 'state' && entry.resolved) deliver(path, entry.resolved.value);
+    }
+  }
 
   function find(name) {
     const inst = instances.find((i) => i.name === name);
@@ -459,6 +524,7 @@ function createPluginHost({
           state_model: inst.manifest.stateModel === 2 ? 'SNAPSHOTTABLE' : String(inst.manifest.stateModel),
           crashed: inst.crashed,
           ticks: inst.ticks,
+          arrivals: inst.arrivals || 0,
           emitted: inst.emitted,
           publish_rejects: inst.publishRejects,
           nonfinite_quarantined: inst.nonfiniteQuarantined,
@@ -469,7 +535,10 @@ function createPluginHost({
       });
     },
 
-    stop() { cancelTick(); },
+    stop() {
+      cancelTick();
+      if (arrivalRoutes.size) bus.off('packet', onPacket);
+    },
   };
 }
 

@@ -13,7 +13,22 @@
     { "path": "seq.toy.pulse", "valueType": "VALUE_TYPE_INT", "shape": "SHAPE_EVENT", "unit": "count",
       "nominalRateHz": 0.5, "maxRateHz": 4,
       "maxQueue": 64, "overflowPolicy": "OVERFLOW_DROP_OLDEST",
+      "dedupe": true },
+    { "path": "seq.presence.note_on", "valueType": "VALUE_TYPE_VEC", "shape": "SHAPE_EVENT", "unit": "",
+      "vecDim": 3,
+      "nominalRateHz": 0.1, "maxRateHz": 4,
+      "maxQueue": 64, "overflowPolicy": "OVERFLOW_DROP_OLDEST",
+      "dedupe": true },
+    { "path": "seq.presence.debug", "valueType": "VALUE_TYPE_TEXT", "shape": "SHAPE_EVENT", "unit": "",
+      "nominalRateHz": 1, "maxRateHz": 30,
+      "maxQueue": 256, "overflowPolicy": "OVERFLOW_DROP_OLDEST",
       "dedupe": true }
   ],
-  "subscribes": []
+  "subscribes": [
+    { "path": "derived.room.occupied" },
+    { "path": "sensor.door.distance_cm" },
+    { "path": "sensor.door.velocity_cm_s" },
+    { "path": "sensor.door.far_cm" },
+    { "path": "sensor.room.motion" }
+  ]
 }
