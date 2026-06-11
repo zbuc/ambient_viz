@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { compileGraph } = require('../../tools/sim/graph');
+const { compileGraph } = require('../src/router-graph');
 const { identityGraph } = require('../../tools/sim/identity');
 const { runSim } = require('../../tools/sim/sim');
 

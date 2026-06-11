@@ -15,10 +15,33 @@
 const SPIFFE = 'spiffe://pain-material.local';
 
 // Authority ladder (IR_SKETCH.md notes local_ui at 700; sensors sit at the
-// incumbent sensor level, the daisy clock between).
+// incumbent sensor level, the daisy clock between; defaults at the idle rung).
 const PRI_SENSOR = 300;
 const PRI_CLOCK = 400;
 const PRI_LOCAL_UI = 700;
+const PRI_IDLE = 100;
+
+// ── Ingest-boundary endpoint conditioning (phase 4C, MIGRATION_PLAN.md) ──
+// Legacy validates near/far claims CONSUMER-side (daisy-position and the
+// browser each guard independently); the bus carries ONE effective value,
+// conditioned once, here, at the sidecar's ingest boundary. Both real
+// goldens contained invalid far claims (far=50, then far=75==near) that every
+// legacy consumer silently rejected — without this hoist the bus diverges
+// from legacy-effective and the 4C live shadow cannot compare.
+//
+//   - a near claim is valid iff 0 <= near < effective far;
+//   - a far claim is valid iff far > effective near;
+//   - invalid claims are NOT published (previous effective value holds — the
+//     legacy semantic: reject, never clamp), counted, and logged.
+//
+// The boot defaults (mirror of daisy-position NEAR_DEFAULT_CM/FAR_DEFAULT_CM;
+// the bridge's config, so published under the bridge's own identity, not the
+// sidecar's) are a standing low-priority writer at the idle rung: any live,
+// valid sidecar claim out-arbitrates them, and when the sidecar is silent the
+// bus still resolves the values every consumer would actually use.
+const NEAR_DEFAULT_CM = 75;
+const FAR_DEFAULT_CM = 130;
+const DEFAULTS_SOURCE = `${SPIFFE}/bridge/defaults`;
 
 // legacy name -> bus signal contract. stale_after_ms reflects each signal's
 // nominal cadence (flag-only HOLD in phase 1, so generous is safe).
@@ -76,13 +99,22 @@ function attachBusAdapter({ bus, inputBus, now = Date.now, scheduleRepeating = d
   // with fresh seqs and unchanged values (the 12-electrode burst per
   // touch_mask change was the worst), which no constrained remote link
   // (ESP-NOW, phase 9) could carry.
-  const last = new Map(); // path -> { value, atMs, opts, staleAfterMs }
+  // Keyed by writer AND path: the defaults writer and the sidecar share the
+  // near/far paths, and each keeps its own change-dedupe + keepalive track.
+  const last = new Map(); // `${sourceId}|${path}` -> { path, value, atMs, opts, staleAfterMs }
   const send = (path, v, opts, staleAfterMs, force = false) => {
-    const prev = last.get(path);
+    const key = `${opts.sourceId}|${path}`;
+    const prev = last.get(key);
     if (!force && prev && prev.value === v) return;
     bus.publishState(path, v, opts);
-    last.set(path, { value: v, atMs: now(), opts, staleAfterMs });
+    last.set(key, { path, value: v, atMs: now(), opts, staleAfterMs });
   };
+
+  // Endpoint conditioning state + the standing defaults writer.
+  const eff = { near: NEAR_DEFAULT_CM, far: FAR_DEFAULT_CM };
+  const endpointRejects = [];
+  send(MAP.distance_near_cm.path, NEAR_DEFAULT_CM + 0.0, { sourceId: DEFAULTS_SOURCE, priority: PRI_IDLE }, staleFor.get(MAP.distance_near_cm.path));
+  send(MAP.distance_far_cm.path, FAR_DEFAULT_CM + 0.0, { sourceId: DEFAULTS_SOURCE, priority: PRI_IDLE }, staleFor.get(MAP.distance_far_cm.path));
 
   const onChange = (entry) => {
     const { name, value } = entry;
@@ -95,6 +127,23 @@ function attachBusAdapter({ bus, inputBus, now = Date.now, scheduleRepeating = d
     }
     const m = MAP[name];
     if (!m) return; // unmapped legacy names stay legacy-only (visible by absence)
+    // Endpoint validity conditioning (see header): invalid claims never reach
+    // the bus; the effective value (or the defaults writer) holds.
+    if (name === 'distance_near_cm') {
+      if (!(typeof value === 'number' && value >= 0 && value < eff.far)) {
+        endpointRejects.push({ name, value, effective: { ...eff } });
+        console.warn(`bus-adapter: rejected ${name}=${value} (effective near=${eff.near}, far=${eff.far})`);
+        return;
+      }
+      eff.near = value;
+    } else if (name === 'distance_far_cm') {
+      if (!(typeof value === 'number' && value > eff.near)) {
+        endpointRejects.push({ name, value, effective: { ...eff } });
+        console.warn(`bus-adapter: rejected ${name}=${value} (effective near=${eff.near}, far=${eff.far})`);
+        return;
+      }
+      eff.far = value;
+    }
     let v = value;
     if (m.type === 'bool') v = value === true || value === 1;
     else if (m.type === 'float' && typeof v === 'number' && Number.isInteger(v)) v = v + 0; // toValue picks integer; float decl accepts it
@@ -103,9 +152,9 @@ function attachBusAdapter({ bus, inputBus, now = Date.now, scheduleRepeating = d
 
   const cancelKeepalive = scheduleRepeating(() => {
     const t = now();
-    for (const [path, rec] of last) {
+    for (const rec of last.values()) {
       if (rec.staleAfterMs > 0 && t - rec.atMs >= rec.staleAfterMs / 2) {
-        send(path, rec.value, rec.opts, rec.staleAfterMs, true);
+        send(rec.path, rec.value, rec.opts, rec.staleAfterMs, true);
       }
     }
   }, KEEPALIVE_TICK_MS);
@@ -114,10 +163,12 @@ function attachBusAdapter({ bus, inputBus, now = Date.now, scheduleRepeating = d
   return {
     stop: () => { inputBus.off('change', onChange); cancelKeepalive(); },
     MAP, TOUCH,
+    conditioning: { effective: () => ({ ...eff }), rejects: endpointRejects },
   };
 }
 
 module.exports = attachBusAdapter;
 module.exports.MAP = MAP;
 module.exports.TOUCH = TOUCH;
-module.exports.PRIORITIES = { PRI_SENSOR, PRI_CLOCK, PRI_LOCAL_UI };
+module.exports.PRIORITIES = { PRI_SENSOR, PRI_CLOCK, PRI_LOCAL_UI, PRI_IDLE };
+module.exports.DEFAULTS = { NEAR_DEFAULT_CM, FAR_DEFAULT_CM, DEFAULTS_SOURCE };

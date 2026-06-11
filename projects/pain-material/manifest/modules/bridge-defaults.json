@@ -1,0 +1,21 @@
+{
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://pain-material.local/bridge/defaults",
+    "instanceId": "defaults",
+    "humanLabel": "Bridge endpoint defaults (near/far boot values, idle priority)",
+    "type": "bridge-defaults-writer",
+    "firmwareVersion": "bridge",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "defaults",
+  "publishes": [
+    { "path": "sensor.door.near_cm", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "cm",
+      "range": { "min": 0, "max": 400 }, "nominalRateHz": 0.2, "maxRateHz": 1,
+      "interpolation": "INTERPOLATION_STEP", "staleAfterMs": 10000, "onStale": "ON_STALE_HOLD" },
+    { "path": "sensor.door.far_cm", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "cm",
+      "range": { "min": 0, "max": 400 }, "nominalRateHz": 0.2, "maxRateHz": 1,
+      "interpolation": "INTERPOLATION_STEP", "staleAfterMs": 10000, "onStale": "ON_STALE_HOLD" }
+  ],
+  "subscribes": []
+}

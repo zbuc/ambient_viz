@@ -66,10 +66,30 @@ step-function rules. Result: **15,205 predicted = 15,205 captured, exact.**
 
 **4B discovery** — legacy validates endpoint claims consumer-side
 (`far > near`, `0 ≤ near < far`); the golden contains a real `far=50` claim
-legacy rejected while the phase-1 bus adapter forwarded it raw. Until 4C
-hoists that conditioning to the bridge ingest boundary, the validator applies
-a declared mirror of the guards (`conditionEndpoints`, drops counted in the
-report). Op evaluators: `server/test/graph-ops.test.js`.
+legacy rejected while the phase-1 bus adapter forwarded it raw. At 4C that
+conditioning moved INTO `bus-adapter` (with the 75/130 defaults as a standing
+idle-priority writer), so the validator needs no seeds and no mirroring — the
+production writer discipline does it all. Op evaluators:
+`server/test/graph-ops.test.js`.
 
-Next: 4C runs this graph live in the bridge as a shadow writer (after the
-ingest-boundary conditioning hoist), nothing consuming it, inspector diffing.
+## The 4C live lane (passed 2026-06-11)
+
+The bridge now runs the compiled graph LIVE (shadow — nothing consumes
+`fx.tape.failure`), tapping every graph write into the capture as `bus_tx`.
+`validate-tape.js` gains a third lane: when a capture carries `bus_tx`, the
+live value-change sequence must equal the simulated one exactly (publish
+counts differ legitimately — wall-clock keepalive cadence — value changes are
+the invariant). Proof on a real-time replay of the real-sensor golden:
+**1,701 live changes = 1,701 sim changes, pointwise**, alongside CC 23 MATCH.
+Legacy serial == simulated graph == live graph.
+
+Two rules the live run taught (both tested): the engine reads the
+**arbitrated resolved value**, never packet payloads (a low-priority defaults
+keepalive must not drag the graph to a shadowed value); and the replay
+comparator's CC lane carries a declared, bounded **cap-dropped transient**
+excusal (`transient_max_ms`/`transient_budget` in tolerances.js) for
+one-sample sensor spikes the 33 ms wall-clock cap keeps or drops on ms-level
+alignment luck.
+
+Next: 4D — the MIDI adapter consumes the resolved `fx.tape.failure` (legacy
+still winning), after a full kiosk session soaks the 4C shadow.

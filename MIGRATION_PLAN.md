@@ -256,6 +256,29 @@ publisher is flagged. **PM impact:** zero.
 > caught a disconnected Daisy via zero CC 23; one caught `VL53L5CX_FAR_CM=75`
 > == near, rejected consumer-side everywhere — the second real-hardware
 > invalid-far claim, reinforcing the 4C conditioning hoist.)
+>
+> **Status (2026-06-11): 4C IMPLEMENTATION COMPLETE — kiosk soak pending.**
+> Landed: (1) the **ingest-boundary conditioning hoist** — `bus-adapter`
+> refuses invalid endpoint claims (`0 ≤ near < eff far`, `far > eff near`,
+> reject-not-clamp, counted + logged) and runs a standing **defaults writer**
+> (75/130, `bridge/defaults`, idle priority 100) so the bus always resolves
+> the effective values; (2) the **live router** — the bridge compiles
+> `graphs/tape-failure.json` at boot and publishes `fx.tape.failure` as a
+> shadow (nothing consumes it; degrades loudly to no-router on failure), its
+> writes tapped into the capture as `bus_tx`; (3) compiler/engine moved to
+> `server/src/router-{graph,engine}.js` (production code; the sim imports
+> them). Two discoveries en route: **the engine must read the arbitrated
+> RESOLVED value, not packet payloads** (the defaults writer's keepalives
+> otherwise drag the graph back to shadowed values — caught by the staging,
+> fixed + tested); and the real sensor's burst cadence produces **cap-dropped
+> one-sample transients** the CC comparator couldn't excuse — now a declared,
+> bounded tolerance (`transient_max_ms: 150`, budget 5/CC/session).
+> **Proof:** replay of the real golden through the live-router bridge:
+> legacy lanes MATCH/EXPECTED (2 transients excused), and the live lane —
+> capture `bus_tx` vs simulated graph — **1,701 = 1,701 value changes,
+> exact**. Legacy CC == sim graph == live graph on real-sensor data.
+> Remaining for 4C exit: one full kiosk session with the inspector showing
+> the candidate (doubles as a fresh golden with `bus_tx` aboard); then 4D.
 
 The public phase is one phase; **internally it lands as six gated
 milestones**, so simulator, compiler, adapter, and arbitration bugs are never

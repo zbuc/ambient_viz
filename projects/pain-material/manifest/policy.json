@@ -38,6 +38,13 @@
       "cannotPublish": ["clock.*", "safety.*", "sensor.*", "touch.*", "ui.*", "transport.*"],
       "canSubscribe": ["sensor.*", "touch.*", "clock.*", "ui.*", "timeline.*"],
       "maxPriority": 300
+    },
+    {
+      "name": "defaults",
+      "canPublish": ["sensor.door.near_cm", "sensor.door.far_cm"],
+      "cannotPublish": ["clock.*", "safety.*", "transport.*"],
+      "canSubscribe": [],
+      "maxPriority": 100
     }
   ],
   "allow": [
@@ -47,7 +54,8 @@
     { "stableId": "spiffe://pain-material.local/sidecar/mpr121-pad0", "role": "sensor_node", "instanceId": "pad0" },
     { "stableId": "spiffe://pain-material.local/daisy/serial", "role": "clock_source", "instanceId": "daisy" },
     { "stableId": "spiffe://pain-material.local/browser/ui", "role": "local_ui", "instanceId": "browser" },
-    { "stableId": "spiffe://pain-material.local/bridge/router", "role": "router", "instanceId": "main" }
+    { "stableId": "spiffe://pain-material.local/bridge/router", "role": "router", "instanceId": "main" },
+    { "stableId": "spiffe://pain-material.local/bridge/defaults", "role": "defaults", "instanceId": "defaults" }
   ],
   "groups": [],
   "runtimeModes": {

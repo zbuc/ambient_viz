@@ -40,9 +40,18 @@ module.exports = {
   // other run within ±window_ms must have HELD the value (within eps_value)
   // or TRAVERSED it (value inside the window's min..max span ± eps_value);
   // final values within eps_value.
+  // transient_max_ms / transient_budget: the cap-dropped TRANSIENT class
+  // (discovered on the first real-sensor golden, 2026-06-11). A one-sample
+  // sensor spike is one CC write wide; when the other run's wall-clock cap
+  // lands a few ms differently, that write is swallowed whole and its value
+  // lies outside the traversal span by definition. A write that lived
+  // <= transient_max_ms (~1.5 real-sensor sample periods) with both
+  // neighbors explained is excused, up to transient_budget per CC per
+  // session. Sustained divergence (a logic difference) blows through the
+  // budget immediately.
   cc: {
-    23: { name: 'tape_failure', eps_value: 1, window_ms: 250 }, // ±1 absorbs rounding at sample boundaries
-    24: { name: 'freeze',       eps_value: 1, window_ms: 250 },
+    23: { name: 'tape_failure', eps_value: 1, window_ms: 250, transient_max_ms: 150, transient_budget: 5 }, // ±1 absorbs rounding at sample boundaries
+    24: { name: 'freeze',       eps_value: 1, window_ms: 250, transient_max_ms: 150, transient_budget: 5 },
   },
 
   // --- Daisy note events (the `serial_tx` stream, type 'note_on') -----------
@@ -76,5 +85,6 @@ module.exports = {
     ingest: 'replay input, not output',
     ingest_drop: 'compared only as drop-reason counts',
     serial_rx: 'replay input, not output',
+    bus_tx: 'live router shadow output (4C); compared by tools/sim/validate-tape.js live lane, not here',
   },
 };

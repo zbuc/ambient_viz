@@ -145,21 +145,44 @@ function compareCc(golden, replay, tolerances, results) {
     // depends on ms-level arrival timing, so one run may step 71->75 where the
     // other wrote 73. Traversal only excuses values inside the window's
     // [min, max] span, i.e. values the other run demonstrably passed through.
-    const explained = (points, other) => {
-      for (const p of points) {
-        const cands = stepValuesIn(other, p.t_rel - tol.window_ms, p.t_rel + tol.window_ms);
-        const held = cands.some((v) => Math.abs(v - p.value) <= tol.eps_value);
-        const traversed = cands.length >= 2
-          && p.value >= Math.min(...cands) - tol.eps_value
-          && p.value <= Math.max(...cands) + tol.eps_value;
-        if (!held && !traversed) {
-          return `value ${p.value} at t=${p.t_rel.toFixed(0)}ms unexplained by other run (±${tol.window_ms}ms, eps ${tol.eps_value})`;
-        }
+    const explainedFlags = (points, other) => points.map((p) => {
+      const cands = stepValuesIn(other, p.t_rel - tol.window_ms, p.t_rel + tol.window_ms);
+      const held = cands.some((v) => Math.abs(v - p.value) <= tol.eps_value);
+      const traversed = cands.length >= 2
+        && p.value >= Math.min(...cands) - tol.eps_value
+        && p.value <= Math.max(...cands) + tol.eps_value;
+      return held || traversed;
+    });
+    // Second pass — the cap-dropped TRANSIENT class (real sensors only): a
+    // single-sample spike is one write wide, so when the other run's rate cap
+    // lands a few ms differently it drops that write entirely, and the spike
+    // value sits OUTSIDE the window's traversal span by definition. Excused
+    // iff the value was transient in its own run (lived <= transient_max_ms)
+    // AND both neighbors are explained (the runs re-converge immediately).
+    // Bounded by transient_budget per CC per session — a logic divergence
+    // produces sustained disagreement, not a handful of one-sample blips.
+    const explainAll = (points, other) => {
+      const flags = explainedFlags(points, other);
+      let excused = 0;
+      for (let i = 0; i < points.length; i++) {
+        if (flags[i]) continue;
+        const livedMs = i + 1 < points.length ? points[i + 1].t_rel - points[i].t_rel : Infinity;
+        const neighborsOk = (i === 0 || flags[i - 1]) && (i + 1 < points.length && flags[i + 1]);
+        if (tol.transient_max_ms && livedMs <= tol.transient_max_ms && neighborsOk) { excused += 1; continue; }
+        const p = points[i];
+        return { fail: `value ${p.value} at t=${p.t_rel.toFixed(0)}ms unexplained by other run (±${tol.window_ms}ms, eps ${tol.eps_value})`, excused };
       }
-      return null;
+      return { fail: null, excused };
     };
-    let detail = explained(a, b) || explained(b, a);
+    const ra = explainAll(a, b);
+    const rb = explainAll(b, a);
+    const excusedTotal = ra.excused + rb.excused;
+    let detail = ra.fail || rb.fail;
+    if (!detail && excusedTotal > (tol.transient_budget || 0)) {
+      detail = `${excusedTotal} cap-boundary transients exceed the declared budget (${tol.transient_budget || 0})`;
+    }
     let verdict = detail ? 'REGRESSION' : 'MATCH';
+    const transientNote = excusedTotal ? `, ${excusedTotal} cap-boundary transient(s) excused (budget ${tol.transient_budget})` : '';
     if (!detail && a.length && b.length) {
       const fa = a[a.length - 1].value;
       const fb = b[b.length - 1].value;
@@ -168,7 +191,7 @@ function compareCc(golden, replay, tolerances, results) {
         detail = `final value ${fa} vs ${fb}`;
       }
     }
-    if (!detail) detail = `${a.length} golden / ${b.length} replay writes`;
+    if (!detail) detail = `${a.length} golden / ${b.length} replay writes${transientNote}`;
     if ((a.length === 0) !== (b.length === 0)) {
       verdict = 'REGRESSION';
       detail = `one run never wrote CC ${cc} (${a.length} vs ${b.length})`;

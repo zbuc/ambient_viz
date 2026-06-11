@@ -15,7 +15,7 @@
 
 'use strict';
 
-const { fromValue } = require('../../server/src/bus');
+const { fromValue } = require('./bus');
 
 // op -> pure evaluation (the 4B set; extended alongside graph.js DEPS).
 // `output` is handled in _evaluate (it is a side effect, not a value).
@@ -104,19 +104,22 @@ const EVAL = {
 };
 
 class GraphEngine {
-  constructor({ compiled, bus, sourceId }) {
+  // opts.tap — called after every accepted Output publish (target, value):
+  // the bridge wires this into the phase-0 capture (`bus_tx` events) so a
+  // recorded session carries the live graph's output for offline diffing.
+  constructor({ compiled, bus, sourceId, tap = null }) {
     this.compiled = compiled;
     this.bus = bus;
     this.sourceId = sourceId;
+    this.tap = tap;
     this.values = new Map(); // node id -> latest value (ZOH)
     this.published = 0;
     this.publishRejects = 0;
     this.nonfiniteDropped = 0; // rule 13: poisoned samples quarantined, counted
     // Const nodes are value sources with no arrival: seed them up front so
     // they are readable the moment a live dep fires their consumers.
-    const { fromValue: fv } = require('../../server/src/bus');
     for (const node of compiled.nodes.values()) {
-      if (node.op === 'const') this.values.set(node.id, fv(node.def.value));
+      if (node.op === 'const') this.values.set(node.id, fromValue(node.def.value));
     }
     this._onPacket = this._onPacket.bind(this);
   }
@@ -131,7 +134,15 @@ class GraphEngine {
     const path = rec.pkt.state.path;
     const inputIds = this.compiled.inputsByPath.get(path);
     if (!inputIds) return;
-    const v = fromValue(rec.pkt.state.value);
+    // An Input node reads the SIGNAL, not the writer: the value entering the
+    // graph is the bus's arbitrated RESOLVED state after this packet, never
+    // the packet's own payload. On a multi-writer path (a sensor claim over
+    // the standing defaults writer, 4C) a low-priority keepalive must not
+    // drag the graph back to a shadowed value. Arrival still drives
+    // evaluation — that half of the RATE_CONTROL contract is unchanged.
+    const entry = this.bus.paths.get(path);
+    if (!entry || !entry.resolved) return;
+    const v = entry.resolved.value;
     // Rule 13 ingress quarantine: a non-finite number never enters the graph —
     // treated as missing, the previous good ZOH value holds.
     if (typeof v === 'number' && !Number.isFinite(v)) { this.nonfiniteDropped += 1; return; }
@@ -154,6 +165,7 @@ class GraphEngine {
         });
         this.published += 1;
         if (!rec.accepted) this.publishRejects += 1;
+        else if (this.tap) this.tap(node.def.target, v);
       } else {
         const v = EVAL[node.op](node, this.values);
         // Rule 13 egress: a node must emit finite values; a poisoned result is

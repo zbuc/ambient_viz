@@ -27,8 +27,8 @@ const { loadRegistry, applyRegistry } = require('../../server/src/registry');
 const attachBusAdapter = require('../../server/src/bus-adapter');
 const { VirtualClock, Scheduler } = require('./scheduler');
 const { inputEntries, makePump } = require('./pump');
-const { compileGraph } = require('./graph');
-const { GraphEngine } = require('./engine');
+const { compileGraph } = require('../../server/src/router-graph');
+const { GraphEngine } = require('../../server/src/router-engine');
 const { identityGraph, injectSimWriter, SIM_SOURCE } = require('./identity');
 
 const MANIFEST_DIR = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest');
@@ -143,7 +143,11 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false,
         } else identity.mismatches.push(null); // count overflow without storing
       }
     } else if (compiled.inputsByPath.has(body.path)) {
-      pendingEcho.push({ path: body.path, value: v });
+      // The engine reads the arbitrated RESOLVED value (a low-priority
+      // keepalive must not drag the graph to a shadowed value), so the echo
+      // expectation is the resolved state after this packet, not its payload.
+      const entry = bus.paths.get(body.path);
+      pendingEcho.push({ path: body.path, value: entry && entry.resolved ? entry.resolved.value : v });
     }
   });
 
@@ -239,6 +243,12 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false,
       rejected: rejects.count,
       reject_sample: rejects.sample,
       policy_warns: bus.warnsTotal,
+    },
+    // Ingest-boundary endpoint conditioning (4C): claims the adapter refused
+    // to put on the bus, plus the effective endpoints at session end.
+    conditioning: {
+      rejects: adapter.conditioning.rejects,
+      effective: adapter.conditioning.effective(),
     },
     identity: identityCheck ? {
       compared: identity.compared,

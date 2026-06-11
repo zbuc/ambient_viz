@@ -17,8 +17,8 @@
 
 'use strict';
 
-const routerGen = require('../../server/src/gen/router');
-const { globToRegex } = require('../../server/src/registry');
+const routerGen = require('./gen/router');
+const { globToRegex } = require('./registry');
 
 const RATE_CONTROL = 1; // orrery.common.v1.RateDomain.RATE_CONTROL
 const SHAPE_STATE = 1;  // router.v1 Output.Shape.STATE

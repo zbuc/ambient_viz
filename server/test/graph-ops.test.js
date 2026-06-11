@@ -11,10 +11,12 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 
-const { compileGraph } = require('../../tools/sim/graph');
-const { GraphEngine } = require('../../tools/sim/engine');
+const { compileGraph } = require('../src/router-graph');
+const { GraphEngine } = require('../src/router-engine');
 const { OrreryBus } = require('../src/bus');
-const { midiAdapterModel, conditionEndpoints } = require('../../tools/sim/validate-tape');
+const { midiAdapterModel } = require('../../tools/sim/validate-tape');
+const attachBusAdapter = require('../src/bus-adapter');
+const { EventEmitter } = require('events');
 
 const ROLES = new Map([['r', { name: 'r', canPublish: ['*'], cannotPublish: [], maxPriority: 500 }]]);
 const SRC = 'spiffe://test/graph';
@@ -132,17 +134,68 @@ test('midi adapter model: round/clamp, on-change dedupe, 33 ms cap without state
   ]);
 });
 
-test('endpoint guard mirror: invalid claims drop, effective values evolve', () => {
-  const cond = conditionEndpoints({ near: 75, far: 130 });
-  const kept = cond([
-    { t: 1, name: 'distance_far_cm', value: 50 },    // 50 <= near 75: DROP (the golden's real case)
-    { t: 2, name: 'distance_near_cm', value: -5 },   // negative: DROP
-    { t: 3, name: 'distance_far_cm', value: 400 },   // valid: far -> 400
-    { t: 4, name: 'distance_near_cm', value: 200 },  // valid now (far is 400): near -> 200
-    { t: 5, name: 'distance_far_cm', value: 150 },   // 150 <= near 200: DROP
-    { t: 6, name: 'distance_cm', value: 99 },        // passthrough
-  ]);
-  assert.deepStrictEqual(kept.map((e) => e.t), [3, 4, 6]);
-  assert.strictEqual(cond.dropped.length, 3);
-  assert.deepStrictEqual(cond.dropped[0].effective, { near: 75, far: 130 });
+test('engine tap fires per accepted publish (the bus_tx capture hook)', () => {
+  const compiled = compileGraph({
+    schema: 'router.v1',
+    nodes: [IN('x', 's.x'), OUT('o', 'x')],
+  }, { roles: ROLES });
+  const bus = new OrreryBus({ bootEpochFile: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tap-')), 'epoch') });
+  bus.stop();
+  const taps = [];
+  const engine = new GraphEngine({ compiled, bus, sourceId: SRC, tap: (t, v) => taps.push([t, v]) });
+  engine.start();
+  bus.publishState('s.x', 1, { sourceId: 'spiffe://test/pump', priority: 300 });
+  bus.publishState('s.x', 2, { sourceId: 'spiffe://test/pump', priority: 300 });
+  engine.stop();
+  assert.deepStrictEqual(taps, [['fx.test.out', 1], ['fx.test.out', 2]]);
+});
+
+test('engine reads the arbitrated RESOLVED value, not the packet payload', () => {
+  const compiled = compileGraph({
+    schema: 'router.v1',
+    nodes: [IN('x', 's.x'), OUT('o', 'x')],
+  }, { roles: ROLES });
+  const bus = new OrreryBus({ bootEpochFile: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'res-')), 'epoch') });
+  bus.stop();
+  const out = [];
+  const engine = new GraphEngine({ compiled, bus, sourceId: SRC, tap: (t, v) => out.push(v) });
+  engine.start();
+  bus.publishState('s.x', 170, { sourceId: 'spiffe://test/sensor', priority: 300 });
+  // A low-priority keepalive must NOT drag the graph back to the shadowed value.
+  bus.publishState('s.x', 130, { sourceId: 'spiffe://test/defaults', priority: 100 });
+  engine.stop();
+  assert.deepStrictEqual(out, [170, 170]);
+});
+
+test('4C ingest-boundary conditioning: defaults writer + invalid claims never reach the bus', () => {
+  const bus = new OrreryBus({ bootEpochFile: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cond-')), 'epoch') });
+  bus.stop();
+  const inputBus = new EventEmitter();
+  const adapter = attachBusAdapter({ bus, inputBus });
+
+  // The standing defaults writer is on the bus at attach, at the idle rung.
+  const farPath = 'sensor.door.far_cm';
+  const nearPath = 'sensor.door.near_cm';
+  assert.strictEqual(bus.paths.get(farPath).resolved.value, 130);
+  assert.strictEqual(bus.paths.get(nearPath).resolved.value, 75);
+  assert.strictEqual(bus.paths.get(farPath).resolved.sourceId, attachBusAdapter.DEFAULTS.DEFAULTS_SOURCE);
+
+  // The goldens' real cases: far=50 then far=75(==near) — refused, bus holds defaults.
+  inputBus.emit('change', { name: 'distance_far_cm', value: 50 });
+  inputBus.emit('change', { name: 'distance_far_cm', value: 75 });
+  inputBus.emit('change', { name: 'distance_near_cm', value: -5 });
+  assert.strictEqual(bus.paths.get(farPath).resolved.value, 130);
+  assert.strictEqual(adapter.conditioning.rejects.length, 3);
+
+  // A valid claim out-arbitrates the defaults (sensor 300 > idle 100)...
+  inputBus.emit('change', { name: 'distance_far_cm', value: 170 });
+  assert.strictEqual(bus.paths.get(farPath).resolved.value, 170);
+  assert.deepStrictEqual(adapter.conditioning.effective(), { near: 75, far: 170 });
+  // ...and the guards track the EFFECTIVE values: near must stay under 170.
+  inputBus.emit('change', { name: 'distance_near_cm', value: 200 });
+  assert.strictEqual(adapter.conditioning.rejects.length, 4);
+  inputBus.emit('change', { name: 'distance_near_cm', value: 100 });
+  assert.strictEqual(bus.paths.get(nearPath).resolved.value, 100);
+
+  adapter.stop(); bus.stop();
 });

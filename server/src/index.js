@@ -78,6 +78,44 @@ try {
 busAdapter = attachBusAdapter({ bus: orreryBus, inputBus });
 console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch})`);
 
+// Phase-4C: the compiled router graph runs LIVE as a shadow writer — it
+// publishes fx.tape.failure on the bus at candidate priority; NOTHING
+// consumes it (the legacy CC 23 serial path is untouched, PM impact zero).
+// Its writes are tapped into the capture stream (`bus_tx`) so any recorded
+// session carries the live graph output for offline diffing
+// (tools/sim/validate-tape.js compares it against the simulated graph and
+// the captured CC 23). Failure to load degrades loudly to no-router — same
+// doctrine as the registry above.
+let routerEngine = null;
+try {
+  const { compileGraph } = require('./router-graph');
+  const { GraphEngine } = require('./router-engine');
+  const graphPath = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest', 'graphs', 'tape-failure.json');
+  const graphJson = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+  const compileOpts = { instanceId: 'main' };
+  if (registry) {
+    compileOpts.declaredPaths = new Set();
+    for (const rec of registry.bySourceId.values()) {
+      for (const p of rec.declared.keys()) compileOpts.declaredPaths.add(p);
+    }
+    compileOpts.roles = new Map(registry.policy.roles.map((r) => [r.name, r]));
+  }
+  const compiled = compileGraph(graphJson, compileOpts);
+  if (!compiled.ok) throw new Error(compiled.errors.join('; '));
+  for (const w of compiled.warnings) console.warn(`orrery router WARN: ${w}`);
+  routerEngine = new GraphEngine({
+    compiled,
+    bus: orreryBus,
+    sourceId: 'spiffe://pain-material.local/bridge/router',
+    tap: (target, value) => capture.event('bus_tx', { path: target, value }),
+  });
+  routerEngine.start();
+  console.log(`orrery router: LIVE (shadow) — ${compiled.nodes.size} nodes from ${path.basename(graphPath)}, `
+    + 'fx.tape.failure candidate, nothing consumes it');
+} catch (e) {
+  console.warn(`orrery router: NOT RUNNING (${e.message}) — legacy unaffected`);
+}
+
 // ── bus-over-SSE (phase 2): the browser feed's transport ────────────────────
 // GET /bus/events — retained-state replay on connect (the late-joiner
 // contract, BUS_PROTOCOL.md), then live accepted packets. `_meta.*` stays off

@@ -28,8 +28,16 @@ const SIM_ROLE = {
 };
 
 function echoPaths() {
+  // The echo must shadow the LOWEST possible incumbent on each path. For
+  // near/far that is the adapter's standing defaults writer at the idle rung
+  // (phase 4C) — when the sidecar is silent, an echo at sensor-1 would WIN
+  // against the defaults and stop being a shadow.
+  const endpointPaths = new Set([adapter.MAP.distance_near_cm.path, adapter.MAP.distance_far_cm.path]);
   return [
-    ...Object.values(adapter.MAP).map((m) => ({ path: m.path, priority: m.priority - 1 })),
+    ...Object.values(adapter.MAP).map((m) => ({
+      path: m.path,
+      priority: endpointPaths.has(m.path) ? adapter.PRIORITIES.PRI_IDLE - 1 : m.priority - 1,
+    })),
     ...adapter.TOUCH.paths.map((p) => ({ path: p, priority: adapter.TOUCH.priority - 1 })),
   ];
 }

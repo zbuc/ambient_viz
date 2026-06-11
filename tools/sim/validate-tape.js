@@ -12,21 +12,12 @@
 //   comparator's step-function rules + declared tolerances (cc 23: eps 1,
 //   window 250 ms — the same gates the replay harness passes).
 //
-// Seeds: the legacy bridge boots with NEAR_DEFAULT_CM=75 / FAR_DEFAULT_CM=130
-// until the sidecar publishes endpoints. The sim restores those as
-// session-start seeds — the simulator analog of the replay harness restoring
-// trigger env from meta.json. Both seeds are declared in the report.
-//
-// Source conditioning (a 4B DISCOVERY, see MIGRATION_PLAN.md phase-4 status):
-// legacy guards endpoint updates CONSUMER-side — daisy-position ignores a
-// `distance_far_cm` claim unless it exceeds the effective near (and a near
-// claim unless 0 <= near < effective far). The mock golden actually contains
-// an invalid far=50 claim that legacy rejected (130 stayed in effect), while
-// the phase-1 bus adapter forwards raw claims — so the bus's far_cm and the
-// legacy-effective far diverge. Until that conditioning is hoisted to the
-// bridge ingest boundary (4C, when the graph goes live), this validator
-// applies a mirror of the legacy guards to the input timeline, and counts
-// what it drops.
+// Endpoint conditioning + boot defaults moved INTO the bus adapter at 4C
+// (the ingest-boundary hoist this validator's 4B mirror anticipated): the
+// adapter now publishes near=75/far=130 from a standing idle-priority
+// defaults writer and refuses invalid claims (far <= effective near, etc.),
+// so the sim needs no seeds and no entry filtering — the production writer
+// discipline does it all. Rejected claims surface in the report.
 //
 // Usage: node tools/sim/validate-tape.js <golden-session-dir> [--graph FILE] [--out DIR] [--quiet]
 // Exit:  0 = MATCH, 1 = blocked (REGRESSION/UNKNOWN), 2 = harness error.
@@ -46,42 +37,10 @@ const ROUTER_SOURCE = 'spiffe://pain-material.local/bridge/router';
 const TAPE_PATH = 'fx.tape.failure';
 const CC_TAPE = 23;
 
-// Legacy bridge constants in effect when near/far are never published
-// (daisy-position.js NEAR_DEFAULT_CM / FAR_DEFAULT_CM).
-const SEEDS = [
-  { name: 'distance_near_cm', value: 75 },
-  { name: 'distance_far_cm', value: 130 },
-];
-
 // The MIDI transport adapter model — writeCc, verbatim semantics:
 // round+clamp to 0..127, write only on change, skip (without updating state)
 // inside the 33 ms per-CC window. Times are the trajectory's virtual times,
 // which sit on the same t_mono timeline as the golden's serial_tx events.
-// The legacy endpoint validity guards (daisy-position.js onChange), mirrored
-// over the input timeline as a stateful filter: a near claim must satisfy
-// 0 <= near < effective far; a far claim must exceed effective near; invalid
-// claims are dropped (the previous effective value holds — NOT clamped).
-function conditionEndpoints(defaults = { near: 75, far: 130 }) {
-  let effNear = defaults.near;
-  let effFar = defaults.far;
-  const dropped = [];
-  const fn = (entries) => entries.filter((e) => {
-    if (e.name === 'distance_near_cm') {
-      if (e.value >= 0 && e.value < effFar) { effNear = e.value; return true; }
-      dropped.push({ t: e.t, name: e.name, value: e.value, effective: { near: effNear, far: effFar } });
-      return false;
-    }
-    if (e.name === 'distance_far_cm') {
-      if (e.value > effNear) { effFar = e.value; return true; }
-      dropped.push({ t: e.t, name: e.name, value: e.value, effective: { near: effNear, far: effFar } });
-      return false;
-    }
-    return true;
-  });
-  fn.dropped = dropped;
-  return fn;
-}
-
 const MIN_WRITE_MS = 33;
 function midiAdapterModel(trajectory) {
   const events = [];
@@ -114,17 +73,14 @@ function parseArgs(argv) {
 
 function validateTape({ goldenDir, graphFile = DEFAULT_GRAPH, outDir, quiet = false }) {
   const graphJson = JSON.parse(fs.readFileSync(graphFile, 'utf8'));
-  const condition = conditionEndpoints({ near: SEEDS[0].value, far: SEEDS[1].value });
   const { report, collected } = runSim({
     goldenDir,
     graphJson,
     identityCheck: false,
     outDir,
     quiet: true,
-    seeds: SEEDS,
     collect: [TAPE_PATH],
     graphSourceId: ROUTER_SOURCE,
-    conditionEntries: condition,
   });
 
   const trajectory = collected[TAPE_PATH] || [];
@@ -162,20 +118,54 @@ function validateTape({ goldenDir, graphFile = DEFAULT_GRAPH, outDir, quiet = fa
     (e) => e.kind === 'serial_tx' && e.decoded && e.decoded.type === 'cc' && e.decoded.cc === CC_TAPE,
   ).length;
 
+  // ── live lane (4C) ──────────────────────────────────────────────────────
+  // When the capture was recorded with the live router running, it carries
+  // `bus_tx` events — the in-bridge graph's actual output. Same inputs, same
+  // code, same timeline => the live VALUE-CHANGE sequence must equal the
+  // simulated one exactly (publish counts differ legitimately: wall-clock
+  // keepalive cadence re-evaluates at slightly different times, emitting
+  // duplicate values; changes are the invariant). Time skew bound: the live
+  // tap stamps at processing time, sub-ms after the input the sim stamps at.
+  const dedupeChanges = (seq) => seq.filter((p, i) => i === 0 || p.value !== seq[i - 1].value);
+  const busTx = golden.events.filter((e) => e.kind === 'bus_tx' && e.path === TAPE_PATH)
+    .map((e) => ({ t: e.t_mono_ms, value: e.value }));
+  let live = { present: false, note: 'capture has no bus_tx (recorded before 4C, or router not running)' };
+  if (busTx.length) {
+    const liveChanges = dedupeChanges(busTx);
+    const simChanges = dedupeChanges(trajectory);
+    const mismatches = [];
+    const n = Math.max(liveChanges.length, simChanges.length);
+    for (let i = 0; i < n && mismatches.length < 10; i++) {
+      const a = liveChanges[i];
+      const b = simChanges[i];
+      if (!a || !b || a.value !== b.value || Math.abs(a.t - b.t) > 250) {
+        mismatches.push({ index: i, live: a || null, sim: b || null });
+      }
+    }
+    live = {
+      present: true,
+      live_publishes: busTx.length,
+      live_changes: liveChanges.length,
+      sim_changes: simChanges.length,
+      mismatches,
+      pass: mismatches.length === 0 && liveChanges.length === simChanges.length,
+    };
+  }
+
   const validation = {
     schema: 'tape-validation.v1',
     phase: '4B',
     graph: graphFile,
-    seeds: SEEDS,
-    // Legacy-guard mirror: endpoint claims legacy would have ignored, dropped
-    // from the bus inputs too (pending the 4C hoist to the ingest boundary).
-    conditioned_drops: condition.dropped,
+    // Ingest-boundary conditioning (4C, in the production adapter): claims
+    // refused at the bus boundary + the effective endpoints at session end.
+    conditioning: report.conditioning,
     trajectory_points: trajectory.length,
     predicted_cc_events: predicted.length,
     golden_cc_events: goldenCcCount,
     results: ccResults,
-    verdict,
-    blocks: verdict === 'REGRESSION' || verdict === 'UNKNOWN',
+    live_graph: live,
+    verdict: (live.present && !live.pass) ? 'REGRESSION' : verdict,
+    blocks: verdict === 'REGRESSION' || verdict === 'UNKNOWN' || (live.present && !live.pass),
   };
   fs.writeFileSync(path.join(outDir, 'tape-validation.json'), JSON.stringify(validation, null, 2));
 
@@ -183,7 +173,13 @@ function validateTape({ goldenDir, graphFile = DEFAULT_GRAPH, outDir, quiet = fa
     console.log(`tape graph: ${trajectory.length} fx.tape.failure points -> `
       + `${predicted.length} predicted CC ${CC_TAPE} writes vs ${goldenCcCount} captured`);
     for (const r of ccResults) console.log(`  ${r.verdict.padEnd(20)} ${r.id.padEnd(22)} ${r.detail}`);
-    console.log(`\n4B verdict: ${verdict}  (report: ${path.join(outDir, 'tape-validation.json')})`);
+    if (live.present) {
+      console.log(`  ${(live.pass ? 'MATCH' : 'REGRESSION').padEnd(20)} live:fx.tape.failure   `
+        + `${live.live_changes} live changes vs ${live.sim_changes} sim (${live.live_publishes} live publishes)`);
+    } else {
+      console.log(`  ${'ABSENT'.padEnd(20)} live:fx.tape.failure   ${live.note}`);
+    }
+    console.log(`\nverdict: ${validation.verdict}  (report: ${path.join(outDir, 'tape-validation.json')})`);
   }
   return { validation, simReport: report };
 }
@@ -201,4 +197,4 @@ if (require.main === module) {
   try { main(); } catch (e) { console.error(`validate-tape: ${e.message}`); process.exit(2); }
 }
 
-module.exports = { validateTape, midiAdapterModel, conditionEndpoints, SEEDS };
+module.exports = { validateTape, midiAdapterModel };
