@@ -112,22 +112,28 @@ impl MelodyGen {
         }
         self.degree = degree;
 
-        // 3. Octave placement: try the degree in five octaves around the
-        //    register center; keep the placement closest to the previous note
-        //    (leap clamp) with a mild pull toward the center. The ±2-octave
-        //    scan always contains the lattice point nearest any previous note
-        //    the scan itself could have produced (placements are 12 apart →
-        //    nearest is ≤ 6 semitones < MAX_LEAP), so the clamp filter never
-        //    empties; min-leap stands by as the paranoid fallback.
+        // 3. Octave placement: scan the degree's placements around the
+        //    register center AND around the previous note; keep the placement
+        //    closest to the previous note (leap clamp) with a mild pull
+        //    toward the center. Including the octave nearest the anchor
+        //    guarantees a candidate ≤ 6 semitones away (placements are 12
+        //    apart), so the clamp filter never empties; min-leap stands by
+        //    as the paranoid fallback.
         let center_octave = 3 + (genome.register.clamp(0.0, 1.0) * 2.0 + 0.5) as i32; // 3..=5
-        let center = (center_octave + 1) * 12 + key.root_pc() + key.degree_semitones(degree);
+        let off = key.root_pc() + key.degree_semitones(degree);
+        let center = (center_octave + 1) * 12 + off;
         let anchor = if self.last_note < 0 { center } else { self.last_note };
+        // cand(oct) = (oct + 1) * 12 + off → the octave whose placement is
+        // nearest the anchor:
+        let oct_near = (((anchor - off) as f32) / 12.0 + 0.5) as i32 - 1;
 
         let mut best = center;
         let mut best_cost = f32::MAX;
         let mut nearest = center;
         let mut nearest_leap = i32::MAX;
-        for oct in (center_octave - 2)..=(center_octave + 2) {
+        let lo = (center_octave - 2).min(oct_near - 1);
+        let hi = (center_octave + 2).max(oct_near + 1);
+        for oct in lo..=hi {
             let cand = (oct + 1) * 12 + key.root_pc() + key.degree_semitones(degree);
             if !(0..=127).contains(&cand) {
                 continue;

@@ -15,7 +15,10 @@
   "anchors": [
     {
       "name": "ambient",
-      "pos": [0.2, 0.5],
+      "pos": [
+        0.2,
+        0.5
+      ],
       "genome": {
         "density": 0.18,
         "tension": 0.12,
@@ -27,7 +30,8 @@
         "harmonic_rate": 0.05,
         "register": 0.55,
         "stab_color": 0.3,
-        "note_length": 0.85
+        "note_length": 0.85,
+        "bass_style": 0.05
       },
       "fx": {
         "ReverbWet": 0.55,
@@ -39,7 +43,10 @@
     {
       "name": "engine-room",
       "_character": "randomly rolled 2026-06-11 — almost no melody (density .07) over a heavy kick + relentless short bass (activity .96, note_length .06) in a huge wet room; chords held ~8 bars. Dubby machine skeleton.",
-      "pos": [0.6, 0.15],
+      "pos": [
+        0.6,
+        0.15
+      ],
       "genome": {
         "density": 0.07,
         "tension": 0.51,
@@ -51,7 +58,8 @@
         "harmonic_rate": 0.08,
         "register": 0.49,
         "stab_color": 0.09,
-        "note_length": 0.06
+        "note_length": 0.06,
+        "bass_style": 0.9
       },
       "fx": {
         "ReverbWet": 0.76,
@@ -63,7 +71,10 @@
     {
       "name": "paranoia",
       "_character": "randomly rolled 2026-06-11 — tension .97 with greedy low-register melody (temp .18, register .13), hats wide open, dry room but eaten tape (.7) and heavy delay. Claustrophobic, insistent.",
-      "pos": [0.75, 0.85],
+      "pos": [
+        0.75,
+        0.85
+      ],
       "genome": {
         "density": 0.65,
         "tension": 0.97,
@@ -75,7 +86,8 @@
         "harmonic_rate": 0.23,
         "register": 0.13,
         "stab_color": 0.19,
-        "note_length": 0.61
+        "note_length": 0.61,
+        "bass_style": 0.6
       },
       "fx": {
         "ReverbWet": 0.16,
@@ -87,7 +99,10 @@
     {
       "name": "rainfall",
       "_character": "randomly rolled 2026-06-11 — busy wandering melody (density .88, temp .81, tone variance .68) over CALM harmony (tension .16); dense kick, sparse hats, long delay. A burble of notes.",
-      "pos": [0.35, 0.85],
+      "pos": [
+        0.35,
+        0.85
+      ],
       "genome": {
         "density": 0.88,
         "tension": 0.16,
@@ -99,7 +114,8 @@
         "harmonic_rate": 0.52,
         "register": 0.57,
         "stab_color": 0.68,
-        "note_length": 0.38
+        "note_length": 0.38,
+        "bass_style": 0.35
       },
       "fx": {
         "ReverbWet": 0.17,
@@ -110,7 +126,10 @@
     },
     {
       "name": "techno",
-      "pos": [0.85, 0.5],
+      "pos": [
+        0.85,
+        0.5
+      ],
       "genome": {
         "density": 0.7,
         "tension": 0.45,
@@ -122,7 +141,8 @@
         "harmonic_rate": 0.4,
         "register": 0.45,
         "stab_color": 0.15,
-        "note_length": 0.15
+        "note_length": 0.15,
+        "bass_style": 0.85
       },
       "fx": {
         "ReverbWet": 0.15,

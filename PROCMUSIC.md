@@ -130,7 +130,7 @@ a genome value through normal arbitration.
 
 ## 4. The genome
 
-11 genes, one CC each. **CC 70–85** (current bindings occupy 12–24 only —
+12 genes, one CC each. **CC 70–85** (current bindings occupy 12–24 only —
 `daisy/crates/dsp/src/midi_map.rs`; 70+ stays clear of both the existing knob
 range and the 0–63 14-bit-LSB convention). 7-bit resolution is sufficient:
 genes are slow intentions and the conductor interpolates/smooths internally.
@@ -149,8 +149,9 @@ genes are slow intentions and the conductor interpolates/smooths internally.
 | register | 78 | `ProcRegister` | 0..1 | melody octave center |
 | stab_color | 79 | `ProcStabColor` | 0..1 | per-hit tone variance (existing `stabtone` axis) |
 | note_length | 80 | `ProcNoteLength` | 0..1 | bass gate hold length (2–14 steps); phrasing hook for melody durations later |
+| bass_style | 81 | `ProcBassStyle` | 0..1 | bass archetype axis: 0 = drone (pedal per chord), 0.5 = pulse (downbeat anchor), 1 = stab (Euclidean shorts); triangle weights drawn per chord boundary |
 
-(81–85 reserved for genes discovered during listening. `note_length` was the
+(82–85 reserved for genes discovered during listening. `note_length` was the
 first such gene — the duration discussion promoted it out of `bass_activity`
 so "sparser but longer" is expressible. The stab voice is **gated** (P1m+):
 ADSR *shape* lives in the patch, note *duration* belongs to the trigger —

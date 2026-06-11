@@ -41,7 +41,7 @@ pub const BEATS_PER_BAR: usize = 4;
 pub const STEPS_PER_BAR: usize = STEPS_PER_BEAT * BEATS_PER_BAR;
 
 /// Number of genes in [`Genome`] (= `to_array().len()`).
-pub const GENE_COUNT: usize = 11;
+pub const GENE_COUNT: usize = 12;
 
 /// The slow "intention" parameter set the mood layer / optimizer evolves
 /// (PROCMUSIC.md §4, one CC per gene). All genes are 0..1; semantic ranges
@@ -75,6 +75,10 @@ pub struct Genome {
     /// for melody durations later. Promoted out of `bass_activity` so
     /// "sparser but longer" is expressible (PROCMUSIC.md §4, CC 80).
     pub note_length: f32,
+    /// Bass style axis: 0 = drone (pedal under the chord), 0.5 = pulse
+    /// (downbeat anchor), 1 = stab (short Euclidean hits). Triangle weights;
+    /// drawn per chord boundary (PROCMUSIC.md §4, CC 81).
+    pub bass_style: f32,
 }
 
 impl Default for Genome {
@@ -93,6 +97,7 @@ impl Default for Genome {
             register: 0.4,
             stab_color: 0.2,
             note_length: 0.5,
+            bass_style: 0.5, // pure pulse — the historical anchor behavior
         }
     }
 }
@@ -113,6 +118,7 @@ impl Genome {
             &mut self.register,
             &mut self.stab_color,
             &mut self.note_length,
+            &mut self.bass_style,
         ] {
             *g = g.clamp(0.0, 1.0);
         }
@@ -135,6 +141,7 @@ impl Genome {
             self.register,
             self.stab_color,
             self.note_length,
+            self.bass_style,
         ]
     }
 
@@ -151,6 +158,7 @@ impl Genome {
             register: a[8],
             stab_color: a[9],
             note_length: a[10],
+            bass_style: a[11],
         }
     }
 }
@@ -498,11 +506,15 @@ impl ProcGen {
         // Stab — chord-change downbeats voice the new chord whole; otherwise
         // the Markov melody fires on a per-bar-rotated Euclidean gate.
         let strong = sib % STEPS_PER_BEAT == 0;
-        // Chord strikes: every harmonic move — and step 0, so the seeded
-        // opening chord is actually VOICED with a drawn hold of its own
-        // (otherwise the piece opens on bass+melody alone and the first
-        // drawn chord duration only arrives at the first change).
-        if sib == 0 && (self.conductor.chord_changed() || step == 0) {
+        // Chord boundary: every harmonic move — and step 0, so the seeded
+        // opening chord is treated like an arrival (chord strike, bass style
+        // re-draw, drone re-strike).
+        let chord_boundary = sib == 0 && (self.conductor.chord_changed() || step == 0);
+
+        // Chord strikes: voiced with a drawn hold of their own (otherwise
+        // the piece opens on bass+melody alone and the first drawn chord
+        // duration only arrives at the first change).
+        if chord_boundary {
             // Per-hit character, like the melody path: a drawn voicing
             // (root / first inversion / spread third), tone/velocity jitter,
             // and a GATED duration — the chord sustains for a drawn number
@@ -579,14 +591,17 @@ impl ProcGen {
             evt.stab_off = Some(Chord::from_notes(&off_notes[..off_n]));
         }
 
-        // Bass — root-locked anchor on the current chord.
+        // Bass — root-locked, style drawn per chord (drone/pulse/stab via
+        // the bass_style gene). Draws after the stab branch: fixed order.
         let root = self
             .current_chord()
             .notes()
             .first()
             .copied()
             .unwrap_or(48);
-        evt.bass = self.bass.on_step(step, root, &g);
+        evt.bass = self
+            .bass
+            .on_step(step, root, &g, chord_boundary, &mut self.rng);
 
         evt
     }
@@ -701,13 +716,14 @@ mod tests {
         // listen, because it is the audible output's identity.
         let events = run(&mut make(96.0), 8, 96.0);
         let d = digest(&events);
-        // Bumped 2026-06-11 (×5): seeded musical start (key/mode/opening
+        // Bumped 2026-06-11 (×6): seeded musical start (key/mode/opening
         // degree), seeded opening-hold phase, per-hit chord character
         // (voicing/tone/velocity), gated durations (chord + melody holds
-        // with note-offs), then the opening chord struck at step 0 with a
-        // drawn hold — intended audible changes.
+        // with note-offs), the opening chord struck at step 0 with a drawn
+        // hold, then bass styles (drone/pulse/stab per chord via bass_style)
+        // — intended audible changes.
         assert_eq!(
-            d, 0xb97c6e97b627c959,
+            d, 0x29e2f74972462b13,
             "golden digest mismatch — actual {d:#018x}"
         );
     }

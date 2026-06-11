@@ -35,6 +35,8 @@
     { "path": "music.genome.stab_color", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
       "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
     { "path": "music.genome.note_length", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.bass_style", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
       "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true }
   ],
   "subscribes": [

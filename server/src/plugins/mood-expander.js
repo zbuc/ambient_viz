@@ -50,6 +50,7 @@ const GENES = [
   'register',
   'stab_color',
   'note_length',
+  'bass_style',
 ];
 
 // Same hardcoded project root as index.js's pluginsDir — multi-project
