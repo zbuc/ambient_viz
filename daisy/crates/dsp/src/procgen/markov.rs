@@ -81,6 +81,12 @@ impl MelodyGen {
         self.degree
     }
 
+    /// Place the chain on a degree (the seeded start) without a note history.
+    pub fn set_degree(&mut self, degree: usize) {
+        self.degree = degree % 7;
+        self.last_note = -1;
+    }
+
     /// Pick the next melody note. `chord_degree` is the conductor's current
     /// chord root degree; `strong` marks a beat boundary (chord-tone snap).
     pub fn next_note(

@@ -277,7 +277,11 @@ daisy/crates/dsp/src/procgen/
 - **Determinism**: PCG32 (or equivalent small PRNG) seeded via constructor.
   Fixed seed + fixed genome trajectory → **byte-identical `StepEvent`
   stream** — the dsp-side mirror of the plugin host's REPLAYABLE contract,
-  and the basis for golden-trace tests.
+  and the basis for golden-trace tests. The seed also **draws the musical
+  start** (key root, mode, opening chord degree, fixed draw order leading
+  the stream), so different seeds start in different places rather than
+  merely diverging later; the host rolls a fresh seed per launch and prints
+  it (`PROCGEN_SEED` pins a roll).
 - **Real-time discipline** (standing constraints): no alloc in the callback —
   all pattern storage `heapless`, transition tables `const` in flash (hundreds
   of bytes to a few KB; negligible against the 504 KB AXI heap, whose real

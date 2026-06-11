@@ -86,6 +86,15 @@ impl Default for Key {
 }
 
 impl Key {
+    /// Build a key programmatically (the parser's `parse_key` is the text
+    /// entry point). `root_pc` wraps into 0..12.
+    pub fn new(root_pc: i32, mode: Mode) -> Key {
+        Key {
+            root_pc: root_pc.rem_euclid(12),
+            scale: mode.scale(),
+        }
+    }
+
     /// Tonic pitch class, 0 = C .. 11 = B.
     pub fn root_pc(&self) -> i32 {
         self.root_pc
@@ -111,6 +120,49 @@ pub fn diatonic_triad(key: &Key, degree: usize, base_octave: i32) -> Chord {
         root + key.degree_semitones(degree + 4),
     ])
 }
+
+/// The seven diatonic modes — programmatic mirror of the `key:` mode names,
+/// for code that builds keys without parsing text (the procgen seeded start).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Ionian,
+    Dorian,
+    Phrygian,
+    Lydian,
+    Mixolydian,
+    Aeolian,
+    Locrian,
+}
+
+impl Mode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Ionian => "ionian",
+            Mode::Dorian => "dorian",
+            Mode::Phrygian => "phrygian",
+            Mode::Lydian => "lydian",
+            Mode::Mixolydian => "mixolydian",
+            Mode::Aeolian => "aeolian",
+            Mode::Locrian => "locrian",
+        }
+    }
+
+    fn scale(self) -> [i32; 7] {
+        match self {
+            Mode::Ionian => IONIAN,
+            Mode::Dorian => DORIAN,
+            Mode::Phrygian => PHRYGIAN,
+            Mode::Lydian => LYDIAN,
+            Mode::Mixolydian => MIXOLYDIAN,
+            Mode::Aeolian => AEOLIAN,
+            Mode::Locrian => LOCRIAN,
+        }
+    }
+}
+
+/// Pitch-class names (sharps) for display: `NOTE_NAMES[root_pc]`.
+pub const NOTE_NAMES: [&str; 12] =
+    ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 const IONIAN: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
 const DORIAN: [i32; 7] = [0, 2, 3, 5, 7, 9, 10];

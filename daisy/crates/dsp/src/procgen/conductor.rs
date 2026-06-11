@@ -65,6 +65,14 @@ impl Conductor {
         self.degree
     }
 
+    /// Place the walk on a degree (the seeded opening chord). Resets the
+    /// hold counter so the full chord period plays from here.
+    pub fn set_degree(&mut self, degree: usize) {
+        self.degree = degree % 7;
+        self.bars_held = 0;
+        self.chord_changed = false;
+    }
+
     /// Did the most recent bar boundary change the chord?
     pub fn chord_changed(&self) -> bool {
         self.chord_changed

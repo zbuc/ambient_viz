@@ -140,19 +140,29 @@ fn main() -> Result<()> {
     if procgen {
         let mut eng = engine.lock().unwrap();
         eng.set_producer(dsp::ProducerSel::Procgen);
+        // PROCGEN_SEED pins a run exactly; otherwise every launch rolls a
+        // fresh seed (and prints it, so a good roll can be pinned).
         let seed = std::env::var("PROCGEN_SEED")
             .ok()
-            .and_then(|s| s.parse::<u64>().ok());
-        if let Some(seed) = seed {
-            eng.procgen_mut().reset(seed);
-        }
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0x5052_4F43)
+            });
+        eng.procgen_mut().reset(seed);
         // Fixed fallback tempo; a timeline sidecar (below) overrides it.
         eng.procgen_mut().set_fixed_bpm(96.0);
+        let (root_pc, mode, degree) = eng.procgen().musical_start();
+        const ROMAN: [&str; 7] = ["i", "ii", "iii", "iv", "v", "vi", "vii"];
         println!(
-            "--procgen: procedural producer selected (genome {:?}, seed {})",
-            eng.procgen().genome(),
-            seed.map(|s| s.to_string()).unwrap_or_else(|| "default".into()),
+            "--procgen: seed {seed} (PROCGEN_SEED={seed} to reproduce) — key {} {}, opening on {}",
+            dsp::chord::NOTE_NAMES[root_pc as usize % 12],
+            mode.name(),
+            ROMAN[degree % 7],
         );
+        println!("  genome {:?}", eng.procgen().genome());
     }
 
     // Mood audition: blend the moods.json anchors at a static or swept

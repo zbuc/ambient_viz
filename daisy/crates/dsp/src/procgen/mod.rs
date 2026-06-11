@@ -26,7 +26,7 @@ pub mod markov;
 
 use heapless::Vec;
 
-use crate::chord::{Chord, Key};
+use crate::chord::{Chord, Key, Mode};
 use crate::sequencer::{StabHit, StepEvent};
 use crate::timeline::{Keypoint, MAX_KEYPOINTS, bpm_at};
 use bassgen::BassGen;
@@ -247,12 +247,16 @@ pub struct ProcGen {
     /// Per-bar Euclidean rotation for the melody gate (re-rolled each bar so
     /// the line breathes instead of looping).
     melody_rotation: usize,
+    /// The seeded musical start (root pitch class, mode, opening degree) —
+    /// telemetry for hosts to print/pin; `set_key` overrides the key without
+    /// touching this record.
+    start: (i32, Mode, usize),
     enabled: bool,
 }
 
 impl ProcGen {
     pub fn new(sample_rate: f32, seed: u64) -> Self {
-        Self {
+        let mut pg = Self {
             sample_rate,
             time_seconds: 0.0,
             loop_seconds: 0.0,
@@ -268,8 +272,40 @@ impl ProcGen {
             bass: BassGen::new(),
             rng: Pcg32::new(seed, 0x6f7272657279), // stream: "orrery"
             melody_rotation: 0,
+            start: (0, Mode::Aeolian, 0),
             enabled: false,
-        }
+        };
+        pg.seed_musical_start();
+        pg
+    }
+
+    /// Draw the musical starting point from the PRNG — key root, mode, and
+    /// opening chord degree — so different seeds start in different places
+    /// instead of merely diverging later. FIXED draw order (mode, root,
+    /// degree): it leads the stream and is part of the determinism contract.
+    fn seed_musical_start(&mut self) {
+        // Ambient-leaning mode palette; Ionian/Locrian excluded (too plain /
+        // too unstable as a tonal home).
+        const MODES: [Mode; 5] =
+            [Mode::Aeolian, Mode::Dorian, Mode::Phrygian, Mode::Lydian, Mode::Mixolydian];
+        const MODE_W: [f32; 5] = [0.30, 0.25, 0.15, 0.15, 0.15];
+        let mode = MODES[self.rng.pick_weighted(&MODE_W)];
+        let root_pc = (self.rng.next_u32() % 12) as i32;
+        self.key = Key::new(root_pc, mode);
+
+        // Opening chord: tonic favored, but not guaranteed — a piece may
+        // open mid-thought. (ii/v lightly weighted: weak openings.)
+        const DEGREE_W: [f32; 7] = [0.35, 0.05, 0.15, 0.15, 0.05, 0.15, 0.10];
+        let degree = self.rng.pick_weighted(&DEGREE_W);
+        self.conductor.set_degree(degree);
+        self.melody.set_degree(degree);
+        self.start = (root_pc, mode, degree);
+    }
+
+    /// The seeded musical start: (root pitch class, mode, opening degree).
+    /// Format the root with [`crate::chord::NOTE_NAMES`].
+    pub fn musical_start(&self) -> (i32, Mode, usize) {
+        self.start
     }
 
     /// Replace the genome (P2 routes the per-gene CCs here via `apply_param`).
@@ -312,6 +348,7 @@ impl ProcGen {
     }
 
     /// Re-seed the PRNG and restart musical state (for replay/golden runs).
+    /// Redraws the seeded musical start from the new stream.
     pub fn reset(&mut self, seed: u64) {
         self.time_seconds = 0.0;
         self.step_phase = 1.0;
@@ -321,6 +358,7 @@ impl ProcGen {
         self.bass.reset();
         self.rng = Pcg32::new(seed, 0x6f7272657279);
         self.melody_rotation = 0;
+        self.seed_musical_start();
     }
 
     /// Next step index to fire (global, freerunning).
@@ -539,8 +577,10 @@ mod tests {
         // listen, because it is the audible output's identity.
         let events = run(&mut make(96.0), 8, 96.0);
         let d = digest(&events);
+        // Bumped 2026-06-11: seeded musical start (key/mode/opening degree
+        // now drawn from the seed) — an intended audible change.
         assert_eq!(
-            d, 0xa18042783900bd78,
+            d, 0x50fe7449f1af3233,
             "golden digest mismatch — actual {d:#018x}"
         );
     }
@@ -671,6 +711,25 @@ mod tests {
             let e = pg.advance();
             assert!(e.kick_velocity.is_none() && e.stab.is_none());
         }
+    }
+
+    #[test]
+    fn seed_draws_the_musical_start() {
+        // Same seed → same start; the start is reproducible telemetry.
+        let a = ProcGen::new(SR, 7).musical_start();
+        let b = ProcGen::new(SR, 7).musical_start();
+        assert_eq!(a, b);
+        // Across a handful of seeds the keys genuinely vary — the whole
+        // point of seeding the start (no more "always C minor on i").
+        let mut keys = std::collections::HashSet::new();
+        let mut degrees = std::collections::HashSet::new();
+        for seed in 0..16u64 {
+            let (root, mode, degree) = ProcGen::new(SR, seed).musical_start();
+            keys.insert((root, mode.name()));
+            degrees.insert(degree);
+        }
+        assert!(keys.len() >= 6, "16 seeds gave only {} distinct keys", keys.len());
+        assert!(degrees.len() >= 2, "opening degree never varies");
     }
 
     #[test]
