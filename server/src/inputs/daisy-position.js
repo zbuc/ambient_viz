@@ -10,8 +10,9 @@
 //      - `distance_cm`  -> CC 23 (tape failure): near (the onset) = present =
 //        pristine, far (≥ the sensor's reach) = absent = tape eaten. Since
 //        migration phase 4D this CC consumes the orrery bus's RESOLVED
-//        `fx.tape.failure` (legacy ramp = incumbent writer); see the 4D block
-//        below.
+//        `fx.tape.failure`; since the 4E cutover the ROUTER GRAPH is the
+//        winning writer and the ramp here only shadows it. See the 4D/4E
+//        block below.
 //      - `distance_near_cm` / `distance_far_cm` -> set the onset + far reach of
 //        that curve (config-driven / sensor-mode dependent); not forwarded to
 //        the Daisy, they only shape the distance_cm mapping above.
@@ -49,20 +50,22 @@ let nearCm = NEAR_DEFAULT_CM;
 let farCm = FAR_DEFAULT_CM;
 const MIN_WRITE_MS = 33; // cap each CC to ~30 Hz (complication #13)
 
-// ── Phase 4D: fx.tape.failure rides the orrery bus (MIGRATION_PLAN.md) ──────
-// The tape-failure CC is a formal transport-adapter binding now: the legacy
-// ramp below PUBLISHES its value to the bus as the incumbent writer (sensor
-// rung, 300) and writeCc is driven by the bus's arbitrated RESOLVED value —
-// which the incumbent still wins, so the CC 23 byte stream is unchanged while
-// proving the adapter reads arbitration. The candidate router graph shadows
-// at 299 (incumbent−1); 4E swaps the two priorities, 4F deletes the ramp.
+// ── Phase 4D/4E: fx.tape.failure rides the orrery bus (MIGRATION_PLAN.md) ───
+// The tape-failure CC is a formal transport-adapter binding: writeCc is
+// driven by the bus's arbitrated RESOLVED value. Since the 4E cutover the
+// ROUTER GRAPH is the incumbent writer (sensor rung, 300) and the legacy
+// ramp below SHADOWS it at 299 — still published every distance sample, so
+// the inspector keeps diffing the two writers and a swap-back (this constant
+// ↔ the graph's output priority) is the pre-delete runtime rollback. 4F
+// deletes the ramp + this whole block.
 //
 // migration_flag: tape_cc (bus | legacy) — env TAPE_CC=legacy reverts CC 23
-// to the direct writeCc call. owner: phase-4d; delete_by: the 4F legacy-ramp
-// deletion PR. Also degrades (loudly) to direct when no orrery bus is wired.
+// to the direct writeCc call (full bypass of bus + graph). owner: phase-4d;
+// delete_by: the 4F legacy-ramp deletion PR. Also degrades (loudly) to
+// direct when no orrery bus is wired.
 const TAPE_PATH = 'fx.tape.failure';
 const LEGACY_TAPE_SOURCE = 'spiffe://pain-material.local/bridge/legacy-tape';
-const PRI_TAPE_INCUMBENT = 300; // the sensor rung — the incumbent priority
+const PRI_TAPE_LEGACY = 299; // shadow since 4E (the graph owns the sensor rung, 300)
 const TAPE_CC_LEGACY = (process.env.TAPE_CC || 'bus') === 'legacy';
 
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
@@ -208,14 +211,15 @@ let tapeBus = null;
 let detachTapeBinding = null;
 let lastTapePublished;
 
-// Legacy incumbent writer: the ramp's value, published on change at the
-// sensor rung. The consumer-side near/far guards above this stay until 4F —
-// since 4C the bus adapter applies the same conditioning at ingest, so the
-// two computations are value-identical (proven on the real golden).
+// Legacy writer (the 4E shadow): the ramp's value, published on change. The
+// consumer-side near/far guards above this stay until 4F — since 4C the bus
+// adapter applies the same conditioning at ingest, so this and the graph are
+// value-identical (proven on the real golden), and the inspector can keep
+// diffing the shadow against the now-winning graph until the ramp is deleted.
 function publishLegacyTape(failure) {
   if (lastTapePublished === failure) return;
   lastTapePublished = failure;
-  tapeBus.publishState(TAPE_PATH, failure, { sourceId: LEGACY_TAPE_SOURCE, priority: PRI_TAPE_INCUMBENT });
+  tapeBus.publishState(TAPE_PATH, failure, { sourceId: LEGACY_TAPE_SOURCE, priority: PRI_TAPE_LEGACY });
 }
 
 // Bell-on-entry state.
@@ -535,7 +539,7 @@ module.exports = ({ publish, bus, orreryBus }) => {
       onResolved: (v) => writeCc(CC_TAPE_FAILURE, clamp(v, 0, 1) * 127),
     });
     console.log('daisy-position: CC 23 bound to bus-resolved fx.tape.failure '
-      + '(4D; legacy incumbent @300, candidate shadows @299)');
+      + '(4E CUTOVER: router graph incumbent @300, legacy ramp shadows @299)');
   } else {
     console.log(`daisy-position: CC 23 on the legacy direct path (${TAPE_CC_LEGACY ? 'TAPE_CC=legacy' : 'no orrery bus wired'})`);
   }

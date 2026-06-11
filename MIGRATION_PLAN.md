@@ -303,6 +303,29 @@ publisher is flagged. **PM impact:** zero.
 > lone-candidate boot, release handover, stale flip, rule-13 quarantine,
 > detach). **4E cutover is now literally the priority swap** (graph 299→300,
 > legacy 300→299) after the soak session passes the quality gate.
+>
+> **Status (2026-06-11): 4E CUTOVER LANDED — soak session pending (the gate's
+> `live_diff_duration: >= 1 full session` is the one criterion only the kiosk
+> can supply).** The swap, exactly as scripted: graph output 299→300
+> (`graphs/tape-failure.json`), legacy ramp 300→299 (`PRI_TAPE_LEGACY` in
+> daisy-position — still published every sample, so the inspector now diffs
+> the *legacy* shadow against the winning graph). CC 23 is the router graph's
+> output for the first time. Pre-delete rollback = swap the two numbers back;
+> `TAPE_CC=legacy` remains the full bypass. **Replay through the cut-over
+> bridge (real golden, speed 1):** every lane MATCH except the pre-declared
+> stochastic toll (EXPECTED_DIFFERENCE — a Math.random toll fired; declared
+> lane since phase 0). The CC 23 lane is now genuinely graph-driven: 1190
+> replay writes vs 1220 legacy-driven golden writes, **MATCH under the
+> declared step-function rules, 1 cap-boundary transient excused (budget
+> 5)** — the same ±30-write cap-phase envelope the offline model has
+> predicted for the graph stream since 4B (1170–1218 across runs). Live lane
+> still exact: **1701 = 1701** value changes, capture `bus_tx` vs sim, now at
+> priority 300. 42/42 tests. Remaining for 4E exit: one full kiosk session
+> (soaks 4C visibility + 4D consumption + this cutover at once, and doubles
+> as the post-cutover golden re-record the doctrine requires); then **4F:
+> delete the legacy ramp, the `legacy-tape` module/role, the `tape_cc` flag,
+> and the `ce577ea` reversed-hardcode debt** (direction then lives only in
+> the graph's `invert: true` — flip it there, one artifact).
 
 The public phase is one phase; **internally it lands as six gated
 milestones**, so simulator, compiler, adapter, and arbitration bugs are never

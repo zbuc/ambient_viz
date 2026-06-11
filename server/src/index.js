@@ -78,11 +78,11 @@ try {
 busAdapter = attachBusAdapter({ bus: orreryBus, inputBus });
 console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch})`);
 
-// Phase-4C/4D: the compiled router graph runs LIVE as a shadow writer — it
-// publishes fx.tape.failure on the bus at candidate priority (299,
-// incumbent−1). Since 4D the legacy ramp is the incumbent bus writer (300,
-// in daisy-position) and the MIDI adapter consumes the RESOLVED value, so
-// the candidate stays shadowed: CC 23 is still legacy's byte stream.
+// Phase-4C/4D/4E: the compiled router graph runs LIVE and, since the 4E
+// cutover, OWNS fx.tape.failure at the sensor rung (300) — the legacy ramp
+// (daisy-position) shadows it at 299 and the MIDI adapter consumes the
+// RESOLVED value, so CC 23 is the graph's output. Pre-delete rollback =
+// swap the two priorities back (graph json + daisy-position constant).
 // Its writes are tapped into the capture stream (`bus_tx`) so any recorded
 // session carries the live graph output for offline diffing
 // (tools/sim/validate-tape.js compares it against the simulated graph and
@@ -112,8 +112,8 @@ try {
     tap: (target, value) => capture.event('bus_tx', { path: target, value }),
   });
   routerEngine.start();
-  console.log(`orrery router: LIVE (shadow) — ${compiled.nodes.size} nodes from ${path.basename(graphPath)}, `
-    + 'fx.tape.failure candidate @299 (CC 23 reads the RESOLVED value; legacy incumbent @300 wins)');
+  console.log(`orrery router: LIVE (incumbent since 4E) — ${compiled.nodes.size} nodes from ${path.basename(graphPath)}, `
+    + 'fx.tape.failure @300 drives CC 23 via the resolved-value binding (legacy ramp shadows @299)');
 } catch (e) {
   console.warn(`orrery router: NOT RUNNING (${e.message}) — legacy unaffected`);
 }
@@ -201,9 +201,9 @@ const DAISY = process.env.DAISY === '1' || process.env.DAISY === 'true' || !!pro
 if (DAISY) {
   // `bus` lets it tail distance_cm / freeze and write them back to the Daisy as
   // CC frames on the same port (Phase E). `orreryBus` makes it a formal
-  // transport adapter (phase 4D): the legacy tape ramp publishes
-  // fx.tape.failure as the incumbent writer and CC 23 consumes the bus's
-  // arbitrated RESOLVED value — legacy still winning, byte stream unchanged.
+  // transport adapter (phase 4D): CC 23 consumes the bus's arbitrated
+  // RESOLVED fx.tape.failure — owned by the router graph since the 4E
+  // cutover, with the legacy ramp publishing one rung below as the shadow.
   require('./inputs/daisy-position')({ publish, bus: inputBus, orreryBus });
   console.log('daisy-position source: enabled');
 }
