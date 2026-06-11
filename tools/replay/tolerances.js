@@ -79,6 +79,14 @@ module.exports = {
       eps_abs: 0.05, lag_ms: 250, grid_ms: 50,
       transient_eps_abs: 0.15, transient_max_ms: 400, transient_grid_frac_max: 0.01,
     },
+    // bitmap x is the PRE-quantize linear nearness (the harmonic blend +
+    // 12 px quantize happen in the browser host); same declared class as the
+    // twist gain — the shape is gentler (linear vs quadratic), the
+    // settle-hold mechanism identical.
+    'fx.viz.bitmap_x': {
+      eps_abs: 0.05, lag_ms: 250, grid_ms: 50,
+      transient_eps_abs: 0.15, transient_max_ms: 400, transient_grid_frac_max: 0.01,
+    },
   },
 
   // --- Daisy note events (the `serial_tx` stream, type 'note_on') -----------

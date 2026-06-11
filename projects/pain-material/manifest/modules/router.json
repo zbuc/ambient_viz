@@ -15,6 +15,9 @@
       "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 2000, "onStale": "ON_STALE_HOLD" },
     { "path": "fx.viz.twist_gain", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
       "range": { "min": 0, "max": 1 }, "nominalRateHz": 30, "maxRateHz": 60,
+      "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 2000, "onStale": "ON_STALE_HOLD" },
+    { "path": "fx.viz.bitmap_x", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 1 }, "nominalRateHz": 30, "maxRateHz": 60,
       "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 2000, "onStale": "ON_STALE_HOLD" }
   ],
   "subscribes": [

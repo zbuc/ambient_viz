@@ -84,9 +84,10 @@ console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch}
 // is deleted independently.
 //   - tape-failure.json OWNS fx.tape.failure @300 — CC 23 IS its output (the
 //     legacy ramp died in 4F; rollback is artifact-level).
-//   - viz-twist.json publishes fx.viz.twist_gain @300 (sole writer) — the
-//     kiosk page consumes it behind the phase-5 `twist` migration_flag while
-//     the legacy in-browser ramp remains the incumbent A/B side.
+//   - viz-twist.json / viz-bitmap.json publish fx.viz.twist_gain /
+//     fx.viz.bitmap_x @300 (sole writers) — the kiosk page consumes them
+//     behind the phase-5 `twist` / `bitmapx` migration_flags while the
+//     legacy in-browser ramps remain the incumbent A/B sides.
 // Every engine's writes are tapped into the capture stream (`bus_tx`) so a
 // recorded session carries each live graph output for offline diffing
 // (tools/sim/validate-tape.js, validate-twist.js). A graph that fails to

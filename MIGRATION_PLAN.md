@@ -422,15 +422,48 @@ if its absence actually hurts). Each mapping is a `migration_flag` with
 > golden through the two-graph boot: all phase-4 lanes unchanged. 50/50
 > tests.
 >
-> **Remaining for distance→twist:** (1) a kiosk session with the shadow live
-> — judge `bus_tx` via validate-twist's live lane and the browser A/B via
-> `tools/replay/twist-ab.js` (all MATCH required); (2) cutover = `&twist=bus`
-> on the kiosk URL, soak one full session; (3) cleanup PR deletes the legacy
-> in-browser ramp + EMA state + the flag (the snapshot trace stays until the
-> phase exit). Then **distance→bitmap** (same template; harmonic interp needs
-> a `Curve LUT` or a second Normalize/Scale chain — decide when cut), then
-> the **tint envelopes** (12 chains; the AR envelope wants `Envelope` —
-> implement from spec like Smooth, or hold browser-side; decide then).
+> **Status (2026-06-11): distance→bitmap SHADOW LANDED — same template,
+> same pending kiosk session.** `graphs/viz-bitmap.json` publishes
+> `fx.viz.bitmap_x` @300: the reversed LINEAR nearness x (Smooth 250 ms →
+> Normalize invert — no curve; bitmap's half of the `ce577ea` debt is now
+> graph `invert: true`). **The graph publishes the x ONLY**: the harmonic
+> blend with the *authored* resolution ceiling (1/height interp), the 12 px
+> quantize, and setLive/resize stay in the browser host — the ceiling is an
+> authored param that is not on the bus, and the IR has no reciprocal of a
+> live signal by design (rules out in-graph harmonic until/unless the
+> ceiling becomes a bus value). `migration_flag: bitmapx (legacy | bus)` —
+> `?bitmapx=bus` (`?bitmap=<px>` was taken by the resolution override);
+> under the bus flag an absent bus value means full-res (sensor-absent
+> semantics), never a silent legacy fallback. Snapshots carry
+> `bitmap_trace`; the A/B judge generalized to `tools/replay/viz-ab.js`
+> (judges all per-mapping traces; supersedes twist-ab.js before anyone ran
+> it). Gate machinery shared in `tools/sim/viz-gate.js` (validate-twist /
+> validate-bitmap are thin per-mapping shapes). **Offline gates: 6/6 MATCH**
+> (both mappings × three goldens; bitmap lag-max 0.016–0.056, twist
+> unchanged post-refactor — the extraction is behavior-preserving). 51/51
+> tests.
+>
+> **Remaining for twist + bitmap (one kiosk session covers both):** (1) a
+> session with the shadows live — judge `bus_tx` via each validator's live
+> lane and the browser A/B via `tools/replay/viz-ab.js` (all MATCH
+> required); (2) cutover = `&twist=bus&bitmapx=bus` on the kiosk URL, soak
+> one full session; (3) each mapping's cleanup PR deletes its legacy
+> in-browser ramp + flag (the shared distance EMA state dies with the LAST
+> in-page consumer — twist's cleanup keeps it if bitmap hasn't cut over
+> yet).
+>
+> **Tint envelopes (mapping 3) — needs a decision before code:** the 12
+> AR envelopes (rise 8 s / fall 18 s) evolve continuously from sparse
+> touch-edge packets, so an arrival-driven RATE_CONTROL `Envelope` would
+> freeze between touches — useless. ROUTER_IR is explicit: self-evolving
+> behavior needs a **tick domain** (first tick-domain implementation in the
+> engine) or stays at the consumer. The honest alternatives: (a) implement
+> `RATE_RENDER_FRAME`-style ticks in the bridge engine and migrate the
+> envelopes whole; (b) declare the envelope **presentation smoothing** (like
+> COLOR_LERP) — the migratable mapping is just electrode→color table +
+> touch_mask fan-in, and the AR stays browser-side. (b) is smaller and
+> arguably truer (the envelope is render-rate visual conduct), but it sets
+> the precedent for what "the mapping" means. Decide before building.
 
 **Boundary (keeps clock work out of this phase):** phase 5 consumes
 `timeline.*` as **ordinary STATE only** (the `Combine MUL` directorial clamp

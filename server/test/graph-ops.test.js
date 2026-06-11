@@ -329,12 +329,12 @@ test('viz-twist graph: legacy reversed quadratic ramp, live endpoints, smoothed'
 test('loadGraphDir: every project graph compiles; one broken file degrades alone', () => {
   const declaredPaths = new Set([
     'sensor.door.distance_cm', 'sensor.door.near_cm', 'sensor.door.far_cm',
-    'fx.tape.failure', 'fx.viz.twist_gain',
+    'fx.tape.failure', 'fx.viz.twist_gain', 'fx.viz.bitmap_x',
   ]);
   const roles = new Map([['router', { name: 'router', canPublish: ['fx.*'], cannotPublish: [], maxPriority: 300 }]]);
   const real = loadGraphDir(path.join(MANIFEST_DIR, 'graphs'), { declaredPaths, roles });
   assert.deepStrictEqual(real.failures, []);
-  assert.deepStrictEqual(real.graphs.map((g) => g.file), ['tape-failure.json', 'viz-twist.json']);
+  assert.deepStrictEqual(real.graphs.map((g) => g.file), ['tape-failure.json', 'viz-bitmap.json', 'viz-twist.json']);
   for (const g of real.graphs) assert.deepStrictEqual(g.compiled.warnings, []);
 
   // A directory where one graph is broken: the rest still compile.
@@ -345,4 +345,36 @@ test('loadGraphDir: every project graph compiles; one broken file degrades alone
   assert.strictEqual(mixed.failures.length, 1);
   assert.strictEqual(mixed.failures[0].file, 'a-broken.json');
   assert.deepStrictEqual(mixed.graphs.map((g) => g.file), ['b-good.json']);
+});
+
+test('viz-bitmap graph: reversed LINEAR nearness x, live endpoints, smoothed', () => {
+  const graphJson = JSON.parse(fs.readFileSync(path.join(MANIFEST_DIR, 'graphs', 'viz-bitmap.json'), 'utf8'));
+  const compiled = compileGraph(graphJson, {
+    roles: new Map([['router', { name: 'router', canPublish: ['fx.*'], cannotPublish: [], maxPriority: 300 }]]),
+  });
+  assert.ok(compiled.ok, compiled.errors.join('; '));
+
+  const clock = { t: 0 };
+  const bus = new OrreryBus({ nowMono: () => clock.t, bootEpochFile: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bmx-')), 'epoch') });
+  bus.stop();
+  const out = [];
+  bus.on('packet', (rec) => {
+    if (rec.accepted && rec.pkt.state && rec.pkt.state.path === 'fx.viz.bitmap_x') {
+      out.push(require('../src/bus').fromValue(rec.pkt.state.value));
+    }
+  });
+  const engine = new GraphEngine({ compiled, bus, sourceId: SRC });
+  engine.start();
+  const feed = (name, v, t) => { clock.t = t; bus.publishState(name, v, { sourceId: 'spiffe://test/pump', priority: 300 }); };
+  feed('sensor.door.near_cm', 75, 0);
+  feed('sensor.door.far_cm', 170, 0);
+  feed('sensor.door.distance_cm', 122.5, 0); // seed: exactly mid-span
+  // Legacy formula: x = 1 - (d-near)/(far-near). Mid-span -> 0.5 — LINEAR,
+  // unlike the twist gain's quadratic 0.25 from the same inputs.
+  assert.ok(Math.abs(out[0] - 0.5) < 1e-12, `seed x ${out[0]} != 0.5`);
+  feed('sensor.door.distance_cm', 75, 1000); // long hold then step toward near
+  const sm = 122.5 + (75 - 122.5) * (1 - Math.exp(-500 / 250)); // dt clamped at 500 ms
+  const expected = 1 - (sm - 75) / 95;
+  assert.ok(Math.abs(out[1] - expected) < 1e-12, `${out[1]} != ${expected}`);
+  engine.stop();
 });
