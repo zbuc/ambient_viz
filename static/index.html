@@ -4267,32 +4267,15 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   window.AMBIENT_INPUTS_BUS = busState;
   if (FEED === 'bus') window.AMBIENT_INPUTS = busState;
 
-  // ── migration_flags: twist / bitmapx (legacy | bus) — phase 5 ─────────────
-  // One flag per visualizer mapping (MIGRATION_PLAN.md): which side
-  // applyAutomation APPLIES — the legacy in-browser ramp (incumbent) or the
-  // router graph's bus output (fx.viz.twist_gain / fx.viz.bitmap_x). BOTH
-  // sides are computed every tick regardless (shadow), and the per-mapping
-  // trace rings below carry the paired A/B into every capture snapshot.
-  // Cutover = append &twist=bus / &bitmapx=bus to the kiosk URL; rollback =
-  // drop it. delete_by: each mapping's own cleanup PR. (`bitmapx` because
-  // `?bitmap=<px>` is already the resolution override.)
-  const _q = new URLSearchParams(location.search);
-  const TWIST_SOURCE = _q.get('twist') === 'bus' ? 'bus' : 'legacy';
-  const BITMAPX_SOURCE = _q.get('bitmapx') === 'bus' ? 'bus' : 'legacy';
-  window.AMBIENT_FLAGS = { feed: FEED, twist: TWIST_SOURCE, bitmapx: BITMAPX_SOURCE };
-
   // fx.* router-graph outputs land on their own surface (they have no legacy
   // SSE name to map to), keyed by path tail: fx.viz.twist_gain ->
-  // AMBIENT_FX['viz.twist_gain']. Assembled from the always-on bus shadow
-  // feed below, regardless of any flag.
+  // AMBIENT_FX['viz.twist_gain']. Assembled from the always-on bus feed
+  // below regardless of the feed flag — since the phase-5 cutover (gate
+  // session 2026-06-11T17-41-44Z) these are the ONLY source of the twist
+  // gain and bitmap nearness x; the in-page ramps are deleted. Rollback is
+  // artifact-level (redeploy the previous release).
   const fxState = Object.create(null);
   window.AMBIENT_FX = fxState;
-
-  // Paired A/B samples ({t, d, legacy, bus}) per mapping, pushed by
-  // applyAutomation at <= 4 Hz on change; postSnapshot drains them.
-  // Ring-capped so an uncaptured session never grows them unboundedly.
-  window.__twistTrace = [];
-  window.__bitmapTrace = [];
 
   // Song position from the Daisy (CDC -> `song_position` topic, ~20 Hz). Capture
   // the local receive time so the frame loop can interpolate between updates and
@@ -4391,15 +4374,9 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
           page_load_id: pageLoadId,
           t_page_ms: (typeof performance !== 'undefined' ? performance.now() : 0),
           feed: FEED, // migration_flag: feed — which object the visualizer reads
-          twist: TWIST_SOURCE, // migration_flag: twist — which gain multiplies maxTwistDeg
-          bitmapx: BITMAPX_SOURCE, // migration_flag: bitmapx — which x feeds the harmonic blend
           inputs: state, // __meta is non-enumerable, so this is just the input map
           inputs_bus: busState, // the shadow feed: every capture carries the A/B
-          inputs_fx: fxState, // router-graph outputs as last seen by the page
-          // The paired per-mapping A/B since the last snapshot (drained here
-          // so samples are recorded exactly once).
-          twist_trace: window.__twistTrace.length ? window.__twistTrace.splice(0) : null,
-          bitmap_trace: window.__bitmapTrace.length ? window.__bitmapTrace.splice(0) : null,
+          inputs_fx: fxState, // router-graph outputs as the page applies them
           meta: { connected: meta.connected, lastEventAt: meta.lastEventAt, error: meta.error },
           song: song.have ? { pos: song.pos, wall: song.wall } : null,
         }),
@@ -5670,18 +5647,16 @@ async function init() {
     return k0.v + (k1.v - k0.v) * f;
   }
 
-  // Distance→effect onset (cm). Both the twist and bitmap mappings share a
-  // fixed 75 cm onset: at/within this distance there is no distance-induced
-  // distortion. The FAR end (where the effect saturates) is NOT fixed — it
-  // tracks the sensor's actual reach, which depends on the distance mode the
-  // Python sidecar auto-selects at boot (short ~130 cm / long ~400 cm). The
-  // sidecar publishes that reach as `distance_far_cm`; we read it live below
-  // and fall back to the short-mode value until the first value arrives.
-  // Onset (NEAR) and far reach (FAR) both come live from the Python sidecar
-  // (distance_near_cm / distance_far_cm topics) so they're tunable on install
-  // day without rebuilding anything — edit config.py once and both the visual
-  // mappings here and the Daisy tape bridge pick it up. Fall back to defaults
-  // until the first published value arrives.
+  // The distance→twist and distance→bitmap MAPPINGS live in the router
+  // graphs since the phase-5 cutover (manifest/graphs/viz-twist.json /
+  // viz-bitmap.json: Smooth 250 ms → Normalize over the live near/far
+  // endpoints — the reversed-room geometry is each graph's `invert: true`;
+  // twist adds EASE_IN_QUAD). The page consumes their resolved bus outputs
+  // (AMBIENT_FX) and keeps only the HOST conduct: the harmonic blend with
+  // the authored ceiling, the realloc quantize, and the worker posts.
+  //
+  // Endpoint helpers below are DIAGNOSTIC-ONLY now (the ?debug=1 overlay /
+  // window.__distbm) — the graphs read the same endpoints from the bus.
   const DISTANCE_NEAR_DEFAULT_CM = 75;
   const DISTANCE_FAR_DEFAULT_CM = 130;
   function distanceNearCm() {
@@ -5693,62 +5668,18 @@ async function init() {
     return (typeof f === 'number' && f > distanceNearCm()) ? f : DISTANCE_FAR_DEFAULT_CM;
   }
 
-  // REVERSED geometry (sensor faces the screen): NEAR = most distorted, FAR =
-  // clearest. Distance→maxTwistDeg: distortion shrinks WITH distance. At/within
-  // NEAR the authored maxTwistDeg is used as-is (max twist); at/beyond the live
-  // FAR reach it goes to zero. Quadratic ease: gain = (1-(d-NEAR)/(FAR-NEAR))².
-  //
-  // Distance→bitmapHeight (opt-in via the distanceToBitmap toggle): resolution
-  // rises WITH distance. At/within NEAR the effective bitmap is locked to MIN
-  // (lowest res); at/beyond FAR it equals the authored ceiling (full res). The
-  // interpolation is HARMONIC (linear in 1/height), not linear in height: the
-  // perceived pixelation scales with pixel size ∝ 1/height, so lerping height
-  // directly leaves the image near-full-res for most of the range then collapses
-  // to MIN in the last few cm — reads as an abrupt min↔max switch, not a
-  // gradient. Interpolating 1/height makes the coarsening grow evenly with
-  // distance. QUANTIZE rounds the effective value so we don't trigger a GPU
-  // buffer realloc on every micro-change (finer than the old 20 px so the
-  // low-height end, where each step is a big relative jump, stays smooth).
+  // Distance→bitmapHeight application (opt-in via the distanceToBitmap
+  // toggle): the graph supplies the nearness x (0 = full authored res, 1 =
+  // MIN res); the blend is HARMONIC (linear in 1/height), not linear in
+  // height: perceived pixelation scales with pixel size ∝ 1/height, so
+  // lerping height directly leaves the image near-full-res for most of the
+  // range then collapses to MIN in the last few cm — reads as an abrupt
+  // min↔max switch, not a gradient. Interpolating 1/height makes the
+  // coarsening grow evenly with distance. QUANTIZE rounds the effective
+  // value so we don't trigger a GPU buffer realloc on every micro-change.
   const DISTANCE_BITMAP_MIN = 64;
   const DISTANCE_BITMAP_QUANTIZE = 12;
   let _lastEffectiveBitmap = null;
-
-  // Browser-side EMA on the SSE distance value. Python smoothes valid
-  // reads (α=0.25 at 50 Hz, ~80 ms tau) and the bitmap path quantizes to
-  // 20-px buckets, so most micro-jitter is already filtered before it
-  // reaches the resize path. Keep a light browser-side smoothing so the
-  // "walk away" → FAR snap doesn't read as a hard cut.
-  const DISTANCE_SMOOTH_TAU_S = 0.25;
-  let _smoothedDistance = null;
-  let _lastDistanceSmoothT = 0;
-
-  // Phase-5 per-mapping A/B trace recorders (paired legacy/bus samples
-  // pushed into the window.__*Trace rings for the capture snapshots).
-  // On-change, <= 4 Hz; bus recorded as null while the router has published
-  // nothing (absent ≠ default — availability is part of the A/B).
-  function makeVizTraceRecorder(minMs, cap) {
-    let lastMs = 0;
-    let lastLegacy = null;
-    let lastBus = null;
-    return (arr, legacy, busRaw, dRaw) => {
-      if (!arr) return;
-      const bus = (typeof busRaw === 'number' && isFinite(busRaw)) ? busRaw : null;
-      const nowMs = performance.now();
-      if (nowMs - lastMs < minMs || (legacy === lastLegacy && bus === lastBus)) return;
-      lastMs = nowMs;
-      lastLegacy = legacy;
-      lastBus = bus;
-      if (arr.length >= cap) arr.shift();
-      arr.push({
-        t: Math.round(nowMs),
-        d: (typeof dRaw === 'number') ? Math.round(dRaw * 10) / 10 : null,
-        legacy: Math.round(legacy * 10000) / 10000,
-        bus: bus === null ? null : Math.round(bus * 10000) / 10000,
-      });
-    };
-  }
-  const _recordTwistAb = makeVizTraceRecorder(250, 256);
-  const _recordBitmapAb = makeVizTraceRecorder(250, 256);
 
   // Visible debug overlay (top-right) when URL has ?debug=1. Created here
   // before applyAutomation so the function's closure binding resolves at
@@ -5776,77 +5707,21 @@ async function init() {
   function applyAutomation(t) {
     let dirty = false;
     for (const k in _automationBatch) delete _automationBatch[k];
-    // Distance→twist gain, REVERSED geometry (see the block comment above):
-    // 1.0 at/within NEAR (max twist), 0.0 at/beyond FAR, (1-x)² between.
-    // Multiplies the authored maxTwistDeg before posting to the worker —
-    // slider/lane authoring still sees the ceiling value. When no distance is
-    // published (sensor offline / not yet wired), gain stays 1 so the
-    // visualizer behaves as if the sensor weren't there.
-    //
-    // migration_flag: twist (MIGRATION_PLAN.md phase 5) — this in-browser
-    // ramp is the LEGACY side; the router graph publishes the candidate as
-    // fx.viz.twist_gain (graphs/viz-twist.json: Smooth 250ms → Normalize
-    // invert → EASE_IN_QUAD — the same math, bridge-hosted). Both are
-    // computed every tick; ?twist=bus applies the graph's. delete_by: the
-    // phase-5 twist cleanup PR (this ramp + the smoothing state above die
-    // there).
-    let twistGain = 1;
-    // dt-based EMA so the smoothing tau is wall-clock-correct even if
-    // applyAutomation runs at varying frame rates or skips a tick.
-    const dRaw = window.AMBIENT_INPUTS && window.AMBIENT_INPUTS.distance_cm;
-    if (typeof dRaw === 'number') {
-      const now = performance.now() / 1000;
-      const dt = (_lastDistanceSmoothT > 0)
-        ? Math.max(0, Math.min(0.5, now - _lastDistanceSmoothT))
-        : 0;
-      _lastDistanceSmoothT = now;
-      if (_smoothedDistance === null || dt === 0) {
-        _smoothedDistance = dRaw;
-      } else {
-        const a = 1 - Math.exp(-dt / DISTANCE_SMOOTH_TAU_S);
-        _smoothedDistance = a * dRaw + (1 - a) * _smoothedDistance;
-      }
-    }
-    const d = _smoothedDistance;
-    const nearCm = distanceNearCm();
+    // Distance→twist gain and distance→bitmap nearness: the router graphs'
+    // resolved outputs, read from the always-on bus feed. An ABSENT value
+    // means the mapping's sensor-absent default — twist gain 1 (the
+    // visualizer behaves as if the sensor weren't there), bitmap no blend
+    // (full authored res) — so a silent router degrades exactly like an
+    // unwired sensor. The gain multiplies the authored maxTwistDeg before
+    // the worker post; slider/lane authoring still sees the ceiling value.
+    const busTwistGain = window.AMBIENT_FX && window.AMBIENT_FX['viz.twist_gain'];
+    const twistGain = (typeof busTwistGain === 'number' && isFinite(busTwistGain))
+      ? busTwistGain : 1;
+    const busBitmapX = window.AMBIENT_FX && window.AMBIENT_FX['viz.bitmap_x'];
+    const bitmapX = (typeof busBitmapX === 'number' && isFinite(busBitmapX))
+      ? busBitmapX : null;
+    const nearCm = distanceNearCm(); // diagnostics only (overlay/__distbm)
     const farCm = distanceFarCm();
-    if (typeof d === 'number') {
-      if (d <= nearCm) {
-        twistGain = 1; // reversed: closest = max twist
-      } else if (d >= farCm) {
-        twistGain = 0; // reversed: farthest = no twist
-      } else {
-        const x = (d - nearCm) / (farCm - nearCm);
-        twistGain = (1 - x) * (1 - x);
-      }
-    }
-    // Phase-5 A/B: the router graphs' candidate values from the always-on
-    // bus shadow feed. Under a bus flag, an ABSENT bus value means the
-    // mapping's sensor-absent default (twist -> gain 1, bitmap -> no blend) —
-    // never a silent fallback to the legacy math, which would muddy the A/B
-    // and hide a dead router. Each flag picks which side gets APPLIED; both
-    // sides feed the snapshot trace rings.
-    const legacyTwistGain = twistGain;
-    const busTwistGainRaw = window.AMBIENT_FX && window.AMBIENT_FX['viz.twist_gain'];
-    const busTwistGain = (typeof busTwistGainRaw === 'number' && isFinite(busTwistGainRaw))
-      ? busTwistGainRaw : 1;
-    const _twistFlag = window.AMBIENT_FLAGS && window.AMBIENT_FLAGS.twist;
-    if (_twistFlag === 'bus') twistGain = busTwistGain;
-    _recordTwistAb(window.__twistTrace, legacyTwistGain, busTwistGainRaw, dRaw);
-
-    // Bitmap nearness x, both sides (the legacy ramp lives here so the trace
-    // always carries it; the distanceToBitmap toggle below only gates
-    // APPLICATION). Legacy: 1 at/within NEAR (min res), 0 at/beyond FAR
-    // (full res), linear between; 0 (no blend) while distance is absent.
-    let legacyBitmapX = 0;
-    if (typeof d === 'number') {
-      if (d <= nearCm) legacyBitmapX = 1;
-      else if (d >= farCm) legacyBitmapX = 0;
-      else legacyBitmapX = 1 - (d - nearCm) / (farCm - nearCm);
-    }
-    const busBitmapXRaw = window.AMBIENT_FX && window.AMBIENT_FX['viz.bitmap_x'];
-    const _bitmapFlag = window.AMBIENT_FLAGS && window.AMBIENT_FLAGS.bitmapx;
-    _recordBitmapAb(window.__bitmapTrace, legacyBitmapX, busBitmapXRaw, dRaw);
 
     let resolvedBitmap = null;
     for (const name of PARAM_NAMES) {
@@ -5871,21 +5746,12 @@ async function init() {
     let _dbgEffective = null;
     if (manual.distanceToBitmap === 'on' && resolvedBitmap !== null) {
       let effective = resolvedBitmap;
-      // migration_flag: bitmapx — which nearness x feeds the blend: the
-      // legacy ramp computed above (incumbent; null while distance is
-      // absent) or the router graph's fx.viz.bitmap_x (null while the
-      // router has published nothing — sensor-absent semantics, full res).
-      // delete_by: the phase-5 distance→bitmap cleanup PR (with the legacy
-      // ramp above).
-      const xApplied = (_bitmapFlag === 'bus')
-        ? ((typeof busBitmapXRaw === 'number' && isFinite(busBitmapXRaw)) ? busBitmapXRaw : null)
-        : ((typeof d === 'number') ? legacyBitmapX : null);
-      if (xApplied !== null && resolvedBitmap > DISTANCE_BITMAP_MIN) {
+      if (bitmapX !== null && resolvedBitmap > DISTANCE_BITMAP_MIN) {
         // Harmonic interp: lerp 1/height so perceived pixelation (∝ 1/height)
         // grows evenly with distance instead of collapsing at the far end.
         const invFull = 1 / resolvedBitmap;
         const invMin = 1 / DISTANCE_BITMAP_MIN;
-        effective = 1 / (invFull + (invMin - invFull) * xApplied);
+        effective = 1 / (invFull + (invMin - invFull) * bitmapX);
       }
       effective = Math.round(effective / DISTANCE_BITMAP_QUANTIZE) * DISTANCE_BITMAP_QUANTIZE;
       _dbgEffective = effective;
@@ -5897,18 +5763,12 @@ async function init() {
     // Diagnostic — read from JS console as window.__distbm
     window.__distbm = {
       toggle: manual.distanceToBitmap,
-      smoothedDistance: _smoothedDistance,
       resolvedBitmap: resolvedBitmap,
       effective: _dbgEffective,
       lastApplied: _lastEffectiveBitmap,
       bitmapHeightVar: bitmapHeight,
       twistGain: twistGain,
-      twistSource: _twistFlag === 'bus' ? 'bus' : 'legacy',
-      twistGainLegacy: legacyTwistGain,
-      twistGainBus: (typeof busTwistGainRaw === 'number') ? busTwistGainRaw : null,
-      bitmapSource: _bitmapFlag === 'bus' ? 'bus' : 'legacy',
-      bitmapXLegacy: legacyBitmapX,
-      bitmapXBus: (typeof busBitmapXRaw === 'number') ? busBitmapXRaw : null,
+      bitmapX: bitmapX,
       nearCm: nearCm,
       farCm: farCm,
     };
@@ -5920,18 +5780,13 @@ async function init() {
       _distbmDbgEl.textContent =
         'toggle=' + manual.distanceToBitmap +
         ' raw=' + (typeof rawDist === 'number' ? rawDist.toFixed(1) : '-') +
-        ' d=' + (typeof _smoothedDistance === 'number' ? _smoothedDistance.toFixed(1) : '-') +
         ' ceil=' + (resolvedBitmap !== null ? resolvedBitmap : '-') +
         ' eff=' + (_dbgEffective !== null ? _dbgEffective : '-') +
         ' bh=' + bitmapHeight +
         ' near=' + nearCm.toFixed(0) +
         ' far=' + farCm.toFixed(0) +
-        ' tg=' + twistGain.toFixed(2) + '(' + (_twistFlag === 'bus' ? 'bus' : 'leg') + ')' +
-        ' tgL=' + legacyTwistGain.toFixed(2) +
-        ' tgB=' + (typeof busTwistGainRaw === 'number' ? busTwistGainRaw.toFixed(2) : '-') +
-        ' bx(' + (_bitmapFlag === 'bus' ? 'bus' : 'leg') + ')' +
-        ' bxL=' + legacyBitmapX.toFixed(2) +
-        ' bxB=' + (typeof busBitmapXRaw === 'number' ? busBitmapXRaw.toFixed(2) : '-') +
+        ' tg=' + twistGain.toFixed(2) +
+        ' bx=' + (bitmapX !== null ? bitmapX.toFixed(2) : '-') +
         ' lvl=' + ((window.__level || 0).toFixed(3));
     }
   }

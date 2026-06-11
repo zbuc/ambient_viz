@@ -497,10 +497,29 @@ chains; see the status block below*). Each mapping is a `migration_flag` with
 > sample-fraction (on-change samples cluster during motion and overcount).
 > Verdicts after declaration: viz-ab MATCH ×2 traces, validate-twist MATCH
 > (incl. live lane 384=384), validate-bitmap MATCH (384=384), goldens
-> unchanged. **The full pipeline — graphs, feed, traces, gates — is proven
-> end to end; what remains is duration:** the cutover gate's `>= 1 full
-> session` soak with the same URL, whose capture then doubles as the
-> promotion candidate for the next canonical golden.
+> unchanged.
+>
+> **Status (2026-06-11): CUTOVER ACCEPTED + CLEANUP DONE — PHASE 5
+> COMPLETE.** Chris accepted the second session as the cutover gate
+> (duration waived — gate owner's call; the session ran with
+> `twist=bus&bitmapx=bus&feed=bus`, so it soaked the applied candidates).
+> Promoted as `fixtures/golden-viz-cutover-2026-06-11T17-41-44Z-pid3792/`
+> — the first golden carrying `fx.viz.*` bus_tx and the browser A/B
+> traces; all gates re-verified against the promoted gzip. **Cleanup
+> (browser-only):** the in-page twist ramp, bitmap ramp, shared distance
+> EMA, both migration_flags, and the A/B trace machinery are deleted —
+> `AMBIENT_FX` (resolved bus values) is the sole source of the twist gain
+> and bitmap x; absent values degrade like an unwired sensor. The kiosk
+> URL's `twist=`/`bitmapx=` params are now inert (harmless to keep, fine
+> to drop). viz-ab retired with the flags it judged (header notes it;
+> still runs against pre-cleanup fixtures). **The standing regression
+> gates for the mappings are validate-twist/validate-bitmap** — their
+> frame-clocked legacy model is now the frozen spec of the deleted
+> in-page math. `applyAutomation()` retains only lane evaluation + host
+> conduct (the harmonic blend/quantize, the gain multiply), as promised.
+> Rollback is artifact-level from here (invariant 4). Phase 2's own
+> cleanup (legacy reader + `feed` flag) remains phase 2's, not ours.
+> **Next: phase 6** (the plugin host; 6.0 toy plugin first).
 >
 > **Status (2026-06-11): tint envelopes RESOLVED BY DECISION — presentation
 > layer, no graph.** Chris's call: the 12 AR envelopes (rise 8 s / fall

@@ -2,6 +2,14 @@
 // Phase-5 visualizer-mapping A/B judge (MIGRATION_PLAN.md): the LIVE cutover
 // gate for the browser-consumed mappings, run over a captured kiosk session.
 //
+// RETIRED 2026-06-11 with the flags it judged: the cutover gate passed on
+// golden-viz-cutover-2026-06-11T17-41-44Z and the cleanup PR deleted the
+// in-page legacy ramps and the trace recording, so post-cleanup captures
+// carry no twist_trace/bitmap_trace (this tool verdicts UNKNOWN on them, by
+// design). It remains runnable against the pre-cleanup fixtures; the
+// standing regression gates for the mappings are tools/sim/validate-twist.js
+// and validate-bitmap.js (model + live bus_tx lanes).
+//
 // The kiosk page computes BOTH sides of every mapping each applyAutomation
 // tick — the legacy in-browser ramp and the router graph's bus output — and
 // records paired on-change samples (<= 4 Hz) into each capture snapshot
