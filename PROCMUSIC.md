@@ -21,7 +21,8 @@ sensors (bus, exists)
   → room-feature graphs              derived.room.*        (1–10 Hz)
   → baseline EMA + deviation         (existing graph ops)
   → derived.room.reward              ← THE PLUGGABLE OBJECTIVE (stub: Const 0)
-  → optimizer plugin ((1+1)-ES)      music.genome.*        (minutes)
+  → optimizer plugin ((1+1)-ES)      music.mood.*          (2-D, minutes)
+  → mood expansion (anchors as data) music.genome.* + fx   (per-project moods.json)
   → resolved-value CC bindings       CC 70–85 over USB-CDC MIDI
   → dsp::procgen conductor           (bar clock, chord FSM, density/tension)
   → per-instrument generators        (Euclidean drums, Markov melody, bass rules)
@@ -118,7 +119,8 @@ Who writes what. Each writer is the **sole writer** of its topics (the
 |---|---|---|---|
 | `derived.room.activity`, `derived.room.baseline_*`, `derived.room.deviation` | router graphs — `graphs/room-features.json` (role `room_features_router`, pattern of `occupancy_router`) | STATE, 1–10 Hz | extends the **existing** `derived.room.*` namespace (`derived.room.occupied` already ships) |
 | `derived.room.reward` | the objective — v1 is a stub graph (`Const 0` → `Output`) | STATE, slow | **the pluggable seam**: replacing the objective = replacing this graph (or later a plugin) — config, not code |
-| `music.genome.<gene>` | optimizer plugin (plugin host) | STATE, minutes | policy edit: `plugin_host.canPublish` += `music.*` |
+| `music.mood.x`, `music.mood.y` | timeline mood lane / sensor graphs / optimizer plugin (none yet — the expander's params carry a static position until a writer lands) | STATE, minutes | the low-dimensional control surface (§5) |
+| `music.genome.<gene>` | mood-expander plugin (plugin host) | STATE, minutes | policy edit: `plugin_host.canPublish` += `music.genome.*` |
 | `music.conductor.bar`, `.chord`, `.scale`, `.density` | daisy-serial bridge module (parsed from `MUS` CDC lines) | EVENT (bar) / STATE | role extension on the daisy identity (today `clock_source`); per-bar, low rate |
 
 Policy changes are two allow-entries plus one role extension in
@@ -128,7 +130,7 @@ a genome value through normal arbitration.
 
 ## 4. The genome
 
-~10 genes, one CC each. **CC 70–85** (current bindings occupy 12–24 only —
+11 genes, one CC each. **CC 70–85** (current bindings occupy 12–24 only —
 `daisy/crates/dsp/src/midi_map.rs`; 70+ stays clear of both the existing knob
 range and the 0–63 14-bit-LSB convention). 7-bit resolution is sufficient:
 genes are slow intentions and the conductor interpolates/smooths internally.
@@ -146,8 +148,13 @@ genes are slow intentions and the conductor interpolates/smooths internally.
 | harmonic_rate | 77 | `ProcHarmonicRate` | 0..1 | bars per chord change (quantized internally) |
 | register | 78 | `ProcRegister` | 0..1 | melody octave center |
 | stab_color | 79 | `ProcStabColor` | 0..1 | per-hit tone variance (existing `stabtone` axis) |
+| note_length | 80 | `ProcNoteLength` | 0..1 | bass gate hold length (2–14 steps); phrasing hook for melody durations later |
 
-(80–85 reserved for genes discovered during P1 listening.)
+(81–85 reserved for genes discovered during listening. `note_length` was the
+first such gene — the duration discussion promoted it out of `bass_activity`
+so "sparser but longer" is expressible. True per-hit melody envelope decay
+decoupled from the brightness/length `stabtone` axis is future voice work;
+until then mood anchors reach stab length through the `StabDecay` fx param.)
 
 **The clamp is structural, in two places — no clamp graph needed:**
 
@@ -168,7 +175,79 @@ deferred until a project needs it.
 pattern, inheriting its on-change dedupe and 33 ms rate cap (idle cost ~zero:
 genes change on a minutes clock).
 
-## 5. `dsp::procgen` design
+## 5. The mood layer
+
+A **mood** ("a more ambient piece", "a techno piece") is a named point in
+parameter space, authored as project data — never code. The algorithm does
+not move between ambient and techno; it moves a **low-dimensional mood
+vector**, and a deterministic expansion turns that into the genome and FX
+values. One level above the genome, same philosophy: intentions parameterize
+intentions.
+
+```
+mood vector (music.mood.x/y, minutes)        ← what moves over time
+  → expansion against authored mood anchors  ← the artistic content, as data
+    → music.genome.* + fx params             ← the existing CC surface (§4)
+      → conductor → generators → notes       ← §6
+```
+
+**Anchors as data.** `projects/<project>/manifest/moods.json` (`moods.v1`),
+peer of `graphs/`. Each anchor is a complete aesthetic snapshot — a position
+on the mood plane, a full genome, and FX params by `Param` name:
+
+```json
+{ "schema": "moods.v1",
+  "anchors": [
+    { "name": "ambient", "pos": [0.2, 0.5],
+      "genome": { "density": 0.18, "harmonic_rate": 0.05, "note_length": 0.85, … },
+      "fx": { "ReverbWet": 0.55, "StabDecay": 0.85, "StabDelayWet": 0.65 } },
+    { "name": "techno", "pos": [0.85, 0.5],
+      "genome": { "density": 0.7, "kick_fill": 0.7, "note_length": 0.15, … },
+      "fx": { "ReverbWet": 0.15, "StabDecay": 0.2 } } ] }
+```
+
+The plane has no fixed semantics — it is a map you arrange anchors on, and
+distance is the only meaning. Authoring anchors is by-ear preset-making: the
+P1 listening pass produces them naturally (save the genomes you like).
+
+**Expansion = inverse-distance² blend.** Weights `wᵢ = 1/(dᵢ² + ε)`
+normalized over all anchors; genome and FX values are the weighted sums. At
+an anchor you hear exactly that anchor; between anchors you get a continuous
+morph. This generalizes the conductor's proven CALM↔TENSE matrix blend —
+continuous params lerp, and structural character is reached through genes
+that are already continuous (a 4/4 kick *is* `kick_fill ≈ 0.7` → E(4,16);
+"hold chords forever" *is* `harmonic_rate → 0`; drone-ness *is* a
+self-weighted transition matrix). Truly discrete assets (which FM patch,
+which field recordings) are **selected, not blended** — nearest anchor,
+switched at phrase boundaries with hysteresis — and are deferred until the
+asset channel exists (§11).
+
+**Where it runs.** The production expansion is the `mood_expander.v1` plugin
+on the plugin host (pure function of `music.mood.x/y`, falling back to its
+instantiation params while no mood writer exists), publishing
+`music.genome.*`. The Mac host carries a parallel audition implementation
+(`--mood` / `--mood-sweep`) reading the **same** `moods.json`, applying both
+genome and FX locally — so moods are hearable before any Pi plumbing.
+Anchor *FX* values reach the Daisy only in P2 with the CC transport (and
+`fx.tape.failure` stays the door graph's — the anchors' `TapeFailure` is
+audition-only until that arbitration is designed).
+
+**The systemic win: the optimizer walks mood space.** (1+1)-ES over a 10-D
+genome on one noisy sample per minutes-long evaluation was the design's
+weakest assumption. Optimizing 2 mood dimensions instead is a far easier
+search — the room pushes the piece between *aesthetics you authored*, and
+the expansion guarantees every point on the path is intentional. Sensors,
+the timeline, and the optimizer all write `music.mood.*` through normal bus
+arbitration (a composed arc = a timeline mood lane at 500; a room-emptying
+graph nudge at 300). Slew-limiting mood movement (minutes-scale Smooth on
+the writers, not in the expander) keeps transitions reading as drift, not
+preset switching.
+
+**Explicitly out of scope for the mood layer itself** (it parameterizes
+them once they exist, §11): the granular/grain-delay send and the
+multi-layer field-recording sampler bank.
+
+## 6. `dsp::procgen` design
 
 ```
 daisy/crates/dsp/src/procgen/
@@ -184,7 +263,7 @@ daisy/crates/dsp/src/procgen/
   `ProducerSel { Grid, Procgen }` chooses which `advance()` the audio path
   consults, both yielding one `StepEvent` per sample at the existing
   `Engine::process()` call site. Keeping both constructed makes the deferred
-  runtime mode-switch (§8) a field write, and the host auditions either mode
+  runtime mode-switch (§9) a field write, and the host auditions either mode
   from one binary. The voices, the master chain, and any downstream `seq.*`
   consumer never know which producer is playing — this is the BACKLOG
   source-producer contract, realized.
@@ -206,7 +285,7 @@ daisy/crates/dsp/src/procgen/
   table lookups and regeneration happen on step/bar boundaries only. No
   per-sample transcendentals.
 
-## 6. Sensor → room-state → reward pipeline (Pi)
+## 7. Sensor → room-state → reward pipeline (Pi)
 
 **v1 is router graphs only — no new ops, no plugin.** The graph engine already
 has everything needed (`Smooth ONE_POLE`, `Envelope AR`, `Combine WEIGHTED`
@@ -226,30 +305,36 @@ A stateful `room_features.v1` plugin is the documented escape hatch for
 features graphs can't express (dwell-time distributions, spatial clustering
 across multiple ToF zones) — same `derived.room.*` topics, swapped writer.
 
-## 7. The optimizer plugin
+## 8. The optimizer plugin
 
 Asset `music_optimizer.v1`, a `plugin.v1` **GENERATOR** on the existing plugin
 host — which already provides exactly what the loop needs: seeded PRNG
 (replayable), 250 ms host tick, snapshot/restore, and the
 `tools/sim/validate-plugin.js` determinism gate.
 
+**It optimizes in mood space, not genome space** (§5): the search is over
+`(x, y)` on the mood plane — 2 dimensions instead of 11, which is what makes
+one-noisy-sample-per-minutes-long-evaluation viable — and the mood expander
+turns the walk into genomes, so every point the optimizer can reach is on a
+path between authored aesthetics.
+
 - **Manifest**: `requiresHostTick: true`, `RATE_CONTROL`, `REPLAYABLE`,
   `SNAPSHOTTABLE`. Inputs: `reward` ← `derived.room.reward` (STATE),
   `occupied` ← `derived.room.occupied` (STATE, optional eval gate — don't
-  burn evaluations on an empty room). Outputs: one FLOAT STATE port per gene →
-  `music.genome.<gene>`.
-- **Params**: `sigma` (mutation scale), `settle_s` (let the room hear the
-  candidate before measuring), `eval_window_s` (reward accumulation),
-  `step_period_s` (generational clock, minutes-ish), plus per-gene
-  `[min,max]` bounds.
+  burn evaluations on an empty room). Outputs: `music.mood.x`, `music.mood.y`
+  (FLOAT STATE), consumed by the mood expander.
+- **Params**: `sigma` (mutation scale on the plane), `settle_s` (let the room
+  hear the candidate before measuring), `eval_window_s` (reward
+  accumulation), `step_period_s` (generational clock, minutes-ish), plane
+  bounds.
 - **Tick state machine**: `INCUMBENT` (emit incumbent, accumulate its reward
-  baseline) → mutate one/few genes via `ctx.rand` → `SETTLE` → `EVALUATE`
+  baseline) → mutate the position via `ctx.rand` → `SETTLE` → `EVALUATE`
   (accumulate candidate reward mean) → compare → keep or revert → repeat.
 - **Snapshot** = incumbent + candidate + accumulators + phase (+ PRNG state,
   which the host already captures): a gallery-day restart resumes the walk
   instead of resetting it.
 
-## 8. Modes & coexistence with backing-track projects
+## 9. Modes & coexistence with backing-track projects
 
 Backing-track playback (today's SD-player firmware) and procgen are **separate
 firmware images**, selected per project/exhibit through the existing cargo
@@ -259,7 +344,7 @@ for a QSPI build, and a runtime mode-switch (timeline-driven
 composed piece) is explicitly **deferred** until then. On the Mac host, a rig
 flag selects the producer, so both modes stay auditioned from one binary.
 
-## 9. Phased implementation plan
+## 10. Phased implementation plan
 
 Ordered by risk-retirement; every phase independently verifiable, exploiting
 the platform's replay machinery (golden traces on the dsp side, plugin
@@ -274,6 +359,13 @@ validator + captured sensor sessions on the Pi side).
   audition via the cpal host / `patch_server` browser editor. **This phase is
   where the music gets good or doesn't — budget listening time, not just
   tests.**
+- **P1m — the mood layer** *(follows P1's listening pass — anchors are its
+  artifacts)*. `moods.json` anchors; the `mood_expander.v1` plugin publishing
+  `music.genome.*` (static position from params until a mood writer lands);
+  host `--mood` / `--mood-sweep` audition reading the same anchors file.
+  *Verify:* expander unit tests (anchor-exact at anchors, blend continuity,
+  emit-on-change dedupe, snapshot/restore); host blend tests; audible A/B of
+  the anchors and a sweep between them.
 - **P2 — genome surface + CC plumbing (host)**. `Param` variants, `bind_cc`
   per the §4 table in `install_kiosk_bindings`, `apply_param` → conductor
   setters.
@@ -295,17 +387,18 @@ validator + captured sensor sessions on the Pi side).
   `derived.room.reward` Const-0 stub, policy role.
   *Verify:* replay a captured sensor session through `tools/sim` → golden
   feature trajectories (the validate-occupancy pattern).
-- **P6 — optimizer plugin + genome→CC bindings**.
+- **P6 — optimizer plugin (mood-space walk) + genome→CC bindings**.
   *Verify:* `tools/sim/validate-plugin.js` replay determinism (same seed +
-  trace → byte-identical genome emissions); snapshot/restore resume test;
-  multi-hour Mac-host soak against a replayed sensor trace confirming drift
-  stays inside the clamp envelope.
+  trace → byte-identical mood/genome emissions); snapshot/restore resume
+  test; multi-hour Mac-host soak against a replayed sensor trace confirming
+  the walk stays on the mood plane and the expansion inside the clamp
+  envelope.
 - **P7 — exhibit integration**. Plugin instance JSON, policy allow-entries,
   golden session, install-day checklist addition.
   *Verify:* full-stack golden session; **degrade test** — kill the bridge
   mid-session, Daisy keeps playing on the last genome.
 
-## 10. Deferred / open
+## 11. Deferred / open
 
 - **The objective function** — deliberately open (invariant 3). Audition
   candidates as data (reward graphs / a reward plugin) in the real room after
@@ -315,8 +408,20 @@ validator + captured sensor sessions on the Pi side).
 - **CA percussion texture**, **pads generator** (needs a pad voice first),
   **multi-zone spatial features** (needs added ToF hardware; the
   `room_features.v1` plugin escape hatch).
-- **Runtime producer switching / generative interludes** — post-QSPI (§8).
+- **Runtime producer switching / generative interludes** — post-QSPI (§9).
 - **Visualizer consumption of `music.conductor.*` / `seq.*`** — the BACKLOG
   "Sequencer event → visualizer feed" item; P4 makes the signals exist.
 - **Genome A/B or multi-armed audition tooling** — compare objective
   candidates against logged sessions.
+- **Grain-delay / granular send** — explicitly excluded from the mood-layer
+  build (Chris, 2026-06-11); the freeze/Stutter machinery is adjacent but is
+  not this. Mood anchors gain a granular fx key when it lands.
+- **Multi-layer field-recording sampler bank** — per-layer gains the mood
+  layer can blend; today's `Sampler` is one buffer. Also explicitly excluded
+  from the mood-layer build.
+- **Mood writers** — timeline mood lane, sensor→mood graphs (need a policy
+  role for `music.mood.*`), and the P6 optimizer; until one lands, the
+  expander's instantiation params hold the static position.
+- **Mood-driven asset selection** — nearest-anchor patch/sample switching at
+  phrase boundaries with hysteresis; needs the asset channel (patch select,
+  sampler bank) to exist first.

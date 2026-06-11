@@ -19,6 +19,9 @@ midir = "0.10"
 # `patch_server` bin deserializes FmPatch/BassPatch from the browser editor's
 # POST bodies (the patch structs derive serde in `dsp`).
 serde_json = "1.0"
+# Derive on the host-only mood-anchor structs (mood.rs); `dsp::Genome`
+# brings its own serde impls from the dsp crate.
+serde = { version = "1.0", features = ["derive"] }
 
 # Minimal blocking HTTP server for the `patch_server` bin — fits the host's
 # existing synchronous cpal/midir architecture (no async runtime).

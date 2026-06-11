@@ -261,6 +261,14 @@ flip, not a schema migration. The order roughly tracks blast radius. Detail in
 
 ## Firmware / DSP (Daisy)
 
+- [ ] **Grain-delay / granular send** — a granular FX send the mood layer can
+  parameterize (mood anchors gain a granular fx key when it lands). Explicitly
+  excluded from the mood-layer build (Chris, 2026-06-11); the freeze/Stutter
+  machinery is adjacent but is not this. — `PROCMUSIC.md` (§11)
+- [ ] **Multi-layer field-recording sampler bank** — today's `Sampler` is one
+  buffer; the mood layer wants several layers with per-layer gains it can blend
+  ("more field recordings" in ambient moods). Also explicitly excluded from the
+  mood-layer build. — `PROCMUSIC.md` (§11), mem `exhibit-composition-structure`
 - [ ] **async/DMA SD reads** — non-blocking SDMMC the audio task can `await` +
   double-buffering, so SD reads stop freezing the embassy executor (root cause of the
   USB iso clicks). Interim: contiguous-sector reads to make each read uniform <1 ms.

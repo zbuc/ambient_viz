@@ -28,11 +28,13 @@ impl BassGen {
         self.release_step = 0;
     }
 
-    /// Hold length in steps for the current gene (4 steps ≈ one beat at 16th
-    /// resolution, up to 14 — just short of a full bar so releases breathe).
+    /// Hold length in steps from the `note_length` gene (2 steps = a clipped
+    /// half-beat at 16th resolution, up to 14 — just short of a full bar so
+    /// releases breathe). Decoupled from `bass_activity` (strike rate) so
+    /// "sparser but longer" is expressible.
     fn hold_steps(genome: &Genome) -> u32 {
-        let a = genome.bass_activity.clamp(0.0, 1.0);
-        (4.0 + 10.0 * a + 0.5) as u32
+        let nl = genome.note_length.clamp(0.0, 1.0);
+        (2.0 + 12.0 * nl + 0.5) as u32
     }
 
     /// Advance one step. `abs_step` is the producer's global step counter,
@@ -74,7 +76,7 @@ mod tests {
     #[test]
     fn downbeat_strike_then_release_after_hold() {
         let mut b = BassGen::new();
-        let g = Genome::default(); // activity 0.4 → hold 8 steps, no mid-bar
+        let g = Genome::default(); // note_length 0.5 → hold 8 steps; activity 0.4 → no mid-bar
         let hold = BassGen::hold_steps(&g);
         let mut events = std::vec::Vec::new();
         for s in 0..(STEPS_PER_BAR as u32 * 2) {

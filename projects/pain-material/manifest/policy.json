@@ -48,9 +48,9 @@
     },
     {
       "name": "plugin_host",
-      "canPublish": ["seq.*"],
+      "canPublish": ["seq.*", "music.genome.*"],
       "cannotPublish": ["clock.*", "safety.*", "sensor.*", "touch.*", "ui.*", "transport.*", "fx.*"],
-      "canSubscribe": ["sensor.*", "touch.*", "clock.*", "ui.*", "timeline.*", "fx.*"],
+      "canSubscribe": ["sensor.*", "touch.*", "clock.*", "ui.*", "timeline.*", "fx.*", "music.*"],
       "maxPriority": 300
     },
     {

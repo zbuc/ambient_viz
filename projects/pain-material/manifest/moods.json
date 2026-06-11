@@ -1,0 +1,63 @@
+{
+  "schema": "moods.v1",
+  "_comment": [
+    "Mood anchors (PROCMUSIC.md §5) — each anchor is a complete aesthetic",
+    "snapshot: a position on the mood plane, a full genome, and FX params by",
+    "dsp Param name. The plane has no fixed semantics; distance is the only",
+    "meaning. Expansion = inverse-distance² blend over all anchors, done by",
+    "the mood_expander plugin (Pi) and the host's --mood audition rig (Mac),",
+    "both reading THIS file. Values are first drafts — tune by ear and add",
+    "anchors freely; new genes default in old anchors (serde default).",
+    "FX values apply in host audition now; they reach the Daisy with the P2",
+    "CC transport. fx.tape.failure stays the door graph's — TapeFailure here",
+    "is audition-only until that arbitration is designed."
+  ],
+  "anchors": [
+    {
+      "name": "ambient",
+      "pos": [0.2, 0.5],
+      "genome": {
+        "density": 0.18,
+        "tension": 0.12,
+        "kick_fill": 0.15,
+        "hat_fill": 0.12,
+        "markov_temp": 0.6,
+        "brightness": 0.35,
+        "bass_activity": 0.25,
+        "harmonic_rate": 0.05,
+        "register": 0.55,
+        "stab_color": 0.3,
+        "note_length": 0.85
+      },
+      "fx": {
+        "ReverbWet": 0.55,
+        "StabDelayWet": 0.65,
+        "StabDecay": 0.85,
+        "TapeFailure": 0.25
+      }
+    },
+    {
+      "name": "techno",
+      "pos": [0.85, 0.5],
+      "genome": {
+        "density": 0.7,
+        "tension": 0.45,
+        "kick_fill": 0.7,
+        "hat_fill": 0.7,
+        "markov_temp": 0.25,
+        "brightness": 0.7,
+        "bass_activity": 0.75,
+        "harmonic_rate": 0.4,
+        "register": 0.45,
+        "stab_color": 0.15,
+        "note_length": 0.15
+      },
+      "fx": {
+        "ReverbWet": 0.15,
+        "StabDelayWet": 0.35,
+        "StabDecay": 0.2,
+        "TapeFailure": 0.05
+      }
+    }
+  ]
+}

@@ -13,7 +13,32 @@
     { "path": "seq.toy.pulse", "valueType": "VALUE_TYPE_INT", "shape": "SHAPE_EVENT", "unit": "count",
       "nominalRateHz": 0.5, "maxRateHz": 4,
       "maxQueue": 64, "overflowPolicy": "OVERFLOW_DROP_OLDEST",
-      "dedupe": true }
+      "dedupe": true },
+    { "path": "music.genome.density", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.tension", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.kick_fill", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.hat_fill", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.markov_temp", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.brightness", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.bass_activity", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.harmonic_rate", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.register", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.stab_color", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true },
+    { "path": "music.genome.note_length", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "nominalRateHz": 0.05, "maxRateHz": 4, "dedupe": true }
   ],
-  "subscribes": []
+  "subscribes": [
+    { "path": "music.mood.x" },
+    { "path": "music.mood.y" }
+  ]
 }

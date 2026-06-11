@@ -1,0 +1,11 @@
+{
+  "instance": "mood",
+  "seed": 2,
+  "authorityRole": "plugin_host",
+  "priority": 300,
+  "binding": {
+    "asset": "mood_expander.v1",
+    "inputs": {},
+    "params": { "mood_x": 0.2, "mood_y": 0.5 }
+  }
+}

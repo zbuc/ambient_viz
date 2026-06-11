@@ -46,7 +46,7 @@ pub use hihat::HiHat;
 pub use midi::{MidiByteParser, MidiMessage};
 pub use midi_map::{MidiMap, Param, install_kiosk_bindings};
 pub use pain_voice::PainMaterialVoice;
-pub use procgen::{Genome, ProcGen, ProducerSel};
+pub use procgen::{GENE_COUNT, Genome, ProcGen, ProducerSel};
 pub use svf::Svf;
 pub use wavetable::{WtFilterType, WtPatch, WtSynth};
 

@@ -40,10 +40,16 @@ pub const STEPS_PER_BEAT: usize = 4;
 pub const BEATS_PER_BAR: usize = 4;
 pub const STEPS_PER_BAR: usize = STEPS_PER_BEAT * BEATS_PER_BAR;
 
-/// The slow "intention" parameter set the optimizer evolves (PROCMUSIC.md §4,
-/// one CC per gene). All genes are 0..1; semantic ranges live in the
-/// consumers so the wire format stays uniform.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Number of genes in [`Genome`] (= `to_array().len()`).
+pub const GENE_COUNT: usize = 11;
+
+/// The slow "intention" parameter set the mood layer / optimizer evolves
+/// (PROCMUSIC.md §4, one CC per gene). All genes are 0..1; semantic ranges
+/// live in the consumers so the wire format stays uniform. Serde derives so
+/// mood-anchor JSON (`moods.v1`) deserializes straight into it on the host;
+/// `#[serde(default)]` keeps old anchor files loading when genes are added.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Genome {
     /// Global busyness: melody fill and velocity floor.
     pub density: f32,
@@ -65,6 +71,10 @@ pub struct Genome {
     pub register: f32,
     /// Per-hit tone variance around `brightness`.
     pub stab_color: f32,
+    /// Note durations: bass gate hold length (2–14 steps); the phrasing hook
+    /// for melody durations later. Promoted out of `bass_activity` so
+    /// "sparser but longer" is expressible (PROCMUSIC.md §4, CC 80).
+    pub note_length: f32,
 }
 
 impl Default for Genome {
@@ -82,6 +92,7 @@ impl Default for Genome {
             harmonic_rate: 0.25,
             register: 0.4,
             stab_color: 0.2,
+            note_length: 0.5,
         }
     }
 }
@@ -101,10 +112,46 @@ impl Genome {
             &mut self.harmonic_rate,
             &mut self.register,
             &mut self.stab_color,
+            &mut self.note_length,
         ] {
             *g = g.clamp(0.0, 1.0);
         }
         self
+    }
+
+    /// Genes as a fixed-order array — the blend/CC wire order (PROCMUSIC.md
+    /// §4 table order). Keep `from_array`, the CC table, and `GENE_COUNT` in
+    /// sync when adding genes.
+    pub fn to_array(&self) -> [f32; GENE_COUNT] {
+        [
+            self.density,
+            self.tension,
+            self.kick_fill,
+            self.hat_fill,
+            self.markov_temp,
+            self.brightness,
+            self.bass_activity,
+            self.harmonic_rate,
+            self.register,
+            self.stab_color,
+            self.note_length,
+        ]
+    }
+
+    pub fn from_array(a: [f32; GENE_COUNT]) -> Self {
+        Self {
+            density: a[0],
+            tension: a[1],
+            kick_fill: a[2],
+            hat_fill: a[3],
+            markov_temp: a[4],
+            brightness: a[5],
+            bass_activity: a[6],
+            harmonic_rate: a[7],
+            register: a[8],
+            stab_color: a[9],
+            note_length: a[10],
+        }
     }
 }
 
@@ -624,6 +671,31 @@ mod tests {
             let e = pg.advance();
             assert!(e.kick_velocity.is_none() && e.stab.is_none());
         }
+    }
+
+    #[test]
+    fn genome_array_roundtrip_covers_every_gene() {
+        let g = Genome::default();
+        assert_eq!(Genome::from_array(g.to_array()), g);
+        // A distinct value per slot proves order + coverage.
+        let mut a = [0.0f32; GENE_COUNT];
+        for (i, v) in a.iter_mut().enumerate() {
+            *v = i as f32 / GENE_COUNT as f32;
+        }
+        assert_eq!(Genome::from_array(a).to_array(), a);
+    }
+
+    #[test]
+    fn genome_deserializes_from_anchor_json_with_defaults() {
+        // Partial JSON (an old anchor file) fills missing genes from Default.
+        let g: Genome = serde_json_core::from_str::<Genome>(
+            r#"{"density":0.7,"note_length":0.9}"#,
+        )
+        .unwrap()
+        .0;
+        assert_eq!(g.density, 0.7);
+        assert_eq!(g.note_length, 0.9);
+        assert_eq!(g.tension, Genome::default().tension);
     }
 
     #[test]

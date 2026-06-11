@@ -107,7 +107,7 @@ function mulberry32(seed) {
 // asset.vN -> { manifest (codec-validated), create }. One contract, many
 // impls is the eventual shape; this registry holds the bridge's JS impls.
 function builtinAssets() {
-  const modules = [require('./plugins/toy-timer')];
+  const modules = [require('./plugins/toy-timer'), require('./plugins/mood-expander')];
   const assets = new Map();
   for (const mod of modules) {
     const manifest = pluginGen.PluginManifest.fromJSON(mod.manifest); // schema-of-record validation

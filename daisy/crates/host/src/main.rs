@@ -23,16 +23,48 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+mod mood;
+
+/// Value of `--flag <value>`, if present.
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+}
+
 fn main() -> Result<()> {
     // First non-flag argument is the audio path; `--no-seq` runs the engine
     // with the step sequencer disabled (track + processing, no drum pattern).
     let args: Vec<String> = env::args().skip(1).collect();
     let no_seq = args.iter().any(|a| a == "--no-seq");
+    // Mood audition (PROCMUSIC.md §5): `--mood <name|x,y>` pins a position on
+    // the mood plane; `--mood-sweep <a>,<b>,<secs>` raised-cosine sweeps
+    // between two anchors. Both read moods.json (override: --moods <path>)
+    // and imply --procgen.
+    let mood_static = flag_value(&args, "--mood");
+    let mood_sweep = flag_value(&args, "--mood-sweep");
+    let moods_path = flag_value(&args, "--moods");
     // `--procgen` swaps the grid sequencer for the procedural conductor
     // (PROCMUSIC.md P1 audition rig). Tempo comes from the timeline sidecar
     // when one is loaded, else a fixed default; seed via PROCGEN_SEED.
-    let procgen = args.iter().any(|a| a == "--procgen");
-    let audio_path = args.into_iter().find(|a| !a.starts_with("--"));
+    let procgen = args.iter().any(|a| a == "--procgen")
+        || mood_static.is_some()
+        || mood_sweep.is_some();
+    // The audio path is the first non-flag token that isn't a value-flag's value.
+    let audio_path = {
+        const VALUE_FLAGS: [&str; 3] = ["--mood", "--mood-sweep", "--moods"];
+        let mut found = None;
+        let mut i = 0;
+        while i < args.len() {
+            if VALUE_FLAGS.contains(&args[i].as_str()) {
+                i += 2;
+            } else if args[i].starts_with("--") {
+                i += 1;
+            } else {
+                found = Some(args[i].clone());
+                break;
+            }
+        }
+        found
+    };
 
     let host = cpal::default_host();
     let device = host
@@ -81,7 +113,7 @@ fn main() -> Result<()> {
         mp3_path = Some(path.to_path_buf());
     } else {
         eprintln!(
-            "no audio path provided — no backing track (voices still play).\n  usage: cargo run -p host -- [<file>] [--no-seq] [--procgen]"
+            "no audio path provided — no backing track (voices still play).\n  usage: cargo run -p host -- [<file>] [--no-seq] [--procgen] [--mood <name|x,y>] [--mood-sweep <a>,<b>,<secs>] [--moods <path>]"
         );
     }
 
@@ -121,6 +153,69 @@ fn main() -> Result<()> {
             eng.procgen().genome(),
             seed.map(|s| s.to_string()).unwrap_or_else(|| "default".into()),
         );
+    }
+
+    // Mood audition: blend the moods.json anchors at a static or swept
+    // position, pushing genome + FX into the engine at 10 Hz. The Mac mirror
+    // of the Pi's mood_expander plugin — same file, same math.
+    if mood_static.is_some() || mood_sweep.is_some() {
+        let path = moods_path
+            .map(std::path::PathBuf::from)
+            .or_else(mood::default_path)
+            .context("no moods.json found — pass --moods <path>")?;
+        let file = mood::load(&path)?;
+        let names: Vec<&str> = file.anchors.iter().map(|a| a.name.as_str()).collect();
+        println!("moods: {} anchors from {} ({})", file.anchors.len(), path.display(), names.join(", "));
+
+        enum Drive {
+            Static([f32; 2]),
+            Sweep { a: [f32; 2], b: [f32; 2], period_s: f32 },
+        }
+        let drive = if let Some(spec) = &mood_sweep {
+            let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+            let [a, b, secs] = parts.as_slice() else {
+                anyhow::bail!("--mood-sweep wants <anchorA>,<anchorB>,<seconds>, got {spec:?}");
+            };
+            let period_s: f32 = secs.parse().with_context(|| format!("sweep seconds {secs:?}"))?;
+            println!("mood sweep: {a} ↔ {b} every {period_s} s");
+            Drive::Sweep {
+                a: mood::resolve_pos(&file, a)?,
+                b: mood::resolve_pos(&file, b)?,
+                period_s: period_s.max(1.0),
+            }
+        } else {
+            let spec = mood_static.as_deref().unwrap();
+            let pos = mood::resolve_pos(&file, spec)?;
+            println!("mood pinned: {spec} -> [{}, {}]", pos[0], pos[1]);
+            Drive::Static(pos)
+        };
+
+        let mood_engine = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            loop {
+                let pos = match &drive {
+                    Drive::Static(p) => *p,
+                    Drive::Sweep { a, b, period_s } => {
+                        let t = start.elapsed().as_secs_f32();
+                        // Raised cosine: a → b → a, dwelling at the ends.
+                        let m = 0.5 - 0.5 * (t / period_s * 2.0 * std::f32::consts::PI).cos();
+                        [a[0] + (b[0] - a[0]) * m, a[1] + (b[1] - a[1]) * m]
+                    }
+                };
+                let (genome, fx) = mood::blend(&file.anchors, pos);
+                {
+                    let mut eng = mood_engine.lock().unwrap();
+                    eng.procgen_mut().set_genome(genome);
+                    for (name, v) in &fx {
+                        if let Some(p) = mood::param_for(name) {
+                            eng.apply_param(p, *v);
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
     }
 
     // MIDI CC bindings — shared with the Daisy firmware via

@@ -1054,6 +1054,7 @@ dependencies = [
  "cpal",
  "dsp",
  "midir",
+ "serde",
  "serde_json",
  "symphonia",
  "tiny_http",
