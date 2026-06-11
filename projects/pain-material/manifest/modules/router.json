@@ -1,0 +1,22 @@
+{
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://pain-material.local/bridge/router",
+    "instanceId": "main",
+    "humanLabel": "Router graph (bridge-hosted, phase 4+)",
+    "type": "router-graph-host",
+    "firmwareVersion": "bridge",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "router",
+  "publishes": [
+    { "path": "fx.tape.failure", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 1 }, "nominalRateHz": 30, "maxRateHz": 60,
+      "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 2000, "onStale": "ON_STALE_HOLD" }
+  ],
+  "subscribes": [
+    { "path": "sensor.door.distance_cm" },
+    { "path": "sensor.door.near_cm" },
+    { "path": "sensor.door.far_cm" }
+  ]
+}

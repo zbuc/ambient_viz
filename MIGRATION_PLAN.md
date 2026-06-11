@@ -228,6 +228,21 @@ publisher is flagged. **PM impact:** zero.
 > tests. Note: real-sensor golden re-record is needed before the 4E gate
 > numbers are tuned (a 4C shadow session doubles as the recording); 4B
 > compiler correctness validates fine against the mock golden.
+>
+> **Status (2026-06-10): 4B COMPLETE.** Op set `Const / Normalize / Curve /
+> Scale / Combine` in compiler + engine (rule-13 finite quarantine, degenerate
+> spans step); first real artifacts: `manifest/graphs/tape-failure.json`
+> (live near/far endpoints) + `modules/router.json` + `router` policy role
+> (fx.* only, ≤300). Gate (`tools/sim/validate-tape.js`): graph →
+> `fx.tape.failure` → MIDI-adapter model (quantize/dedupe/33 ms cap =
+> `writeCc` verbatim) vs the golden's CC 23: **15,205 predicted = 15,205
+> captured, exact, MATCH**; 34/34 tests. **Discovery:** legacy guards
+> endpoint claims consumer-side (`far > near`, `0 ≤ near < far`) and the
+> golden contains a real far=50 claim legacy rejected — but the phase-1
+> adapter forwards raw claims, so bus `far_cm` diverges from legacy-effective.
+> The validator mirrors the guards (counted, declared); **4C must hoist this
+> conditioning to the bridge ingest boundary** (effective values on the bus,
+> defaults as a low-priority writer) before the live shadow can compare.
 
 The public phase is one phase; **internally it lands as six gated
 milestones**, so simulator, compiler, adapter, and arbitration bugs are never

@@ -25,12 +25,22 @@ const SHAPE_STATE = 1;  // router.v1 Output.Shape.STATE
 
 const OP_KEYS = ['input', 'const', 'curve', 'scale', 'smooth', 'gate', 'combine', 'select',
   'delay', 'member', 'output', 'envelope', 'trigger', 'latch', 'normalize'];
-const IMPLEMENTED = new Set(['input', 'output']); // 4A engine surface
+// The 4B compiler surface (MIGRATION_PLAN.md): the tape-failure mapping's op
+// set. Stateful/temporal nodes and Select/Gate stay compile errors until the
+// phase that needs them.
+const IMPLEMENTED = new Set(['input', 'const', 'curve', 'scale', 'combine', 'normalize', 'output']);
+
+const COMBINE_ARITY_CAP = 16; // rule 6: bounded fan-in, over-cap is an error
 
 // op -> node ids it reads (the graph's dependency edges). Extended per phase
 // alongside the engine's evaluator.
 const DEPS = {
   input: () => [],
+  const: () => [],
+  scale: (op) => [op.input],
+  curve: (op) => [op.input],
+  normalize: (op) => [op.input, op.lo, op.hi],
+  combine: (op) => op.inputs || [],
   output: (op) => [op.input],
 };
 
@@ -83,6 +93,34 @@ function compileGraph(graphJson, { declaredPaths = null, roles = null, instanceI
         if (declaredPaths && !declaredPaths.has(p)) {
           warnings.push(`input "${node.id}": path ${p} is not declared in any module manifest`);
         }
+      }
+    } else if (node.op === 'const') {
+      const v = node.def.value;
+      if (!v || !['number', 'integer', 'boolean', 'text', 'vec'].some((k) => v[k] !== undefined)) {
+        errors.push(`const "${node.id}": value must be a populated common.v1.Value`);
+      }
+    } else if (node.op === 'scale') {
+      if (!Number.isFinite(node.def.mul) || !Number.isFinite(node.def.add)) {
+        errors.push(`scale "${node.id}": mul/add must be finite`);
+      }
+    } else if (node.op === 'curve') {
+      const c = node.def;
+      if (!(c.kind >= 1 && c.kind <= 6)) errors.push(`curve "${node.id}": unknown kind ${c.kind}`);
+      if (c.kind === 6 && (!c.lut || c.lut.length < 2)) errors.push(`curve "${node.id}": LUT needs >= 2 points`);
+      if (![c.inMin, c.inMax, c.outMin, c.outMax].every(Number.isFinite)) {
+        errors.push(`curve "${node.id}": in/out range must be finite`);
+      }
+    } else if (node.op === 'normalize') {
+      for (const ref of ['input', 'lo', 'hi']) {
+        if (!node.def[ref]) errors.push(`normalize "${node.id}": missing ${ref} (lo/hi are node ids — live signals)`);
+      }
+    } else if (node.op === 'combine') {
+      const c = node.def;
+      if (!c.inputs || c.inputs.length < 1) errors.push(`combine "${node.id}": needs >= 1 input`);
+      else if (c.inputs.length > COMBINE_ARITY_CAP) errors.push(`combine "${node.id}": ${c.inputs.length} inputs exceeds the rule-6 cap (${COMBINE_ARITY_CAP})`);
+      if (!(c.mode >= 1 && c.mode <= 6)) errors.push(`combine "${node.id}": unknown mode ${c.mode}`);
+      if (c.mode === 6 && (!c.weights || c.weights.length !== (c.inputs || []).length || !c.weights.every(Number.isFinite))) {
+        errors.push(`combine "${node.id}": WEIGHTED needs one finite weight per input`);
       }
     } else if (node.op === 'output') {
       const o = node.def;

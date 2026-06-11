@@ -49,10 +49,22 @@ function parseArgs(argv) {
   return args;
 }
 
-function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false }) {
+// opts.seeds: [{name, value}] — legacy config values in effect during the
+//   capture (e.g. the bridge's near/far defaults the mock sidecar never
+//   published), injected as the first pump entries at session start and
+//   recorded in the report. The replay-harness analog is goldenEnv().
+// opts.collect: [bus paths] -> returned as { collected: { path: [{t, value}] } }
+//   so validators get trajectories without re-parsing signals.jsonl.
+// opts.graphSourceId: the engine's writer identity (default: the sim identity
+//   echo writer; the tape validator passes the real router stableId).
+// opts.conditionEntries: optional transform over the input timeline (e.g. the
+//   tape validator's source-conditioning mirror of legacy validity guards).
+function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false,
+  seeds = [], collect = [], graphSourceId = SIM_SOURCE, conditionEntries = null }) {
   const golden = loadSession(goldenDir);
   if (golden.badLines) console.warn(`warning: ${golden.badLines} unparseable lines in golden events.jsonl`);
-  const entries = inputEntries(golden.events);
+  let entries = inputEntries(golden.events);
+  if (conditionEntries) entries = conditionEntries(entries);
   if (!entries.length) throw new Error('golden capture contains no replayable inputs (ingest items / serial_rx pos)');
   fs.mkdirSync(outDir, { recursive: true });
 
@@ -67,10 +79,12 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false }) 
   });
   bus.stop(); // kill the wall-clock _meta interval; the scheduler drives _meta in virtual time
 
-  // Manifests + policy, exactly as the bridge loads them — plus the
-  // sim-scoped writer overlay (in memory only, reported below).
+  // Manifests + policy, exactly as the bridge loads them. The identity mode
+  // additionally gets the sim-scoped writer overlay (in memory only, reported
+  // below); a real graph (e.g. tape-failure) authorizes via the project's own
+  // router role — no overlay.
   const registry = loadRegistry(MANIFEST_DIR);
-  const overlay = injectSimWriter(registry);
+  const overlay = identityCheck ? injectSimWriter(registry) : null;
   applyRegistry(registry, bus);
 
   const declaredPaths = new Set();
@@ -90,6 +104,9 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false }) 
   const rejects = { count: 0, sample: [] };
   const pendingEcho = []; // accepted graph-covered inputs awaiting their echo
   const identity = { compared: 0, mismatches: [], extraEchoes: 0 };
+  const collectSet = new Set(collect);
+  const collected = {};
+  for (const p of collectSet) collected[p] = [];
 
   bus.on('packet', (rec) => {
     const body = rec.pkt.state || rec.pkt.event || {};
@@ -110,10 +127,13 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false }) 
     });
     if (isMeta) { metaLines.push(line); return; }
     signalLines.push(line);
+    if (rec.pkt.state && collectSet.has(body.path)) {
+      collected[body.path].push({ t: clock.now(), value: fromValue(body.value) });
+    }
 
     if (!identityCheck || !rec.pkt.state) return;
     const v = fromValue(body.value);
-    if (srcId === SIM_SOURCE) {
+    if (srcId === graphSourceId) {
       const expected = pendingEcho.shift();
       if (!expected) { identity.extraEchoes += 1; return; }
       identity.compared += 1;
@@ -128,7 +148,7 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false }) 
   });
 
   // ── engine + adapter + pump, wired in bridge order ────────────────────
-  const engine = new GraphEngine({ compiled, bus, sourceId: SIM_SOURCE });
+  const engine = new GraphEngine({ compiled, bus, sourceId: graphSourceId });
   engine.start();
 
   const inputBus = new EventEmitter();
@@ -140,15 +160,17 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false }) 
   });
   const pump = makePump({ inputBus, clock });
 
-  // Arbitration watch: at every virtual-second tick (and once at the end),
-  // no resolved STATE winner may be the graph's writer while a live incumbent
-  // exists — the shadow must shadow.
+  // Arbitration watch (identity mode): at every virtual-second tick (and once
+  // at the end), no resolved STATE winner may be the echo writer while a live
+  // incumbent exists — the shadow must shadow. Not meaningful for a real
+  // graph, whose sinks (fx.*) have no rival writer to lose to.
   const arbitration = { checks: 0, violations: [] };
   const checkArbitration = () => {
+    if (!identityCheck) return;
     for (const [p, entry] of bus.paths) {
       if (p.startsWith('_meta.') || entry.shape !== 'state' || !entry.resolved) continue;
       arbitration.checks += 1;
-      if (entry.resolved.sourceId === SIM_SOURCE && arbitration.violations.length < 10) {
+      if (entry.resolved.sourceId === graphSourceId && arbitration.violations.length < 10) {
         arbitration.violations.push({ t: clock.now(), path: p });
       }
     }
@@ -156,8 +178,12 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false }) 
   scheduler.addRepeating(() => { bus._publishMeta(); checkArbitration(); }, META_TICK_MS);
 
   // ── run ────────────────────────────────────────────────────────────────
+  // Seeds fire first, at session start, before any captured entry.
   const t0 = Date.now();
-  scheduler.run(entries.map((e) => ({ t: e.t, run: () => pump.emit(e.name, e.value) })));
+  scheduler.run([
+    ...seeds.map((s) => ({ t: startT, run: () => pump.emit(s.name, s.value) })),
+    ...entries.map((e) => ({ t: e.t, run: () => pump.emit(e.name, e.value) })),
+  ]);
   checkArbitration();
   const wallMs = Date.now() - t0;
   engine.stop();
@@ -170,7 +196,7 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false }) 
     const snap = bus.snapshot();
     for (const [p, view] of Object.entries(snap)) {
       if (p.startsWith('_meta.')) continue;
-      const echo = (view.writer_candidates || []).find((c) => c.source_id === SIM_SOURCE);
+      const echo = (view.writer_candidates || []).find((c) => c.source_id === graphSourceId);
       if (echo) endStatus[p] = echo.status;
     }
   }
@@ -202,6 +228,7 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false }) 
     inputs: {
       capture_events: golden.events.length,
       input_entries: entries.length,
+      seeds, // legacy config restored at session start, declared not hidden
       pump_emitted: pumpCounts.emitted,
       pump_deduped: pumpCounts.deduped,
     },
@@ -244,7 +271,7 @@ function runSim({ goldenDir, graphJson, identityCheck, outDir, quiet = false }) 
     }
     console.log(`\nsim verdict: ${report.verdict}  (report: ${path.join(outDir, 'report.json')})`);
   }
-  return report;
+  return { report, collected };
 }
 
 function main() {
@@ -258,7 +285,7 @@ function main() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace(/-\d{3}Z$/, 'Z');
   const outDir = path.resolve(args.out || path.join(goldenDir, 'sims', `${label}-${stamp}`));
 
-  const report = runSim({ goldenDir, graphJson, identityCheck, outDir, quiet: args.quiet });
+  const { report } = runSim({ goldenDir, graphJson, identityCheck, outDir, quiet: args.quiet });
   process.exit(report.verdict === 'REGRESSION' ? 1 : 0);
 }
 

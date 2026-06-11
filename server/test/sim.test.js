@@ -92,7 +92,7 @@ function writeSyntheticGolden(root) {
 test('identity sim on a synthetic capture: MATCH, keepalives included', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orrery-sim-'));
   const goldenDir = writeSyntheticGolden(root);
-  const report = runSim({
+  const { report } = runSim({
     goldenDir, graphJson: identityGraph(), identityCheck: true,
     outDir: path.join(root, 'run1'), quiet: true,
   });

@@ -291,4 +291,7 @@ function compare(golden, replay, tolerances) {
   };
 }
 
-module.exports = { compare };
+// compareCc is exported standalone for the phase-4B graph validator
+// (tools/sim/validate-tape.js): same step-function rules, same declared
+// tolerances, applied to a predicted CC stream instead of a replay capture.
+module.exports = { compare, compareCc };

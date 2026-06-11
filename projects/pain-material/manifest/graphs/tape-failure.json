@@ -1,0 +1,15 @@
+{
+  "schema": "router.v1",
+  "nodes": [
+    { "id": "d",    "rateDomain": "RATE_CONTROL", "input": { "path": "sensor.door.distance_cm" } },
+    { "id": "near", "rateDomain": "RATE_CONTROL", "input": { "path": "sensor.door.near_cm" } },
+    { "id": "far",  "rateDomain": "RATE_CONTROL", "input": { "path": "sensor.door.far_cm" } },
+
+    { "id": "nearness", "rateDomain": "RATE_CONTROL",
+      "normalize": { "input": "d", "lo": "near", "hi": "far", "invert": true } },
+
+    { "id": "tape_out", "rateDomain": "RATE_CONTROL",
+      "output": { "input": "nearness", "target": "fx.tape.failure", "shape": "STATE",
+                  "priority": 300, "authorityRole": "router" } }
+  ]
+}
