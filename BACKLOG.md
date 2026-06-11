@@ -161,6 +161,26 @@ Then — and only then — ESP bridge, render groups/LED nodes, OSC/MIDI adapter
 
 ## Runtime contracts (harden before scale)
 
+- [ ] **Firmware pinning + manifest-driven flashing** (2026-06-11, phase-4C
+  conversation). Two halves of one loop — the manifest as the single source
+  of truth for what a node must be running:
+  1. **Pin at enrollment** — ProjectPolicy gains per-`stable_id` expected
+     firmware (version tag first, WARN-mode mismatch as a registry load
+     warning — catches "flashed the wrong build on strip 3" before doors;
+     later the measured `firmware_hash` + trust FSM QUARANTINE per
+     MANIFEST_PROTOCOL's open question, WARN→ENFORCE per staging doctrine).
+     The point is FEATURE correctness, not just security: a node missing a
+     feature its manifest claims (plugin asset, shaping slots) must surface
+     before the show, loudly. Cheap precursor available any time:
+     `schema_version` compat-gate check in registry.js (currently unchecked).
+  2. **Flash from the manifest** — build/flash tooling reads the module
+     manifests to select featureset + target per node (the Daisy's modular
+     per-install builds — feature-gated cargo aliases, ITCM knapsack — are
+     already per-build; manifests give that selection a declared source, and
+     the same applies to future ESP edge nodes). Declared capabilities →
+     build features → flashed image → enrollment verifies the loop closed.
+
+
 The operational layer surfaced by the external architecture review (2026-06-09,
 `Modular AV Architecture Design` PDF). Staging doctrine: **parameters present,
 enforcement staged** — each contract's *fields* ship in the schema/wire format
