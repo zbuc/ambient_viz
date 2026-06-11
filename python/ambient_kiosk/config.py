@@ -11,7 +11,7 @@ import os
 #   PIR_PINS=4 ./run_kiosk.sh
 PIR_PINS = [int(p) for p in os.environ.get("PIR_PINS", "4,23").split(",") if p.strip()]
 PIR_PIN = PIR_PINS[0] if PIR_PINS else 4  # back-compat: first sensor
-BREATH_PIN = 17     # TLC555 pin 3 (OUTPUT) — frequency counter input
+BREATH_PIN = 17  # TLC555 pin 3 (OUTPUT) — frequency counter input
 TOUCH_IRQ_PIN = 27  # MPR121 IRQ
 
 # I2C addresses (shared bus on GPIO2/GPIO3)
@@ -27,11 +27,13 @@ PIR_BOOT_SUPPRESS_S = 60.0  # ignore output for the first 60s post-process-start
 # it probes the L1X first (a cheap, non-destructive model-ID read) and only
 # falls through to the L5CX (which uploads an ~84 KB firmware blob) when the
 # L1X isn't wired. Pin it explicitly for a deterministic install boot.
-VL53_SENSOR = os.environ.get("VL53_SENSOR", "auto").strip().lower()  # "auto" | "l1x" | "l5cx"
+VL53_SENSOR = (
+    os.environ.get("VL53_SENSOR", "auto").strip().lower()
+)  # "auto" | "l1x" | "l5cx"
 
 # --- VL53L1X (single-point) -------------------------------------------------
-VL53_DISTANCE_MODE = 1     # 1 = short, 2 = long. Fallback when auto-select
-                           # is off or can't read ambient (see below).
+VL53_DISTANCE_MODE = 1  # 1 = short, 2 = long. Fallback when auto-select
+# is off or can't read ambient (see below).
 # Timing budget (ms), per the VL53L1X datasheet: 20 ms is the floor and is valid
 # ONLY in short mode; 33 ms is the floor for any mode; 140 ms is required to
 # reach the full 4 m in long mode (dark, white target). The Adafruit lib accepts
@@ -53,8 +55,8 @@ VL53_TIMING_BUDGET_MS = VL53_TIMING_BUDGET_MS_SHORT
 # tuned on-site: run test_tof.py with the projector ON, on the real wall,
 # read the printed ambient rate, and set this just above the dark baseline.
 VL53_AUTO_MODE = True
-VL53_AMBIENT_CAL_S = 1.0       # how long to sample ambient before deciding
-VL53_AMBIENT_LONG_MAX = 1500   # ambient at/below this -> long; above -> short
+VL53_AMBIENT_CAL_S = 1.0  # how long to sample ambient before deciding
+VL53_AMBIENT_LONG_MAX = 1500  # ambient at/below this -> long; above -> short
 
 VL53_PUBLISH_HZ = 50
 VL53_SMOOTH_ALPHA = 0.25
@@ -112,7 +114,9 @@ EMPTY_ROOM_LEARN = True
 EMPTY_ROOM_VELOCITY_CM_S = float(os.environ.get("EMPTY_ROOM_VELOCITY_CM_S", "0.8"))
 # How long (s) velocity must stay below the threshold before the current
 # reading is accepted as the empty-room background. The request's ">10 s".
-EMPTY_ROOM_STILLNESS_WINDOW_S = float(os.environ.get("EMPTY_ROOM_STILLNESS_WINDOW_S", "10.0"))
+EMPTY_ROOM_STILLNESS_WINDOW_S = float(
+    os.environ.get("EMPTY_ROOM_STILLNESS_WINDOW_S", "10.0")
+)
 # Once a still scene persists, don't re-adopt more often than this (s). Keeps
 # the estimate updating "periodically" without thrashing every frame.
 EMPTY_ROOM_RELEARN_S = 5.0
@@ -134,9 +138,9 @@ EMPTY_ROOM_DOWN_ALPHA = 0.25
 # Used when VL53_SENSOR selects it. No short/long mode like the L1X — a single
 # ~4 m range. The zone grid is reduced to one distance by taking the closest
 # valid zone in the cone, so it publishes the same `distance_cm` topic.
-VL53L5CX_RESOLUTION = 16    # 16 = 4x4 (up to 60 Hz), 64 = 8x8 (up to 15 Hz)
+VL53L5CX_RESOLUTION = 16  # 16 = 4x4 (up to 60 Hz), 64 = 8x8 (up to 15 Hz)
 VL53L5CX_RANGING_HZ = 15
-VL53L5CX_FAR_CM = 400.0     # far reach + no-target snap (published as distance_far_cm)
+VL53L5CX_FAR_CM = 75.0  # far reach + no-target snap (published as distance_far_cm)
 # Which zones form the "cone." None = every zone (closest target anywhere in
 # the FoV). To ignore edge zones grazing the wall/floor, set a tuple of indices
 # (row-major, 0..15 for 4x4 / 0..63 for 8x8) — e.g. the central 2x2 of a 4x4
@@ -144,8 +148,8 @@ VL53L5CX_FAR_CM = 400.0     # far reach + no-target snap (published as distance_
 VL53L5CX_CONE_ZONES = None
 
 # HR202 / TLC555 breath detection
-BREATH_WINDOW_S = 0.2       # measurement window
-BREATH_WARMUP_S = 10.0      # collect baseline, no detection
+BREATH_WINDOW_S = 0.2  # measurement window
+BREATH_WARMUP_S = 10.0  # collect baseline, no detection
 BREATH_BASELINE_ALPHA = 0.02
 BREATH_TRIGGER_RATIO = 1.3  # fast_freq > baseline * this -> event
 BREATH_DEBOUNCE_S = 3.0
