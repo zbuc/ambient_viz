@@ -1,71 +1,134 @@
-# ambient_viz
+# orrery
 
-A **modular system for A/V projects** — synthesis, sampling, sequencing,
-sensing, and visuals bound together by a configurable clock and a uniform way
-of routing signals between them. See **`ARCHITECTURE.md`** for the high-level
-model (control bus, clock, host+plugin visualizers, LED/projector tiers).
+**orrery** is a modular platform for A/V installations and performances —
+synthesis, sampling, sequencing, sensing, and visuals bound together by a
+configurable clock and one uniform way of routing signals between them.
+(The repository still carries its original name, `ambient_viz`; the platform
+and its schemas — `orrery.*.v1` — are named orrery.)
 
-The project began as — and still ships — a **browser-based audio visualizer**
-for ambient / industrial / IDM material: black-and-white CRT/glitch aesthetic,
-reference points NIN, Aphex Twin, Venetian Snares. That visualizer was built
-for the **Pain Material** installation (`EXHIBIT.md`), which is now the
-**reference project**, not the whole system. Most of this README documents that
-reference visualizer; the platform direction lives in `ARCHITECTURE.md`.
+It grew out of — and still ships — a browser-based audio visualizer built for
+the **Pain Material** installation (`EXHIBIT.md`): ambient/industrial/IDM
+material, black-and-white CRT/glitch aesthetic. Pain Material is now the
+**reference project** being migrated onto the platform contracts, piece by
+piece, without ever taking the installation down (`MIGRATION_PLAN.md`).
 
-## Components
+**New here? → [Getting started](GETTING_STARTED.md)** *(under construction)*
 
-- **Synthesis** — FM, wavetable, voice engines (`daisy/`).
-- **Sample playback** — SD-backed streaming on the Daisy.
-- **Sequencer** — sample-accurate `StepEvent` source (`daisy/` host).
-- **Audio I/O** — swappable audio source: synth, **live instrument/mic in** via
-  the Daisy ADC (working with live musicians), or off-Daisy entirely; optional
-  multi-channel I/O (`daisy/MULTICHANNEL_IO.md`).
-- **Effects** — in-DSP on the Daisy, and/or a software-routable **analog FX
-  rack** on a modular backplane (`ANALOG_FX_RACK.md`).
-- **Chromium visualizer** — `static/index.html` (the reference visualizer;
-  target is a thin host + swappable plugins).
-- **Sensing + routing** — Pi sensors → bridge → signal bus → params
-  (`SENSOR_MAPPING.md`, `python/`, `server/`); optional distributed wireless
-  sensors (`ESP32_SENSOR_NETWORK.md`).
-- **Master clock** — configurable; today the `bpm` lane of the track timeline,
-  sometimes the sequencer (`ARCHITECTURE.md` → Clock).
-- **Visualization** — a media plane, not one device: a *scene* produced once
-  feeds one or more *emitters* — Chromium (today), addressable LED arrays,
-  laser/ILDA, and (future, special-hardware) multi-projector walls.
+## Design overview
 
-The big picture — the **three planes** (one control plane parameterizing the
-audio + render media planes), swappable audio source and visual emitters, and
-how the FX rack / sensor network / multi-channel I/O fit — is in
-**`ARCHITECTURE.md`**.
+### Three planes
 
-## Layout
+One **control plane** parameterizes two **media planes** (`ARCHITECTURE.md` →
+*Three planes*):
 
-- `static/` — everything served to the browser.
-  - `index.html` — the app (HTML + CSS + JS, no build step).
-  - `tests.html` — runtime test harness.
-  - `irocz.svg` — source artwork for the flying-shape silhouette (Inkscape output).
-  - `irocz.png`, `transcending.png` — auxiliary artwork.
-  - `20251006_arrangement_1.mp3` + `.timeline.json` — bundled demo track.
-- `tools/` — Node build helpers, not served.
-  - `preprocess.js` — flattens `static/irocz.svg` into `tools/silhouette.js`.
-  - `silhouette.js` — generated; the embedded `CAR_SUBPATHS` block in
-    `static/index.html` is a copy of this file's data. Regenerate via
-    `node tools/preprocess.js`, then paste into `static/index.html`.
-  - `verify.js` — renders `silhouette.js` to `/tmp/verify.png` for sanity checks.
-- `server/` — Node SSE bridge: serves `static/` over HTTP and relays kiosk
-  sensor events to the browser via SSE. Pure Node stdlib. See `server/README.md`.
-- `python/` — Python sensor sidecar for the kiosk build. Reads GPIO/I²C on
-  a Pi, POSTs events to the Node bridge. See `python/README.md`.
-- `hardware-handoff.md` — canonical hardware spec for the kiosk build
-  (sensors, pin map, wiring, tuning).
-- `PI_KIOSK_BRINGUP.md` — phased runbook for taking a bare Pi 4 to all
-  four sensors streaming into the visualizer, with a verification step
-  between each phase.
-- `SENSOR_MAPPING.md` — how live sensor readings drive visualizer
-  parameters (distance → twist amplitude, distance → bitmap
-  resolution, etc.). Covers smoothing semantics, URL flags
-  (`?distanceToBitmap=on`, `?debug=1`), tuning knobs, and the
-  diagnostic overlay.
+- **Control plane** — low-bandwidth named signals: sensors, clocks, UI,
+  sequencer steps, analysis features. It decides *what the content does*.
+- **Audio plane** — sample streams flowing through devices to speakers
+  (Daisy Seed DSP, host synths, the analog FX rack).
+- **Render plane** — frames / visual descriptions flowing to emitters: the
+  Chromium visualizer today; addressable LEDs, laser/ILDA, multi-projector
+  later. A *scene* is produced once and distributed to many emitters.
+
+Sensors feed control; audio analysis taps the audio plane and publishes
+features back onto control; the render plane is terminal — it consumes.
+
+### The control bus (`bus.v1`)
+
+Every control-plane value is a **signal** at a path `domain.instance.field`
+(`sensor.door.distance_cm`, `clock.daisy.position`, `ui.browser.freeze`) with
+one of two shapes: **STATE** (latest-replaces, retained, replayed to late
+joiners) or **EVENT** (append-only, never coalesced, bounded queues where
+every drop is counted — no silent loss). Packets carry a durable SPIFFE-style
+source identity and a `(boot_epoch, seq)` ordering key that survives reboots;
+**priority arbitration** picks one effective writer per STATE sink from an
+operator-defined authority ladder (safety → manual → UI → timeline → sensors).
+Diagnostics are bus-native under the reserved `_meta.*` domain, so the
+**signal inspector** (`/inspector`) is just another subscriber: it renders
+every path's resolved value *and* every pre-resolution writer candidate, plus
+per-field enforcement truth values. Spec: `BUS_PROTOCOL.md`, `COMMON_PROTO.md`.
+
+### Modularity
+
+Modules declare what they are and what they publish in a **manifest** —
+claims, not rights. The operator's **ProjectPolicy** decides what's permitted:
+roles with publish globs, priority ceilings, an enrollment allowlist
+(`MANIFEST_PROTOCOL.md`). Installation-specific content lives under
+`projects/<name>/` (manifests, fixtures, scenes, patches); the engine stays
+generic. Routing between signals and parameters is (phase 4+) a compiled,
+typed graph (`ROUTER_IR.md`); generative behaviors become host-ticked,
+deterministic **plugins** (`PLUGIN_CONTRACT.md`). Clock sources, audio
+sources, and visual emitters are all swappable behind the same contracts.
+
+### Security and safety
+
+Enforcement is **staged, and staging is visible**: every check runs
+OFF → WARN → ENFORCE per project (`runtime_modes` is live config), and the
+inspector **banners any permissive mode** — staged enforcement must never
+*look* enforced. Identity is present from day one (SPIFFE-style ids,
+signature fields carried-but-unverified until enabled) so turning enforcement
+on is a config change, not a refactor. Safety is the exception with no
+permissive mode: a device's `SafeEnvelope` (brightness caps, laser scan
+limits, flash-rate guards) is enforced node-local, last in the chain,
+unconditionally — no packet at any priority can exceed it.
+
+### Testability
+
+The recorded session is the regression suite. A read-only **capture tap**
+records every bridge boundary (raw + decoded, in arrival order); the **replay
+harness** re-injects a capture into the unmodified system and a typed
+comparator verdicts every output stream MATCH / EXPECTED_DIFFERENCE /
+REGRESSION / UNKNOWN — where every tolerance is declared and an undiagnosed
+difference blocks (`tools/replay/`). Migration follows **shadow → compare →
+cut over → delete**: new implementations run alongside legacy at lower
+priority, observably in the inspector, before any flip; every cutover has a
+runtime rollback (flag/priority swap) and an artifact rollback (redeploy).
+Golden captures live in `projects/pain-material/fixtures/`.
+
+### Specs and plans
+
+| Doc | What it is |
+|---|---|
+| `ARCHITECTURE.md` | The platform model: planes, roles, clock tiers, runtime contracts |
+| `COMMON_PROTO.md` / `BUS_PROTOCOL.md` / `MANIFEST_PROTOCOL.md` / `ROUTER_IR.md` / `PLUGIN_CONTRACT.md` | The five `orrery.*.v1` schemas (spec docs; `proto/` is the executable IDL) |
+| `MIGRATION_PLAN.md` | Phased strangler-fig migration of Pain Material onto the contracts (phases 0–3 landed) |
+| `BACKLOG.md` | The permanent future-work backlog |
+| `EXHIBIT.md` | Pain Material: the installation's design |
+
+## Codebase overview
+
+- `proto/` — the executable `orrery.*.v1` schemas (`common`, `bus`,
+  `manifest`) + ts-proto codegen (`gen.sh`); generated CJS is committed under
+  `server/src/gen/` so nothing needs a build step at runtime.
+- `server/` — the Node bridge (pure stdlib + serialport): serves `static/`,
+  ingests sensor events (`/ingest`), streams them to the browser (legacy SSE
+  `/events` and bus-over-SSE `/bus/events`), owns the Daisy serial port, runs
+  the in-process **bus** (`src/bus.js`), the **manifest registry + policy**
+  (`src/registry.js`), the legacy→bus **adapter** (`src/bus-adapter.js`), and
+  the phase-0 **capture tap** (`src/capture.js`). Tests: `npm test`.
+- `static/` — everything served to the browser: `index.html` (the Pain
+  Material visualizer — single file, no build), `inspector.html` (the signal
+  inspector), `audio/` (sequencer + patch editors).
+- `python/` — the sensor sidecar for the kiosk Pi (ToF distance, PIR motion,
+  MPR121 touch, breath); every driver runs hardware-free with `--mock`.
+- `daisy/` — the audio coprocessor: a Rust workspace with a `no_std` DSP core
+  shared by a Mac host and the Daisy Seed firmware (synthesis, tape/freeze FX,
+  SD sample streaming, USB/MIDI/CDC transport).
+- `tools/replay/` — capture replay harness, comparator, feed A/B gate,
+  fake-Daisy serial shim.
+- `projects/pain-material/` — the reference project: `manifest/` (module
+  manifests + ProjectPolicy), `fixtures/` (golden captures).
+- `run_kiosk.sh` — launches bridge + sidecar together for the kiosk.
+- Hardware/runbooks: `hardware-handoff.md`, `PI_KIOSK_BRINGUP.md`,
+  `SENSOR_MAPPING.md`, `PI_PERFORMANCE.md`.
+
+---
+
+# Pain Material — the reference visualizer
+
+The remainder of this README documents the reference visualizer itself —
+the single-file app in `static/index.html` (its asset pipeline lives in
+`tools/preprocess.js` / `tools/verify.js`; runtime tests in
+`static/tests.html`).
 
 ## Two ways to run
 
