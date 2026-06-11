@@ -446,8 +446,18 @@ function updateToll(nowMs) {
 // sample (vs the slow tick); it gates the sustained-approach counter (distance
 // bell only). computeOccupancy runs first so the bell, voice, and toll all read
 // one consistent roomOccupied for this evaluation.
+let lastCapturedOccupancy = null; // phase-6.1 shadow comparison tap state
 function updateTriggers(nowMs, fresh) {
   computeOccupancy(nowMs);
+  // Phase-6.1 occupancy shadow tap (read-only): record every legacy occupancy
+  // EDGE so a captured session carries the authoritative trajectory the
+  // shadow graph (derived.room.occupied, in bus_tx) is judged against —
+  // tools/sim/validate-occupancy.js correlates the two lanes. Dies when
+  // legacy rebinds to the graph (the 6.1 cutover for this signal).
+  if (roomOccupied !== lastCapturedOccupancy) {
+    lastCapturedOccupancy = roomOccupied;
+    capture.event('legacy_occupancy', { occupied: roomOccupied });
+  }
   updateBellTrigger(nowMs, fresh);
   updateVoiceTrigger(nowMs);
   updateToll(nowMs);

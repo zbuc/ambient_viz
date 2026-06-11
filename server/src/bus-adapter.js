@@ -115,6 +115,13 @@ function attachBusAdapter({ bus, inputBus, now = Date.now, scheduleRepeating = d
   const endpointRejects = [];
   send(MAP.distance_near_cm.path, NEAR_DEFAULT_CM + 0.0, { sourceId: DEFAULTS_SOURCE, priority: PRI_IDLE }, staleFor.get(MAP.distance_near_cm.path));
   send(MAP.distance_far_cm.path, FAR_DEFAULT_CM + 0.0, { sourceId: DEFAULTS_SOURCE, priority: PRI_IDLE }, staleFor.get(MAP.distance_far_cm.path));
+  // Motion baseline (phase 6.1): the occupancy graph's Combine waits for ALL
+  // inputs, so a session with no AM312 traffic must still resolve motion —
+  // as false, the legacy meaning of "no motion ever seen" (motionPresent()
+  // is false when nothing arrived). One idle-priority claim at boot; any
+  // real sidecar edge out-arbitrates it. Same effective-values doctrine as
+  // the near/far defaults above.
+  send(MAP.motion.path, false, { sourceId: DEFAULTS_SOURCE, priority: PRI_IDLE }, staleFor.get(MAP.motion.path));
 
   const onChange = (entry) => {
     const { name, value } = entry;

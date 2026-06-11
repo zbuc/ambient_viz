@@ -15,7 +15,10 @@
       "interpolation": "INTERPOLATION_STEP", "staleAfterMs": 10000, "onStale": "ON_STALE_HOLD" },
     { "path": "sensor.door.far_cm", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "cm",
       "range": { "min": 0, "max": 400 }, "nominalRateHz": 0.2, "maxRateHz": 1,
-      "interpolation": "INTERPOLATION_STEP", "staleAfterMs": 10000, "onStale": "ON_STALE_HOLD" }
+      "interpolation": "INTERPOLATION_STEP", "staleAfterMs": 10000, "onStale": "ON_STALE_HOLD" },
+    { "path": "sensor.room.motion", "valueType": "VALUE_TYPE_BOOL", "shape": "SHAPE_STATE", "unit": "",
+      "nominalRateHz": 0, "maxRateHz": 1,
+      "interpolation": "INTERPOLATION_STEP" }
   ],
   "subscribes": []
 }

@@ -28,13 +28,17 @@ const SHAPE_STATE = 1;  // router.v1 Output.Shape.STATE
 
 const OP_KEYS = ['input', 'const', 'curve', 'scale', 'smooth', 'gate', 'combine', 'select',
   'delay', 'member', 'output', 'envelope', 'trigger', 'latch', 'normalize'];
-// The compiler surface (MIGRATION_PLAN.md): the 4B tape-failure op set plus
-// phase 5's Smooth (ONE_POLE only — the viz-twist mapping migrates the legacy
-// browser EMA). Everything else stays a compile error until the phase that
-// needs it.
-const IMPLEMENTED = new Set(['input', 'const', 'curve', 'scale', 'smooth', 'combine', 'normalize', 'output']);
+// The compiler surface (MIGRATION_PLAN.md): the 4B tape-failure op set,
+// phase 5's Smooth (ONE_POLE only), and phase 6.1's occupancy-conditioning
+// trio — Trigger (STATE -> in-graph event edge), Latch (COUNT set/reset),
+// Envelope (AR follower). Everything else stays a compile error until the
+// phase that needs it.
+const IMPLEMENTED = new Set(['input', 'const', 'curve', 'scale', 'smooth', 'combine', 'normalize', 'output',
+  'trigger', 'latch', 'envelope']);
 
 const SMOOTH_ONE_POLE = 1; // router.v1 Smooth.Kind.ONE_POLE
+const LATCH_COUNT = 3;     // router.v1 Latch.Mode.COUNT
+const ENVELOPE_AR = 2;     // router.v1 Envelope.Mode.AR
 
 const COMBINE_ARITY_CAP = 16; // rule 6: bounded fan-in, over-cap is an error
 
@@ -49,6 +53,9 @@ const DEPS = {
   normalize: (op) => [op.input, op.lo, op.hi],
   combine: (op) => op.inputs || [],
   output: (op) => [op.input],
+  trigger: (op) => [op.input],
+  latch: (op) => (op.reset ? [op.input, op.reset] : [op.input]),
+  envelope: (op) => [op.input],
 };
 
 function compileGraph(graphJson, { declaredPaths = null, roles = null, instanceId = '' } = {}) {
@@ -132,6 +139,32 @@ function compileGraph(graphJson, { declaredPaths = null, roles = null, instanceI
       for (const ref of ['input', 'lo', 'hi']) {
         if (!node.def[ref]) errors.push(`normalize "${node.id}": missing ${ref} (lo/hi are node ids — live signals)`);
       }
+    } else if (node.op === 'trigger') {
+      const t = node.def;
+      if (!t.input) errors.push(`trigger "${node.id}": missing input`);
+      if (!Number.isFinite(t.threshold)) errors.push(`trigger "${node.id}": threshold must be finite`);
+      if (!(Number.isFinite(t.hysteresis) && t.hysteresis >= 0)) errors.push(`trigger "${node.id}": hysteresis must be finite and >= 0`);
+      if (!(t.edge >= 1 && t.edge <= 3)) errors.push(`trigger "${node.id}": unknown edge ${t.edge}`);
+    } else if (node.op === 'latch') {
+      // Phase 6.1 implements COUNT only (the set/reset occupancy latch: a
+      // strictly-positive held count, immune to whatever payload the setting
+      // trigger carries). HOLD_PAYLOAD/TOGGLE arrive with the first mapping
+      // that needs them.
+      const l = node.def;
+      if (!l.input) errors.push(`latch "${node.id}": missing input`);
+      if (l.mode !== LATCH_COUNT) errors.push(`latch "${node.id}": only COUNT is implemented in phase 6.1 (mode ${l.mode})`);
+      if (l.idle !== undefined && l.idle !== null && typeof (l.idle.number ?? l.idle.integer) !== 'number') {
+        errors.push(`latch "${node.id}": idle must be a numeric Value for COUNT`);
+      }
+    } else if (node.op === 'envelope') {
+      // AR only (the motion-presence hold); PEAK_FOLLOW (bassPulse) is
+      // phase-8 territory. In RATE_CONTROL the ramp is timestamp-driven
+      // (ROUTER_IR.md) — time params must be real durations.
+      const e = node.def;
+      if (!e.input) errors.push(`envelope "${node.id}": missing input`);
+      if (e.mode !== ENVELOPE_AR) errors.push(`envelope "${node.id}": only AR is implemented in phase 6.1 (mode ${e.mode})`);
+      if (!(Number.isFinite(e.attackMs) && e.attackMs >= 0)) errors.push(`envelope "${node.id}": attack_ms must be finite and >= 0`);
+      if (!(Number.isFinite(e.releaseMs) && e.releaseMs > 0)) errors.push(`envelope "${node.id}": release_ms must be finite and > 0`);
     } else if (node.op === 'combine') {
       const c = node.def;
       if (!c.inputs || c.inputs.length < 1) errors.push(`combine "${node.id}": needs >= 1 input`);
@@ -169,6 +202,24 @@ function compileGraph(graphJson, { declaredPaths = null, roles = null, instanceI
       if (!nodes.has(d)) errors.push(`node "${node.id}": references unknown node "${d}"`);
     }
     node.deps = deps;
+  }
+
+  // Event-edge typing: a Trigger node's out-edge is an EVENT (a firing, not a
+  // held value). Only Latch consumes in-graph events, and Latch consumes
+  // nothing else — every other op reads STATE and would see a phantom
+  // undefined from a trigger. (EVENT bus Inputs/Outputs are still
+  // unimplemented; in-graph events exist only on trigger->latch edges.)
+  for (const node of nodes.values()) {
+    for (const d of node.deps) {
+      const dep = nodes.get(d);
+      if (!dep) continue;
+      if (dep.op === 'trigger' && node.op !== 'latch') {
+        errors.push(`node "${node.id}": reads trigger "${d}" — trigger out-edges are events; only latch consumes them`);
+      }
+      if (node.op === 'latch' && dep.op !== 'trigger') {
+        errors.push(`latch "${node.id}": "${d}" is not a trigger — latch inputs are in-graph event edges (phase 6.1)`);
+      }
+    }
   }
 
   // Rule 2 — acyclic (Delay, the only legal cycle-breaker, is not in the 4A

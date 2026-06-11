@@ -75,9 +75,6 @@ try {
   console.warn(`orrery registry: NOT LOADED (${e.message}) — bus runs without policy`);
 }
 
-busAdapter = attachBusAdapter({ bus: orreryBus, inputBus });
-console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch})`);
-
 // The compiled router graphs (phase 4 tape cutover, phase 5 visualizer
 // mappings): ONE GRAPH FILE PER MAPPING under manifest/graphs/, each running
 // as its own engine over the shared bus, so a mapping ships, rolls back, and
@@ -88,6 +85,12 @@ console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch}
 //     fx.viz.bitmap_x @300 (sole writers) — since the phase-5 cutover the
 //     kiosk page consumes them unconditionally (legacy in-page ramps and
 //     flags deleted; rollback is artifact-level).
+//   - occupancy.json (phase 6.1 SHADOW) publishes derived.room.occupied @300
+//     under its OWN module identity (bridge/router-occupancy, role
+//     occupancy_router — least authority per writer). NOTHING consumes it:
+//     legacy computeOccupancy in daisy-position stays authoritative until a
+//     gate session shows the lanes MATCH (tools/sim/validate-occupancy.js);
+//     only then does legacy rebind (the approved 6.1 two-step).
 // Every engine's writes are tapped into the capture stream (`bus_tx`) so a
 // recorded session carries each live graph output for offline diffing
 // (tools/sim/validate-tape.js, validate-twist.js). A graph that fails to
@@ -114,12 +117,19 @@ try {
         : ' — its output paths stay silent.')
       + ' Fix the graph/manifests or redeploy the previous release.');
   }
+  // Per-graph writer identity: each engine publishes under the module that
+  // declared its outputs (default: the fx router). The occupancy graph gets
+  // its own identity so policy can scope it to derived.room.* and the
+  // inspector shows it as its own writer.
+  const GRAPH_IDENTITY = {
+    'occupancy.json': 'spiffe://pain-material.local/bridge/router-occupancy',
+  };
   for (const g of graphs) {
     for (const w of g.compiled.warnings) console.warn(`orrery router WARN [${g.file}]: ${w}`);
     const engine = new GraphEngine({
       compiled: g.compiled,
       bus: orreryBus,
-      sourceId: 'spiffe://pain-material.local/bridge/router',
+      sourceId: GRAPH_IDENTITY[g.file] || 'spiffe://pain-material.local/bridge/router',
       tap: (target, value) => capture.event('bus_tx', { path: target, value }),
     });
     engine.start();
@@ -136,6 +146,15 @@ try {
   console.error(`orrery router: NOT RUNNING (${e.message}) — CC 23 (tape failure) WILL NOT MOVE; `
     + 'no legacy fallback since 4F. Fix the graph/manifests or redeploy the previous release.');
 }
+
+// The adapter attaches AFTER the engines start (the order the simulator has
+// always used): its boot-time defaults claims (near/far, and since 6.1 the
+// motion=false baseline) are real packets the graphs must SEE. motion
+// declares no stale window, so its one boot claim is never keepalive-resent —
+// an engine that started late would wait on it forever (found by the 6.1
+// occupancy graph's silent boot on a sidecar-less machine).
+busAdapter = attachBusAdapter({ bus: orreryBus, inputBus });
+console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch})`);
 
 // Plugin host (phase 6.0, MIGRATION_PLAN.md): plugin.v1 code assets hosted in
 // the bridge, instantiated from manifest/plugins/ (one file per instance —

@@ -32,7 +32,7 @@ test('the real pain-material manifests + policy load with zero warnings', () => 
   const registry = loadRegistry(MANIFEST_DIR);
   assert.deepEqual(registry.warnings, []);
   assert.equal(registry.project, 'pain-material');
-  assert.equal(registry.bySourceId.size, 9); // 6 phase-3 modules + router + bridge defaults + plugin host (phase 6)
+  assert.equal(registry.bySourceId.size, 10); // 6 phase-3 modules + router + defaults + plugin host + occupancy router (6.1)
   assert.deepEqual(registry.modes, { auth: 'WARN', signature: 'NONE', priority: 'WARN', time_sync: 'OFF' });
 });
 

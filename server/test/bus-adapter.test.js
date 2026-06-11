@@ -59,7 +59,9 @@ test('stale-declared paths keepalive within their window; others stay silent', a
   inputBus.emit('change', { name: 'motion', value: true });        // staleAfterMs 0
   await new Promise((r) => setTimeout(r, 1300));
   assert.ok(counts.get('clock.daisy.position') >= 2, `keepalive republished (got ${counts.get('clock.daisy.position')})`);
-  assert.equal(counts.get('sensor.room.motion'), 1, 'no-stale-window signal relies on retention, never keepalives');
+  // 2 = the 6.1 boot motion=false baseline (defaults writer) + the live claim;
+  // staleAfterMs 0 means NO keepalives ever follow.
+  assert.equal(counts.get('sensor.room.motion'), 2, 'no-stale-window signal relies on retention, never keepalives');
   // and the keepalive keeps the writer live, not stale, in the inspector
   const snap = bus.snapshot()['clock.daisy.position'];
   assert.equal(snap.writer_candidates[0].stale, false);

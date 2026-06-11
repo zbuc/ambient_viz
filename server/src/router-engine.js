@@ -128,6 +128,110 @@ const EVAL = {
     return st.y;
   },
 
+  // Trigger: STATE in -> in-graph EVENT edge out. Holds an armed/side flag
+  // (rule 4 state). The first sample SEEDS the side at the ARMED position
+  // (FALLING seeds 'above', RISING seeds 'below'), so a session that opens
+  // already past the threshold fires immediately — matching the legacy
+  // hysteresis init (occupancy false until proven, then the first reading
+  // claims it). Fires into ctx.fired (per-evaluation-pass event channel);
+  // the node has no STATE value.
+  trigger: (node, values, ctx) => {
+    const raw = values.get(node.def.input);
+    if (raw === undefined) return undefined;
+    const x = raw === true ? 1 : raw === false ? 0 : raw;
+    if (typeof x !== 'number' || !Number.isFinite(x)) return undefined;
+    const { threshold, hysteresis, edge } = node.def;
+    let st = ctx.state.get(node.id);
+    if (!st) {
+      // Seed at the armed side; evaluate this very sample against it below.
+      st = { side: edge === 2 ? 'above' : 'below' }; // FALLING arms above, RISING/BOTH below
+      ctx.state.set(node.id, st);
+    }
+    // threshold is the FIRE level; hysteresis is the band to RE-ARM
+    // (ROUTER_IR.md). FALLING fires on x <= threshold (matching the legacy
+    // `<=` comparisons) and re-arms only past threshold + hysteresis; RISING
+    // mirrors it. Inside the band the side HOLDS — no chatter, no re-fire.
+    // BOTH uses a one-sided deadband above (nothing uses BOTH yet; declared,
+    // not hidden).
+    let newSide = st.side;
+    if (edge === 2) {        // FALLING
+      if (x <= threshold) newSide = 'below';
+      else if (x > threshold + hysteresis) newSide = 'above';
+    } else if (edge === 1) { // RISING
+      if (x >= threshold) newSide = 'above';
+      else if (x < threshold - hysteresis) newSide = 'below';
+    } else {                 // BOTH
+      if (x >= threshold + hysteresis) newSide = 'above';
+      else if (x < threshold) newSide = 'below';
+    }
+    const was = st.side;
+    st.side = newSide;
+    if (was === newSide) return undefined;
+    const fell = newSide === 'below';
+    if ((edge === 2 && fell) || (edge === 1 && !fell) || edge === 3) {
+      ctx.fired.set(node.id, [{ payload: x }]);
+    }
+    return undefined;
+  },
+
+  // Latch COUNT: in-graph events in -> STATE out. Setting events increment;
+  // a reset event returns to idle. Reset wins a same-pass tie (deterministic,
+  // documented; the occupancy triggers can never tie — their thresholds
+  // bracket a band one sample can't legally straddle in both directions).
+  latch: (node, values, ctx) => {
+    let st = ctx.state.get(node.id);
+    if (!st) {
+      st = { count: fromValue(node.def.idle) || 0 };
+      ctx.state.set(node.id, st);
+    }
+    const set = ctx.fired.get(node.def.input);
+    if (set) st.count += set.length;
+    if (node.def.reset && ctx.fired.get(node.def.reset)) st.count = fromValue(node.def.idle) || 0;
+    return st.count;
+  },
+
+  // Envelope AR in RATE_CONTROL: timestamp-driven like Smooth (ROUTER_IR.md),
+  // gate-style on a 0..1 scale — attack ramps 1.0 per attack_ms toward the
+  // input (attack_ms 0 snaps), release ramps 1.0 per release_ms away. Two
+  // deliberate differences from Smooth, both because an envelope is a
+  // HOLD-against-real-time, not an input filter:
+  //   - Δt is NOT clamped at 500 ms — a 20 s motion hold must expire after a
+  //     20 s quiet stretch, however few packets carried the time;
+  //   - the engine re-evaluates envelopes on EVERY packet the graph receives
+  //     (see _onPacket): time only arrives with packets (ROUTER_IR.md), and
+  //     any packet carries time for the whole graph — without this, a decay
+  //     would freeze the moment its own input went quiet (a still room's
+  //     deduped motion=false would hold the envelope at 1 forever).
+  envelope: (node, values, ctx) => {
+    const raw = values.get(node.def.input);
+    if (raw === undefined) {
+      const held = ctx.state.get(node.id);
+      return held ? held.y : undefined;
+    }
+    const x = raw === true ? 1 : raw === false ? 0 : raw;
+    if (typeof x !== 'number' || !Number.isFinite(x)) return undefined;
+    const now = ctx.now();
+    let st = ctx.state.get(node.id);
+    if (!st) {
+      st = { y: x, x, t: now };
+      ctx.state.set(node.id, st);
+      return st.y;
+    }
+    // Advance the elapsed span against the ZOH-HELD previous input (between
+    // packets the input held st.x — decay must start when motion FELL, not
+    // be back-dated to when it rose), then adopt the new input. A zero
+    // attack additionally snaps at this instant.
+    const dt = Math.max(0, now - st.t);
+    st.t = now;
+    let y2 = st.y;
+    if (st.x > st.y) y2 = node.def.attackMs <= 0 ? st.x : Math.min(st.x, st.y + dt / node.def.attackMs);
+    else if (st.x < st.y) y2 = Math.max(st.x, st.y - dt / node.def.releaseMs);
+    if (Number.isFinite(y2)) st.y = y2; // rule 13 structural guard
+    st.x = x;
+    if (node.def.attackMs <= 0 && x > st.y) st.y = x;
+    return st.y;
+  },
+
   combine: (node, values) => {
     const xs = [];
     for (const id of node.def.inputs) {
@@ -162,12 +266,21 @@ class GraphEngine {
     // bridge already injects virtually in the sim — borrowing it keeps every
     // stateful node deterministic under replay for free.
     this.nodeState = new Map();
-    this._ctx = { now: () => this.bus.nowMono(), state: this.nodeState };
+    this._ctx = { now: () => this.bus.nowMono(), state: this.nodeState, fired: new Map() };
     // Const nodes are value sources with no arrival: seed them up front so
-    // they are readable the moment a live dep fires their consumers.
+    // they are readable the moment a live dep fires their consumers. Latches
+    // likewise seed their idle value (phase 6.1) — a latch that has never
+    // fired is at idle, not absent, so downstream of the latch can resolve
+    // before the first crossing (the legacy occupancy starts false, not
+    // unknown).
+    const seeded = new Set();
     for (const node of compiled.nodes.values()) {
-      if (node.op === 'const') this.values.set(node.id, fromValue(node.def.value));
+      if (node.op === 'const') { this.values.set(node.id, fromValue(node.def.value)); seeded.add(node.id); }
+      else if (node.op === 'latch') { this.values.set(node.id, fromValue(node.def.idle) || 0); seeded.add(node.id); }
     }
+    // One seeding pass so pure chains hanging off consts/latches hold values
+    // from t0 (anything needing a live input stays undefined and silent).
+    if (seeded.size) this._evaluate(seeded);
     this._onPacket = this._onPacket.bind(this);
   }
 
@@ -194,15 +307,21 @@ class GraphEngine {
     // treated as missing, the previous good ZOH value holds.
     if (typeof v === 'number' && !Number.isFinite(v)) { this.nonfiniteDropped += 1; return; }
     for (const id of inputIds) this.values.set(id, v);
-    this._evaluate(new Set(inputIds));
+    this._evaluate(new Set(inputIds), true);
   }
 
   // Recompute everything downstream of the changed inputs, in topo order.
-  _evaluate(dirty) {
+  // advanceTime: a real packet arrival also re-evaluates every Envelope —
+  // time only arrives with packets, and any packet carries time for the
+  // whole graph (a decay must not freeze because its own input went quiet).
+  // The seeding pass passes false (no time has passed at construction).
+  _evaluate(dirty, advanceTime = false) {
+    this._ctx.fired = new Map(); // per-pass in-graph event channel
     for (const id of this.compiled.topo) {
       const node = this.compiled.nodes.get(id);
       if (node.op === 'input') continue;
-      if (!node.deps.some((d) => dirty.has(d))) continue;
+      const forced = advanceTime && node.op === 'envelope';
+      if (!node.deps.some((d) => dirty.has(d)) && !forced) continue;
       if (node.op === 'output') {
         const v = this.values.get(node.def.input);
         if (v === undefined) continue; // upstream has never produced a value
@@ -213,11 +332,21 @@ class GraphEngine {
         this.published += 1;
         if (!rec.accepted) this.publishRejects += 1;
         else if (this.tap) this.tap(node.def.target, v);
+      } else if (node.op === 'trigger') {
+        // Event-shaped: no STATE value. Downstream (latch only, by compile
+        // rule) is dirtied ONLY by a firing — an unfired crossing check must
+        // not ripple.
+        EVAL.trigger(node, this.values, this._ctx);
+        if (this._ctx.fired.has(id)) dirty.add(id);
       } else {
         const v = EVAL[node.op](node, this.values, this._ctx);
         // Rule 13 egress: a node must emit finite values; a poisoned result is
         // quarantined (previous value holds) rather than propagated.
         if (typeof v === 'number' && !Number.isFinite(v)) { this.nonfiniteDropped += 1; continue; }
+        // Change-gated ripple for the stateful 6.1 ops: a forced
+        // (time-advance) envelope holding its value, or a latch hit by a
+        // same-state set/reset, must not republish the graph downstream.
+        if ((forced || node.op === 'latch') && v === this.values.get(id)) continue;
         this.values.set(id, v);
         dirty.add(id);
       }

@@ -1,0 +1,22 @@
+{
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://pain-material.local/bridge/router-occupancy",
+    "instanceId": "occupancy",
+    "humanLabel": "Occupancy conditioning graph (phase 6.1 shadow — legacy computeOccupancy still authoritative)",
+    "type": "router-graph-host",
+    "firmwareVersion": "bridge",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "occupancy_router",
+  "publishes": [
+    { "path": "derived.room.occupied", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 1 }, "nominalRateHz": 2, "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP", "staleAfterMs": 5000, "onStale": "ON_STALE_HOLD" }
+  ],
+  "subscribes": [
+    { "path": "sensor.door.distance_cm" },
+    { "path": "sensor.door.far_cm" },
+    { "path": "sensor.room.motion" }
+  ]
+}

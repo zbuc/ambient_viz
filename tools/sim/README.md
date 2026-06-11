@@ -106,6 +106,24 @@ in-page ramps, each validator's frame-clocked legacy model is the **frozen
 spec** of the deleted browser math, and these are the standing regression
 gates for `fx.viz.twist_gain` / `fx.viz.bitmap_x`.
 
+## Phase 6.1 step one — occupancy graph gate
+
+```sh
+node tools/sim/validate-occupancy.js projects/pain-material/fixtures/<golden>/ [--motion on|off|auto]
+```
+
+The occupancy-conditioning graph (`graphs/occupancy.json`: distance
+hysteresis triggers → COUNT latch, 20 s motion-hold envelope, `Combine MAX`
+→ `derived.room.occupied`, its own `bridge/router-occupancy` identity)
+versus the legacy lane: the capture's `legacy_occupancy` tap when present,
+else the frozen-spec model of `computeOccupancy`/`motionPresent` (verbatim
+guards, 500 ms tick). Binary EDGE correspondence within a declared 1500 ms
+lag class (legacy tick + the keepalive packet-time floor — in RATE_CONTROL,
+time only arrives with packets). Passed 2026-06-11 on all four goldens with
+occupied fractions identical to 3 decimals. Legacy `computeOccupancy` stays
+authoritative until a kiosk gate session passes this validator's live lanes
+— only then does legacy rebind (the 6.1 two-step).
+
 ## Phase 6.0 — plugin host gate
 
 ```sh

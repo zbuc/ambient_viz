@@ -29,10 +29,15 @@ const SIM_ROLE = {
 
 function echoPaths() {
   // The echo must shadow the LOWEST possible incumbent on each path. For
-  // near/far that is the adapter's standing defaults writer at the idle rung
-  // (phase 4C) — when the sidecar is silent, an echo at sensor-1 would WIN
-  // against the defaults and stop being a shadow.
-  const endpointPaths = new Set([adapter.MAP.distance_near_cm.path, adapter.MAP.distance_far_cm.path]);
+  // near/far (phase 4C) and motion (phase 6.1's boot baseline) that is the
+  // adapter's standing defaults writer at the idle rung — when the sidecar is
+  // silent, an echo at sensor-1 would WIN against the defaults and stop
+  // being a shadow.
+  const endpointPaths = new Set([
+    adapter.MAP.distance_near_cm.path,
+    adapter.MAP.distance_far_cm.path,
+    adapter.MAP.motion.path,
+  ]);
   return [
     ...Object.values(adapter.MAP).map((m) => ({
       path: m.path,

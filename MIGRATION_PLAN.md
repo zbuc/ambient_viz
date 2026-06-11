@@ -616,6 +616,58 @@ clock contract in early.
 > — port the trigger stack (bell/toll/voice/murmur) onto this host;
 > occupancy conditioning into the router graph; decision-level comparison
 > via the debug-event instrumentation below.
+>
+> **Status (2026-06-11): 6.1 STEP ONE LANDED — occupancy graph in shadow,
+> offline gate MATCH ×4 goldens; kiosk gate session pending.** Chris's three
+> rulings for 6.1, recorded: (1) the host will gain **arrival-driven input
+> delivery** alongside the tick (the bell's consecutive-fresh-sample gate
+> can't ride a 250 ms ZOH); (2) occupancy publishes **`derived.room.occupied`
+> under its own module identity** (`bridge/router-occupancy`, new
+> `occupancy_router` role scoped to `derived.room.*` — least authority per
+> writer, per-graph sourceId in the bridge); (3) **two-step sequencing** —
+> the occupancy graph shadows and gates against legacy `computeOccupancy`
+> FIRST; legacy rebinds to the bus value only after that lane is MATCH; only
+> then does the trigger-plugin decision comparison run, with both sides on
+> one occupancy.
+>
+> Landed: the **Trigger / Latch / Envelope ops** (compiler + engine; Latch
+> COUNT set/reset and Envelope AR only — the rest stay compile errors):
+> in-graph EVENT edges exist solely on trigger→latch (typed at compile);
+> triggers carry fire-level + re-arm-band hysteresis and seed at the armed
+> side (a session opening on an occupied room claims it); latches seed idle
+> so occupancy resolves false from boot; **Envelope is timestamp-driven with
+> UNCLAMPED Δt and re-evaluates on every packet the graph receives** — time
+> only arrives with packets, and a 20 s motion hold must expire on whatever
+> traffic carries time (the distance keepalive's 1 s cadence is the floor;
+> Smooth keeps its phase-5 input-driven semantics + 500 ms clamp,
+> deliberately). The envelope also advances against the ZOH-held PREVIOUS
+> input (decay starts at the fall edge, not back-dated to the rise — caught
+> by test). `graphs/occupancy.json`: ratio = d/far → enter/empty triggers
+> (0.85/0.92, mirroring legacy's ≤/≥) → COUNT latch → STEP, MAX with the
+> 20 s motion-hold envelope. Supporting moves: the bus-adapter runs a
+> standing **motion=false defaults claim** (idle rung — sensor-absent must
+> mean distance-only occupancy, not a silent strict Combine; `defaults` role
+> widened); the **bridge now starts engines BEFORE the adapter attaches**
+> (the sim's order all along — motion declares no stale window, so its one
+> boot claim is never keepalive-resent and a late-starting engine would wait
+> forever; found by the occupancy graph's silent boot); the identity
+> harness's echo joins motion to the defaults-backed set (echo at idle−1).
+> Legacy tap: daisy-position captures `legacy_occupancy` edges (read-only).
+>
+> **Gate (`tools/sim/validate-occupancy.js`):** legacy lane = capture tap
+> when present, else the frozen-spec model of `computeOccupancy` /
+> `motionPresent` (verbatim guards, 500 ms tick, MOTION_PRESENCE
+> auto-detected, modeled ON by default — the kiosk config); graph lane = sim
+> trajectory → binary edges; ordered edge correspondence within a declared
+> 1500 ms lag class (legacy tick 500 ms + keepalive packet-time floor 1 s).
+> **MATCH on all four goldens** (cutover 1 edge, real 5, viz-cutover 1,
+> mock 5; occupied fractions identical to 3 decimals). 70/70 tests; all
+> standing gates re-verified (tape offline 743 predicted writes — confirmed
+> byte-identical to the pre-6.1 baseline via stash). **Remaining for step
+> one's exit:** a kiosk session with the shadow live (its capture then
+> carries `legacy_occupancy` + `bus_tx` — the validator's live lanes), then
+> legacy rebinds. **Then step two:** host arrival-driven delivery + the
+> `presence_choreography.v1` port + debug-event decision comparison.
 
 The riskiest phase; it gets a de-risking precursor:
 

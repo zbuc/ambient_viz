@@ -1,0 +1,34 @@
+{
+  "schema": "router.v1",
+  "nodes": [
+    { "id": "d",      "rateDomain": "RATE_CONTROL", "input": { "path": "sensor.door.distance_cm" } },
+    { "id": "far",    "rateDomain": "RATE_CONTROL", "input": { "path": "sensor.door.far_cm" } },
+    { "id": "motion", "rateDomain": "RATE_CONTROL", "input": { "path": "sensor.room.motion" } },
+    { "id": "zero",   "rateDomain": "RATE_CONTROL", "const": { "value": { "number": 0 } } },
+
+    { "id": "ratio", "rateDomain": "RATE_CONTROL",
+      "normalize": { "input": "d", "lo": "zero", "hi": "far" } },
+
+    { "id": "enter", "rateDomain": "RATE_CONTROL",
+      "trigger": { "input": "ratio", "threshold": 0.85, "edge": "FALLING", "hysteresis": 0.07 } },
+    { "id": "empty", "rateDomain": "RATE_CONTROL",
+      "trigger": { "input": "ratio", "threshold": 0.92, "edge": "RISING", "hysteresis": 0.07 } },
+
+    { "id": "occ_latch", "rateDomain": "RATE_CONTROL",
+      "latch": { "input": "enter", "reset": "empty", "mode": "COUNT", "idle": { "number": 0 } } },
+    { "id": "occ_dist", "rateDomain": "RATE_CONTROL",
+      "curve": { "input": "occ_latch", "kind": "STEP", "inMin": 0, "inMax": 1, "outMin": 0, "outMax": 1, "clamp": false } },
+
+    { "id": "motion_env", "rateDomain": "RATE_CONTROL",
+      "envelope": { "input": "motion", "mode": "AR", "attackMs": 0, "releaseMs": 20000 } },
+    { "id": "occ_motion", "rateDomain": "RATE_CONTROL",
+      "curve": { "input": "motion_env", "kind": "STEP", "inMin": 0, "inMax": 0.000001, "outMin": 0, "outMax": 1, "clamp": false } },
+
+    { "id": "occupied", "rateDomain": "RATE_CONTROL",
+      "combine": { "inputs": ["occ_dist", "occ_motion"], "mode": "MAX" } },
+
+    { "id": "occ_out", "rateDomain": "RATE_CONTROL",
+      "output": { "input": "occupied", "target": "derived.room.occupied", "shape": "STATE",
+                  "priority": 300, "authorityRole": "occupancy_router" } }
+  ]
+}

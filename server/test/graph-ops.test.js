@@ -328,13 +328,16 @@ test('viz-twist graph: legacy reversed quadratic ramp, live endpoints, smoothed'
 
 test('loadGraphDir: every project graph compiles; one broken file degrades alone', () => {
   const declaredPaths = new Set([
-    'sensor.door.distance_cm', 'sensor.door.near_cm', 'sensor.door.far_cm',
-    'fx.tape.failure', 'fx.viz.twist_gain', 'fx.viz.bitmap_x',
+    'sensor.door.distance_cm', 'sensor.door.near_cm', 'sensor.door.far_cm', 'sensor.room.motion',
+    'fx.tape.failure', 'fx.viz.twist_gain', 'fx.viz.bitmap_x', 'derived.room.occupied',
   ]);
-  const roles = new Map([['router', { name: 'router', canPublish: ['fx.*'], cannotPublish: [], maxPriority: 300 }]]);
+  const roles = new Map([
+    ['router', { name: 'router', canPublish: ['fx.*'], cannotPublish: [], maxPriority: 300 }],
+    ['occupancy_router', { name: 'occupancy_router', canPublish: ['derived.room.*'], cannotPublish: [], maxPriority: 300 }],
+  ]);
   const real = loadGraphDir(path.join(MANIFEST_DIR, 'graphs'), { declaredPaths, roles });
   assert.deepStrictEqual(real.failures, []);
-  assert.deepStrictEqual(real.graphs.map((g) => g.file), ['tape-failure.json', 'viz-bitmap.json', 'viz-twist.json']);
+  assert.deepStrictEqual(real.graphs.map((g) => g.file), ['occupancy.json', 'tape-failure.json', 'viz-bitmap.json', 'viz-twist.json']);
   for (const g of real.graphs) assert.deepStrictEqual(g.compiled.warnings, []);
 
   // A directory where one graph is broken: the rest still compile.
@@ -377,4 +380,125 @@ test('viz-bitmap graph: reversed LINEAR nearness x, live endpoints, smoothed', (
   const expected = 1 - (sm - 75) / 95;
   assert.ok(Math.abs(out[1] - expected) < 1e-12, `${out[1]} != ${expected}`);
   engine.stop();
+});
+
+// ── Phase 6.1 ops: Trigger / Latch / Envelope (the occupancy conditioning) ──
+
+// Timed harness: a driven clock + a feed that stamps virtual time, since
+// trigger arming and envelope decay are time-shaped.
+function runTimed(nodes, opts = {}) {
+  const compiled = compileGraph({ schema: 'router.v1', nodes }, { roles: ROLES });
+  assert.ok(compiled.ok, compiled.errors.join('; '));
+  const clock = { t: 0 };
+  const bus = new OrreryBus({ nowMono: () => clock.t, bootEpochFile: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ops6-')), 'epoch') });
+  bus.stop();
+  const out = [];
+  bus.on('packet', (rec) => {
+    if (rec.accepted && rec.pkt.state && rec.pkt.source.sourceId === SRC) {
+      out.push({ t: clock.t, value: require('../src/bus').fromValue(rec.pkt.state.value) });
+    }
+  });
+  const engine = new GraphEngine({ compiled, bus, sourceId: SRC });
+  engine.start();
+  return {
+    out, engine, bus,
+    feed: (p, v, t) => { clock.t = t; bus.publishState(p, v, { sourceId: 'spiffe://test/pump', priority: 300 }); },
+    stop: () => engine.stop(),
+  };
+}
+
+const TRIG = (id, input, threshold, edge, hysteresis = 0) =>
+  ({ id, rateDomain: 'RATE_CONTROL', trigger: { input, threshold, edge, hysteresis } });
+const OCC_NODES = () => [
+  IN('ratio', 's.ratio'),
+  TRIG('enter', 'ratio', 0.85, 'FALLING', 0.07),
+  TRIG('empty', 'ratio', 0.92, 'RISING', 0.07),
+  { id: 'occ', rateDomain: 'RATE_CONTROL', latch: { input: 'enter', reset: 'empty', mode: 'COUNT', idle: { number: 0 } } },
+  { id: 'occ01', rateDomain: 'RATE_CONTROL', curve: { input: 'occ', kind: 'STEP', inMin: 0, inMax: 1, outMin: 0, outMax: 1, clamp: false } },
+  OUT('o', 'occ01'),
+];
+
+test('trigger->latch: the occupancy set/reset chain with the hysteresis band held between thresholds', () => {
+  const h = runTimed(OCC_NODES());
+  // The latch-idle seeding pass publishes occupied=0 at construction (t=0).
+  h.feed('s.ratio', 1.0, 0);     // empty trigger seed-fires a reset: 0 -> 0, change-gated, no republish
+  h.feed('s.ratio', 0.90, 100);  // in the band from above: no enter (>=0.85), no change
+  h.feed('s.ratio', 0.80, 200);  // crosses below 0.85 -> enter fires -> occupied
+  h.feed('s.ratio', 0.90, 300);  // band from below: empty needs >=0.92 -> still occupied
+  h.feed('s.ratio', 0.80, 400);  // back below: side unchanged, NO re-fire (one count)
+  h.feed('s.ratio', 0.95, 500);  // crosses above 0.92 -> empty fires -> reset
+  h.feed('s.ratio', 0.80, 600);  // re-entry fires again
+  assert.deepStrictEqual(h.out.map((o) => ({ t: o.t, v: o.value })),
+    [{ t: 0, v: 0 }, { t: 200, v: 1 }, { t: 500, v: 0 }, { t: 600, v: 1 }]);
+  h.stop();
+});
+
+test('trigger seeds at the armed side: a session opening already past the threshold fires immediately', () => {
+  const h = runTimed(OCC_NODES());
+  h.feed('s.ratio', 0.30, 0); // first-ever sample: someone already at the kiosk
+  assert.deepStrictEqual(h.out.map((o) => o.value), [0, 1]); // construction seed, then the claim
+  h.stop();
+});
+
+test('latch idle is seeded: occupancy resolves false from construction, and a far reading does not republish', () => {
+  const h = runTimed(OCC_NODES());
+  h.feed('s.ratio', 0.99, 0); // empty seed-fire -> reset 0 -> 0: change-gated
+  assert.deepStrictEqual(h.out.map((o) => o.value), [0]); // the construction seed only
+  h.stop();
+});
+
+test('envelope AR: snap attack, linear release, and time advancing on UNRELATED packets', () => {
+  const nodes = [
+    IN('m', 's.motion'), IN('d', 's.d'),
+    { id: 'env', rateDomain: 'RATE_CONTROL', envelope: { input: 'm', mode: 'AR', attackMs: 0, releaseMs: 20000 } },
+    { id: 'gate', rateDomain: 'RATE_CONTROL', curve: { input: 'env', kind: 'STEP', inMin: 0, inMax: 0.000001, outMin: 0, outMax: 1, clamp: false } },
+    { id: 'sum', rateDomain: 'RATE_CONTROL', combine: { inputs: ['gate', 'd'], mode: 'SUM' } },
+    OUT('o', 'sum'),
+  ];
+  const h = runTimed(nodes);
+  h.feed('s.d', 0, 0);            // d is a 0-contribution rider so sum == gate
+  h.feed('s.motion', false, 0);   // seed at 0
+  h.feed('s.motion', true, 1000); // attack snaps -> 1
+  h.feed('s.motion', false, 2000);// release begins; still > 0 -> gate 1
+  // Motion never publishes again (deduped sensor) — only UNRELATED distance
+  // packets carry time. The decay must ride them to expiry.
+  h.feed('s.d', 0, 12000);        // 10 s into release: env 0.5, gate 1
+  h.feed('s.d', 0, 21990);        // 19.99 s: env ~0.0005, gate 1
+  h.feed('s.d', 0, 22000);        // 20 s after motion fell -> env 0, gate 0
+  const gateVals = h.out.map((o) => o.value);
+  assert.deepStrictEqual([gateVals[0], gateVals[1]], [0, 1]); // seed, attack
+  assert.strictEqual(gateVals[gateVals.length - 1], 0);       // expired via unrelated packets
+  // It must NOT have expired before 20 s.
+  for (const o of h.out) if (o.t < 22000 && o.t >= 1000) assert.strictEqual(o.value, 1, `gate fell early at t=${o.t}`);
+  h.stop();
+});
+
+test('phase-6.1 compile rules: event edges are latch-only, latch eats only triggers, op validation', () => {
+  const bad = (nodes, re) => {
+    const c = compileGraph({ schema: 'router.v1', nodes }, { roles: ROLES });
+    assert.ok(!c.ok && c.errors.some((e) => re.test(e)), `expected ${re}, got ${JSON.stringify(c.errors)}`);
+  };
+  // a scale reading a trigger
+  bad([IN('x', 's.x'), TRIG('t', 'x', 0.5, 'RISING'),
+    { id: 's1', rateDomain: 'RATE_CONTROL', scale: { input: 't', mul: 1, add: 0 } }, OUT('o', 's1')],
+  /only latch consumes/);
+  // a latch reading a non-trigger
+  bad([IN('x', 's.x'),
+    { id: 'l', rateDomain: 'RATE_CONTROL', latch: { input: 'x', mode: 'COUNT', idle: { number: 0 } } }, OUT('o', 'l')],
+  /not a trigger/);
+  // unimplemented latch mode
+  bad([IN('x', 's.x'), TRIG('t', 'x', 0.5, 'RISING'),
+    { id: 'l', rateDomain: 'RATE_CONTROL', latch: { input: 't', mode: 'TOGGLE' } }, OUT('o', 'l')],
+  /only COUNT/);
+  // unimplemented envelope mode + bad times
+  bad([IN('x', 's.x'),
+    { id: 'e', rateDomain: 'RATE_CONTROL', envelope: { input: 'x', mode: 'PEAK_FOLLOW', attackMs: 0, releaseMs: 100 } }, OUT('o', 'e')],
+  /only AR/);
+  bad([IN('x', 's.x'),
+    { id: 'e', rateDomain: 'RATE_CONTROL', envelope: { input: 'x', mode: 'AR', attackMs: 0, releaseMs: 0 } }, OUT('o', 'e')],
+  /release_ms/);
+  // trigger validation
+  bad([IN('x', 's.x'), { id: 't', rateDomain: 'RATE_CONTROL', trigger: { input: 'x', threshold: NaN, edge: 'RISING', hysteresis: 0 } },
+    { id: 'l', rateDomain: 'RATE_CONTROL', latch: { input: 't', mode: 'COUNT' } }, OUT('o', 'l')],
+  /threshold/);
 });
