@@ -324,6 +324,26 @@ class OrreryBus extends EventEmitter {
     return out;
   }
 
+  // The bus-over-SSE transport frame for an accepted packet: the packet
+  // verbatim, plus — for STATE — a `resolved` annotation carrying the
+  // arbitrated value AFTER this packet. Consumers must read state through
+  // arbitration, never packet payloads (the rule the engine learned in 4C
+  // and the CC binding in 4D): on a multi-writer path, a shadowed writer's
+  // keepalive must not drag a feed-derived state back to a losing value.
+  // (Found live in the phase-5 kiosk A/B: the defaults writer's near/far
+  // keepalives flapped the browser's feed-derived endpoints under feed=bus
+  // while the graphs, reading RESOLVED, stayed correct.) `resolved` is a
+  // transport-view annotation, not a bus.v1 packet field — the /bus/events
+  // wire is "packet + resolution", which is what the retained replay
+  // already serves.
+  packetFrame(rec) {
+    const body = rec.pkt.state;
+    if (!body) return rec.pkt; // EVENTs interleave; there is nothing to resolve
+    const entry = this.paths.get(body.path);
+    if (!entry || !entry.resolved) return rec.pkt;
+    return { ...rec.pkt, resolved: toValue(entry.resolved.value) };
+  }
+
   // The inspector's two-layer view (MIGRATION_PLAN.md "Shadow visibility"):
   // per path the resolved value AND every writer candidate, pre-resolution,
   // with status explaining why each one is or isn't winning.

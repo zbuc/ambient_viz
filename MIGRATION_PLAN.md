@@ -187,6 +187,26 @@ two-layer resolved/candidates view and per-field enforcement truth values.
 > --duration-s 3600` against a live session — all MATCH/EXPECTED required,
 > then flip the kiosk URL to `&feed=bus`, soak one full session, and the
 > cleanup PR deletes the legacy reader + the flag.
+>
+> **Status (2026-06-11): FEED BUG FOUND BY THE PHASE-5 LIVE A/B — fixed,
+> resolved-value wire.** The first `feed=bus` kiosk session (run with the
+> phase-5 flags stacked) failed viz-ab with ~5 s-periodic divergences; root
+> cause was *this phase's* feed, not the graphs: the page assembled
+> `busState` from **packet payloads**, so the 4C defaults writer's shadowed
+> `near/far` keepalives (75/130 @100, losing to the live 75/170 claim @300)
+> flapped the derived endpoints ~2 s of every keepalive cycle — the exact
+> shadowed-keepalive hazard the engine (4C) and the CC binding (4D) already
+> guard against, unfixed in the third consumer. The graphs, reading
+> RESOLVED, were correct all session. Fix: `bus.packetFrame()` annotates
+> every live STATE frame on `/bus/events` with the arbitrated resolved
+> value; the page and feed-ab consume `pkt.resolved`, never payloads
+> (retained frames always were resolved). feed-ab also gained the declared
+> **bus-resolved-while-legacy-blank** class (the standing defaults writer
+> resolves `near/far` before the sidecar's first claim — same improvement
+> family as reload retention). Gate run mechanically: feed-ab over a
+> speed-1 replay of the cutover golden (sidecar joins at +135 s, live
+> far=170 claim + defaults keepalives) — the kiosk soak still completes the
+> cutover, but the comparator now has a clean full-session pass shape.
 
 The visualizer keeps reading `window.AMBIENT_INPUTS`; a browser adapter
 derives it from bus-over-SSE. `migration_flag: feed (legacy | bus)`.
@@ -452,6 +472,15 @@ chains; see the status block below*). Each mapping is a `migration_flag` with
 > in-browser ramp + flag (the shared distance EMA state dies with the LAST
 > in-page consumer — twist's cleanup keeps it if bitmap hasn't cut over
 > yet).
+>
+> **First kiosk A/B (2026-06-11, flags stacked with `feed=bus`): viz-ab
+> REGRESSION — and the candidates were innocent.** The violations (~0.10–0.42,
+> ~2 s runs every ~5 s) traced to the phase-2 feed's packet-payload
+> assembly flapping the *legacy* sides' endpoints (see the phase-2 status
+> block); the graphs read RESOLVED and were right the whole session — the
+> live A/B caught a real transport bug the never-run phase-2 gate had left
+> latent. After the resolved-wire fix: **re-run the session** (same URL
+> works); that capture's traces judge the actual mappings.
 >
 > **Status (2026-06-11): tint envelopes RESOLVED BY DECISION — presentation
 > layer, no graph.** Chris's call: the 12 AR envelopes (rise 8 s / fall

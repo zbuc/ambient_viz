@@ -4350,10 +4350,13 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
           const pkt = JSON.parse(ev.data);
           const st = pkt.state;
           if (!st || !st.path) return;
-          const v = fromValue(st.value);
-          // Sole-writer fx.* paths: the packet payload IS the resolved value.
-          // The moment a second writer lands on fx.viz.*, this feed must
-          // start carrying resolved values before anything consumes it.
+          // State is read through ARBITRATION, never packet payloads: live
+          // frames carry the bus's resolved value (`pkt.resolved`), so a
+          // shadowed writer's keepalive (the defaults writer under a live
+          // near/far claim) can never flap the derived state. Retained
+          // frames are already resolved values; payload is the fallback for
+          // a pre-fix bridge.
+          const v = ('resolved' in pkt) ? fromValue(pkt.resolved) : fromValue(st.value);
           if (st.path.startsWith('fx.')) { fxState[st.path.slice(3)] = v; return; }
           if (st.path in touchBit) {
             if (v) touchMask |= 1 << touchBit[st.path];

@@ -98,7 +98,9 @@ async function main() {
       const pkt = JSON.parse(data);
       const st = pkt.state;
       if (!st || !st.path) return;
-      const v = fromValue(st.value);
+      // Mirror the kiosk page exactly: state reads through arbitration —
+      // live frames carry `pkt.resolved`; payload only as pre-fix fallback.
+      const v = ('resolved' in pkt) ? fromValue(pkt.resolved) : fromValue(st.value);
       if (st.path in touchBit) {
         if (v) touchMask |= 1 << touchBit[st.path];
         else touchMask &= ~(1 << touchBit[st.path]);
@@ -115,12 +117,20 @@ async function main() {
   const sample = () => {
     for (const k of new Set([...Object.keys(legacyState), ...Object.keys(busState)])) {
       let s = stats.get(k);
-      if (!s) { s = { samples: 0, agree: 0, consecutive: 0, persistMax: 0 }; stats.set(k, s); }
+      if (!s) { s = { samples: 0, agree: 0, filledBlank: 0, consecutive: 0, persistMax: 0 }; stats.set(k, s); }
       s.samples += 1;
       const a = legacyState[k];
       const b = busState[k];
       if (JSON.stringify(a) === JSON.stringify(b)) {
         s.agree += 1;
+        s.consecutive = 0;
+      } else if (a === undefined && b !== undefined) {
+        // The DECLARED improvement class (phase 2 reload retention + the 4C
+        // standing defaults writer): the bus resolves a value where legacy
+        // has shown nothing yet — near/far hold the idle-priority defaults
+        // until the sidecar's first claim, retained state survives where
+        // legacy blanks. Absent ≠ wrong here; the fill is the point.
+        s.filledBlank += 1;
         s.consecutive = 0;
       } else {
         s.consecutive += 1;
@@ -144,7 +154,7 @@ async function main() {
   for (const [k, s] of [...stats.entries()].sort()) {
     let verdict;
     let note;
-    const races = s.samples - s.agree;
+    const races = s.samples - s.agree - s.filledBlank;
     if (unmappedLegacy.has(k)) {
       verdict = 'UNKNOWN';
       note = 'legacy signal with no bus mapping';
@@ -154,6 +164,9 @@ async function main() {
     } else if (races > 0) {
       verdict = 'EXPECTED_DIFFERENCE';
       note = `${races}/${s.samples} samples mid-flight (two SSE streams, declared transport skew)`;
+    } else if (s.filledBlank > 0) {
+      verdict = 'EXPECTED_DIFFERENCE';
+      note = `${s.filledBlank}/${s.samples} samples bus-resolved while legacy blank (declared: defaults writer / retention)`;
     } else {
       verdict = 'MATCH';
       note = `${s.agree}/${s.samples} samples`;

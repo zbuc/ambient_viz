@@ -173,3 +173,21 @@ test('_meta counters publish as ordinary bus signals', () => {
   assert.equal(snap['_meta.sensor.door.distance_cm.last_writer'].current_resolved_value, 'a');
   bus.stop();
 });
+
+test('packetFrame: a shadowed keepalive frame carries the RESOLVED value (the feed flap, fixed)', () => {
+  const bus = makeBus();
+  const frames = [];
+  bus.on('packet', (rec) => { if (rec.accepted) frames.push(bus.packetFrame(rec)); });
+  // The live kiosk shape: sensor claim far=170 @300, then the standing
+  // defaults writer's keepalive far=130 @100 — shadowed, but still an
+  // accepted packet on the wire.
+  bus.publishState('sensor.door.far_cm', 170, { sourceId: 'spiffe://t/claim', priority: 300 });
+  bus.publishState('sensor.door.far_cm', 130, { sourceId: 'spiffe://t/defaults', priority: 100 });
+  assert.equal(frames.length, 2);
+  // The payload says 130; the annotation says what a consumer must read.
+  assert.equal(frames[1].state.value.number ?? frames[1].state.value.integer, 130);
+  assert.equal(frames[1].resolved.number ?? frames[1].resolved.integer, 170);
+  // Single-writer paths annotate too (payload == resolved).
+  assert.equal(frames[0].resolved.number ?? frames[0].resolved.integer, 170);
+  bus.stop();
+});

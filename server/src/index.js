@@ -147,7 +147,10 @@ orreryBus.on('packet', (rec) => {
   if (!rec.accepted || busClients.size === 0) return;
   const body = rec.pkt.state || rec.pkt.event;
   if (!body || body.path.startsWith('_meta.')) return;
-  const payload = `event: packet\ndata: ${JSON.stringify(rec.pkt)}\n\n`;
+  // packetFrame annotates STATE packets with the arbitrated RESOLVED value —
+  // feed consumers read state through arbitration, never packet payloads
+  // (a shadowed writer's keepalive must not flap the derived state).
+  const payload = `event: packet\ndata: ${JSON.stringify(orreryBus.packetFrame(rec))}\n\n`;
   for (const res of busClients) {
     try { res.write(payload); } catch { /* client gone */ }
   }
