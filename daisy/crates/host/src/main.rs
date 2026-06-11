@@ -36,9 +36,9 @@ fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let no_seq = args.iter().any(|a| a == "--no-seq");
     // Mood audition (PROCMUSIC.md §5): `--mood <name|x,y>` pins a position on
-    // the mood plane; `--mood-sweep <a>,<b>,<secs>` raised-cosine sweeps
-    // between two anchors. Both read moods.json (override: --moods <path>)
-    // and imply --procgen.
+    // the mood plane; `--mood-sweep <a>,<b>[,...],<secs-per-leg>` tours any
+    // number of anchors cyclically with half-cosine legs. Both read
+    // moods.json (override: --moods <path>) and imply --procgen.
     let mood_static = flag_value(&args, "--mood");
     let mood_sweep = flag_value(&args, "--mood-sweep");
     let moods_path = flag_value(&args, "--moods");
@@ -113,7 +113,7 @@ fn main() -> Result<()> {
         mp3_path = Some(path.to_path_buf());
     } else {
         eprintln!(
-            "no audio path provided — no backing track (voices still play).\n  usage: cargo run -p host -- [<file>] [--no-seq] [--procgen] [--mood <name|x,y>] [--mood-sweep <a>,<b>,<secs>] [--moods <path>]"
+            "no audio path provided — no backing track (voices still play).\n  usage: cargo run -p host -- [<file>] [--no-seq] [--procgen] [--mood <name|x,y>] [--mood-sweep <a>,<b>[,...],<secs-per-leg>] [--moods <path>]"
         );
     }
 
@@ -169,20 +169,26 @@ fn main() -> Result<()> {
 
         enum Drive {
             Static([f32; 2]),
-            Sweep { a: [f32; 2], b: [f32; 2], period_s: f32 },
+            Sweep { waypoints: Vec<[f32; 2]>, leg_s: f32 },
         }
         let drive = if let Some(spec) = &mood_sweep {
+            // <anchor>,<anchor>[,...],<seconds-per-leg> — a cyclic tour of
+            // any number of anchors (names only; commas are the separator).
             let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
-            let [a, b, secs] = parts.as_slice() else {
-                anyhow::bail!("--mood-sweep wants <anchorA>,<anchorB>,<seconds>, got {spec:?}");
-            };
-            let period_s: f32 = secs.parse().with_context(|| format!("sweep seconds {secs:?}"))?;
-            println!("mood sweep: {a} ↔ {b} every {period_s} s");
-            Drive::Sweep {
-                a: mood::resolve_pos(&file, a)?,
-                b: mood::resolve_pos(&file, b)?,
-                period_s: period_s.max(1.0),
-            }
+            let (secs, names) = parts.split_last().filter(|(_, n)| n.len() >= 2).ok_or_else(
+                || anyhow::anyhow!("--mood-sweep wants <anchorA>,<anchorB>[,...],<secs-per-leg>, got {spec:?}"),
+            )?;
+            let leg_s: f32 = secs.parse().with_context(|| format!("sweep seconds {secs:?}"))?;
+            let waypoints = names
+                .iter()
+                .map(|n| mood::resolve_pos(&file, n))
+                .collect::<Result<Vec<_>>>()?;
+            println!(
+                "mood sweep: {} → (cycle), {leg_s} s per leg ({} s full tour)",
+                names.join(" → "),
+                leg_s.max(1.0) * waypoints.len() as f32,
+            );
+            Drive::Sweep { waypoints, leg_s }
         } else {
             let spec = mood_static.as_deref().unwrap();
             let pos = mood::resolve_pos(&file, spec)?;
@@ -196,11 +202,8 @@ fn main() -> Result<()> {
             loop {
                 let pos = match &drive {
                     Drive::Static(p) => *p,
-                    Drive::Sweep { a, b, period_s } => {
-                        let t = start.elapsed().as_secs_f32();
-                        // Raised cosine: a → b → a, dwelling at the ends.
-                        let m = 0.5 - 0.5 * (t / period_s * 2.0 * std::f32::consts::PI).cos();
-                        [a[0] + (b[0] - a[0]) * m, a[1] + (b[1] - a[1]) * m]
+                    Drive::Sweep { waypoints, leg_s } => {
+                        mood::sweep_pos(waypoints, *leg_s, start.elapsed().as_secs_f32())
                     }
                 };
                 let (genome, fx) = mood::blend(&file.anchors, pos);

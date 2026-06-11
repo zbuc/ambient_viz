@@ -117,6 +117,28 @@ pub fn param_for(name: &str) -> Option<Param> {
     })
 }
 
+/// Position along a cyclic tour of `waypoints` at time `t`: each leg takes
+/// `leg_s` seconds with half-cosine easing (dwell at each waypoint, no
+/// velocity jump), and the last waypoint connects back to the first. One
+/// waypoint degenerates to a static position.
+pub fn sweep_pos(waypoints: &[[f32; 2]], leg_s: f32, t: f32) -> [f32; 2] {
+    match waypoints {
+        [] => [0.5, 0.5],
+        [only] => *only,
+        _ => {
+            let n = waypoints.len();
+            let leg_s = leg_s.max(1.0);
+            let tt = t.rem_euclid(leg_s * n as f32);
+            let leg = ((tt / leg_s) as usize).min(n - 1);
+            let frac = (tt - leg as f32 * leg_s) / leg_s;
+            let m = 0.5 - 0.5 * (core::f32::consts::PI * frac).cos();
+            let a = waypoints[leg];
+            let b = waypoints[(leg + 1) % n];
+            [a[0] + (b[0] - a[0]) * m, a[1] + (b[1] - a[1]) * m]
+        }
+    }
+}
+
 /// Resolve a `--mood` value: an anchor name, or a literal `x,y` position.
 pub fn resolve_pos(file: &MoodsFile, spec: &str) -> Result<[f32; 2]> {
     if let Some(a) = file.anchors.iter().find(|a| a.name == spec) {
@@ -172,6 +194,25 @@ mod tests {
         // StabDecay is declared by anchor "a" only → its weight renormalizes
         // to that anchor alone, so the midpoint still hears 0.9.
         assert!((fx["StabDecay"] - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sweep_tours_waypoints_and_wraps() {
+        let wp = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]];
+        let leg = 10.0;
+        // Waypoint-exact at leg boundaries.
+        assert_eq!(sweep_pos(&wp, leg, 0.0), [0.0, 0.0]);
+        assert_eq!(sweep_pos(&wp, leg, 10.0), [1.0, 0.0]);
+        assert_eq!(sweep_pos(&wp, leg, 20.0), [1.0, 1.0]);
+        // Last leg returns to the first waypoint; the cycle wraps.
+        let back = sweep_pos(&wp, leg, 30.0);
+        assert!((back[0] - 0.0).abs() < 1e-6 && (back[1] - 0.0).abs() < 1e-6);
+        // Mid-leg is the halfway blend (half-cosine hits 0.5 at frac 0.5).
+        let mid = sweep_pos(&wp, leg, 5.0);
+        assert!((mid[0] - 0.5).abs() < 1e-6 && mid[1].abs() < 1e-6);
+        // One waypoint = static; empty = center.
+        assert_eq!(sweep_pos(&wp[..1], leg, 123.0), [0.0, 0.0]);
+        assert_eq!(sweep_pos(&[], leg, 1.0), [0.5, 0.5]);
     }
 
     #[test]
