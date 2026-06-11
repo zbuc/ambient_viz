@@ -41,6 +41,11 @@ const TOUCH = {
   paths: Array.from({ length: 12 }, (_, i) => `touch.pad0.e${i}`),
 };
 
+// Keepalive sweep cadence. Each stale-declared path republishes (unchanged)
+// once it has gone staleAfterMs/2 without a send — the writer-side keepalive
+// obligation from BUS_PROTOCOL.md, at the lowest rate that can't go stale.
+const KEEPALIVE_TICK_MS = 250;
+
 module.exports = function attachBusAdapter({ bus, inputBus }) {
   for (const m of Object.values(MAP)) {
     bus.registerPath(m.path, { shape: 'state', type: m.type, staleAfterMs: m.staleAfterMs });
@@ -49,14 +54,26 @@ module.exports = function attachBusAdapter({ bus, inputBus }) {
     bus.registerPath(p, { shape: 'state', type: 'bool', staleAfterMs: 0 });
   }
 
+  // Writer discipline (BUS_PROTOCOL.md): publish on CHANGE; signals that
+  // declare stale_after_ms keepalive within the window; everything else relies
+  // on bus retention. Without this, every legacy event fans out as packets
+  // with fresh seqs and unchanged values (the 12-electrode burst per
+  // touch_mask change was the worst), which no constrained remote link
+  // (ESP-NOW, phase 9) could carry.
+  const last = new Map(); // path -> { value, atMs, opts, staleAfterMs }
+  const send = (path, v, opts, staleAfterMs, force = false) => {
+    const prev = last.get(path);
+    if (!force && prev && prev.value === v) return;
+    bus.publishState(path, v, opts);
+    last.set(path, { value: v, atMs: Date.now(), opts, staleAfterMs });
+  };
+
   const onChange = (entry) => {
     const { name, value } = entry;
     if (name === 'touch_mask') {
       const mask = Number(value) >>> 0;
       for (let i = 0; i < 12; i++) {
-        bus.publishState(TOUCH.paths[i], !!(mask & (1 << i)), {
-          sourceId: TOUCH.source, priority: TOUCH.priority,
-        });
+        send(TOUCH.paths[i], !!(mask & (1 << i)), { sourceId: TOUCH.source, priority: TOUCH.priority }, 0);
       }
       return;
     }
@@ -65,9 +82,22 @@ module.exports = function attachBusAdapter({ bus, inputBus }) {
     let v = value;
     if (m.type === 'bool') v = value === true || value === 1;
     else if (m.type === 'float' && typeof v === 'number' && Number.isInteger(v)) v = v + 0; // toValue picks integer; float decl accepts it
-    bus.publishState(m.path, v, { sourceId: m.source, priority: m.priority });
+    send(m.path, v, { sourceId: m.source, priority: m.priority }, m.staleAfterMs);
   };
 
+  const keepalive = setInterval(() => {
+    const now = Date.now();
+    for (const [path, rec] of last) {
+      if (rec.staleAfterMs > 0 && now - rec.atMs >= rec.staleAfterMs / 2) {
+        send(path, rec.value, rec.opts, rec.staleAfterMs, true);
+      }
+    }
+  }, KEEPALIVE_TICK_MS);
+  if (keepalive.unref) keepalive.unref();
+
   inputBus.on('change', onChange);
-  return { stop: () => inputBus.off('change', onChange), MAP, TOUCH };
+  return {
+    stop: () => { inputBus.off('change', onChange); clearInterval(keepalive); },
+    MAP, TOUCH,
+  };
 };
