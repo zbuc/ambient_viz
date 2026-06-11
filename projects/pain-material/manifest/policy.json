@@ -1,0 +1,51 @@
+{
+  "schema": "policy.v1",
+  "project": "pain-material",
+  "authorityLadder": {
+    "safety": 1000,
+    "manual_blackout": 900,
+    "local_ui": 700,
+    "timeline": 500,
+    "clock": 400,
+    "sensor": 300,
+    "idle": 100
+  },
+  "roles": [
+    {
+      "name": "sensor_node",
+      "canPublish": ["sensor.${instance}.*", "touch.${instance}.*", "device.${instance}.*"],
+      "cannotPublish": ["clock.*", "safety.*", "transport.*"],
+      "canSubscribe": [],
+      "maxPriority": 300
+    },
+    {
+      "name": "clock_source",
+      "canPublish": ["clock.${instance}.*", "device.${instance}.*"],
+      "cannotPublish": ["safety.*"],
+      "canSubscribe": [],
+      "maxPriority": 400
+    },
+    {
+      "name": "local_ui",
+      "canPublish": ["ui.${instance}.*"],
+      "cannotPublish": ["clock.*", "safety.*", "sensor.*"],
+      "canSubscribe": ["sensor.*", "touch.*", "clock.*", "ui.*"],
+      "maxPriority": 700
+    }
+  ],
+  "allow": [
+    { "stableId": "spiffe://pain-material.local/sidecar/tof-door", "role": "sensor_node", "instanceId": "door" },
+    { "stableId": "spiffe://pain-material.local/sidecar/am312-room", "role": "sensor_node", "instanceId": "room" },
+    { "stableId": "spiffe://pain-material.local/sidecar/hr202-breath", "role": "sensor_node", "instanceId": "breath" },
+    { "stableId": "spiffe://pain-material.local/sidecar/mpr121-pad0", "role": "sensor_node", "instanceId": "pad0" },
+    { "stableId": "spiffe://pain-material.local/daisy/serial", "role": "clock_source", "instanceId": "daisy" },
+    { "stableId": "spiffe://pain-material.local/browser/ui", "role": "local_ui", "instanceId": "browser" }
+  ],
+  "groups": [],
+  "runtimeModes": {
+    "auth": "WARN",
+    "signature": "NONE",
+    "priority": "WARN",
+    "timeSync": "OFF"
+  }
+}

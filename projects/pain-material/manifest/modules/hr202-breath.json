@@ -1,0 +1,18 @@
+{
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://pain-material.local/sidecar/hr202-breath",
+    "instanceId": "breath",
+    "humanLabel": "Breath detector (HR202 + TLC555 via sidecar)",
+    "type": "hr202-breath-node",
+    "firmwareVersion": "sidecar",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "sensor_node",
+  "publishes": [
+    { "path": "sensor.breath.detected", "valueType": "VALUE_TYPE_INT", "shape": "SHAPE_STATE", "unit": "ms",
+      "nominalRateHz": 0.1, "maxRateHz": 1, "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0, "onStale": "ON_STALE_HOLD" }
+  ],
+  "subscribes": []
+}

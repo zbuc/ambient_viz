@@ -58,6 +58,23 @@ capture.init({
   config: { port: PORT, host: HOST, mock: MOCK, ingest_token: INGEST_TOKEN ? '<set>' : '' },
 });
 
+// Manifest registry + ProjectPolicy, WARN mode (phase 3). Loaded BEFORE the
+// adapter so manifests are the authoritative declaration for every path the
+// adapter writes. A missing/broken manifest dir degrades to phase-1 behavior
+// (no policy), loudly.
+const { loadRegistry, applyRegistry } = require('./registry');
+let registry = null;
+try {
+  registry = loadRegistry(path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest'));
+  applyRegistry(registry, orreryBus);
+  console.log(`orrery registry: ${registry.bySourceId.size} modules for "${registry.project}" `
+    + `(modes auth:${registry.modes.auth} sig:${registry.modes.signature} `
+    + `pri:${registry.modes.priority} time:${registry.modes.time_sync})`);
+  for (const w of registry.warnings) console.warn(`orrery registry WARN: ${w}`);
+} catch (e) {
+  console.warn(`orrery registry: NOT LOADED (${e.message}) — bus runs without policy`);
+}
+
 busAdapter = attachBusAdapter({ bus: orreryBus, inputBus });
 console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch})`);
 
@@ -120,6 +137,13 @@ function handleInspectorState(req, res) {
   const body = JSON.stringify({
     boot_epoch: orreryBus.bootEpoch,
     now_mono_ms: Math.round(orreryBus.nowMono() * 1000) / 1000,
+    policy: registry ? {
+      project: registry.project,
+      modes: registry.modes,
+      load_warnings: registry.warnings,
+      warns_total: orreryBus.warnsTotal,
+      recent_warns: orreryBus.warns.slice(-20),
+    } : null,
     paths: orreryBus.snapshot(),
   });
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });

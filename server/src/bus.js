@@ -103,6 +103,9 @@ class OrreryBus extends EventEmitter {
     //   counters: {packets, rejects:{...}, lastRateWindow}
     // }
     this.paths = new Map();
+    this.warns = [];        // last 100 policy/range WARNs (inspector's triage feed)
+    this.warnsTotal = 0;
+    this._policyCheck = null;
     this._arrival = 0;
     this._seqBySource = new Map(); // our own publishing seq per source_id
     this._metaTimer = setInterval(() => this._publishMeta(), META_PERIOD_MS);
@@ -111,17 +114,28 @@ class OrreryBus extends EventEmitter {
 
   // Declare a path's contract before/at first publish. Idempotent.
   // type: 'float'|'int'|'bool'|'text'|'vec'|'blob' (or null = UNCHECKED)
-  registerPath(p, { shape = 'state', type = null, staleAfterMs = 0, maxQueue = DEFAULT_MAX_QUEUE } = {}) {
+  registerPath(p, { shape = 'state', type = null, staleAfterMs = 0, maxQueue = DEFAULT_MAX_QUEUE, range = null } = {}) {
     if (!this.paths.has(p)) {
       this.paths.set(p, {
-        shape, declaredType: type, staleAfterMs, maxQueue,
+        shape, declaredType: type, staleAfterMs, maxQueue, range,
         writers: new Map(),
         resolved: null,
         queue: [], drops: 0, dedupe: new Set(),
-        counters: { packets: 0, rejected_type: 0, rejected_order: 0, window: [] },
+        counters: { packets: 0, rejected_type: 0, rejected_order: 0, policy_warns: 0, range_warns: 0, window: [] },
       });
     }
     return this.paths.get(p);
+  }
+
+  // Phase-3 policy hook (manifest registry). The check is OBSERVATIONAL in
+  // WARN mode: it annotates enforcement + counts, it never rejects. fn(pkt,
+  // path) -> { ok, reasons[] } or null for exempt paths.
+  setPolicy(fn) { this._policyCheck = fn; }
+
+  _warn(path, sourceId, kind, reasons) {
+    this.warnsTotal += 1;
+    this.warns.push({ t_wall_ms: Date.now(), path, source_id: sourceId, kind, reasons });
+    if (this.warns.length > 100) this.warns.shift();
   }
 
   // Convenience publisher used by in-bridge adapters: builds a full bus.v1
@@ -159,11 +173,11 @@ class OrreryBus extends EventEmitter {
     // Enforcement truth values — phase 1 skips signature/range/policy BY
     // DESIGN and says so per packet rather than pretending they passed.
     const enforcement = {
-      signature: 'SKIPPED (enforcement off, phase 1)',
-      cert: 'SKIPPED (enforcement off, phase 1)',
+      signature: 'SKIPPED (enforcement off)',
+      cert: 'SKIPPED (enforcement off)',
       type: 'UNCHECKED (no declared type)',
-      range: 'SKIPPED (no manifest until phase 3)',
-      policy: 'SKIPPED (no policy until phase 3)',
+      range: 'UNCHECKED (no declared range)',
+      policy: 'SKIPPED (no policy loaded)',
     };
     const reject = (reason) => {
       const rec = { accepted: false, reasons: [reason], enforcement, pkt };
@@ -192,6 +206,31 @@ class OrreryBus extends EventEmitter {
         const w = this._writer(entry, src, now);
         w.lastTypeRejectAt = now;
         return reject('type_rejected');
+      }
+    }
+
+    // Policy (phase 3, WARN mode): observational — annotate + count, never reject.
+    if (this._policyCheck) {
+      const verdict = this._policyCheck(pkt, body.path);
+      if (verdict === null) {
+        enforcement.policy = 'EXEMPT (reserved domain)';
+      } else if (verdict.ok) {
+        enforcement.policy = 'OK (WARN mode)';
+      } else {
+        enforcement.policy = `WARN: ${verdict.reasons.join('; ')}`;
+        entry.counters.policy_warns += 1;
+        this._warn(body.path, src.sourceId, 'policy', verdict.reasons);
+      }
+    }
+    // Declared range (phase 3, WARN mode): numbers outside [min,max] are flagged.
+    if (entry.range && pkt.state) {
+      const num = fromValue(body.value);
+      if (typeof num === 'number' && (num < entry.range.min || num > entry.range.max)) {
+        enforcement.range = `WARN: ${num} outside [${entry.range.min}, ${entry.range.max}]`;
+        entry.counters.range_warns += 1;
+        this._warn(body.path, src.sourceId, 'range', [enforcement.range]);
+      } else if (typeof num === 'number') {
+        enforcement.range = `OK [${entry.range.min}, ${entry.range.max}] (WARN mode)`;
       }
     }
 
@@ -343,14 +382,15 @@ class OrreryBus extends EventEmitter {
         drops: entry.shape === 'event' ? entry.drops : undefined,
         packets: entry.counters.packets,
         rejected: { type: entry.counters.rejected_type, order: entry.counters.rejected_order },
+        warned: { policy: entry.counters.policy_warns, range: entry.counters.range_warns },
         // Per-field enforcement truth values for the CURRENT phase — what is
         // actually checked vs deliberately skipped, displayed honestly.
         enforcement: {
-          signature: 'SKIPPED (enforcement off, phase 1)',
+          signature: 'SKIPPED (enforcement off)',
           type: entry.declaredType ? `CHECKED (${entry.declaredType})` : 'UNCHECKED (no declared type)',
-          range: 'SKIPPED (no manifest until phase 3)',
-          policy: 'SKIPPED (no policy until phase 3)',
-          stale_mode: entry.staleAfterMs > 0 ? 'HOLD (flag only, phase 1)' : 'NONE (no stale_after_ms declared)',
+          range: entry.range ? `CHECKED [${entry.range.min}, ${entry.range.max}] (WARN mode)` : 'UNCHECKED (no declared range)',
+          policy: this._policyCheck ? 'CHECKED (WARN mode)' : 'SKIPPED (no policy loaded)',
+          stale_mode: entry.staleAfterMs > 0 ? 'HOLD (flag only)' : 'NONE (no stale_after_ms declared)',
         },
       };
     }

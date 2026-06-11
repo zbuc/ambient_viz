@@ -1,0 +1,19 @@
+{
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://pain-material.local/daisy/serial",
+    "instanceId": "daisy",
+    "humanLabel": "Daisy song position (USB-CDC POS/RESET)",
+    "type": "daisy-seed-cdc",
+    "firmwareVersion": "qspi",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "clock_source",
+  "publishes": [
+    { "path": "clock.daisy.position", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "s",
+      "range": { "min": 0, "max": 1200 }, "nominalRateHz": 20, "maxRateHz": 25,
+      "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 1000, "onStale": "ON_STALE_HOLD",
+      "cyclic": true }
+  ],
+  "subscribes": []
+}

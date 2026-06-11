@@ -1,0 +1,218 @@
+// orrery.manifest.v1 — module manifests + project policy.
+// Schema-of-record: MANIFEST_PROTOCOL.md (this file is its verbatim IDL).
+
+syntax = "proto3";
+package orrery.manifest.v1;
+
+import "common.proto";  // orrery.common.v1.{Value, ValueType, Shape, Range}
+
+// ════════════════════════════════════════════════════════════════
+//  MODULE-SCOPED — "what I am; what I publish/subscribe; where I sit."
+//  Capabilities are CLAIMS; ProjectPolicy decides what's permitted.
+// ════════════════════════════════════════════════════════════════
+
+message ModuleManifest {
+  string   schema   = 1;            // "manifest.v1"
+  Identity identity = 2;
+  string   role     = 3;            // CLAIMED role name → resolved in ProjectPolicy
+
+  repeated SignalDecl publishes  = 4;  // AUTHORITATIVE declaration of each published signal
+  repeated SignalDecl subscribes = 5;  // EXPECTATIONS, not declarations — only path /
+                                       // value_type / shape are meaningful here (see
+                                       // modeling notes); other fields are ignored
+
+  optional GroupMembership group    = 6;  // render-plane emitter members only
+  optional Geometry        geometry = 7;  // render-plane emitter members only
+}
+
+message Identity {
+  string stable_id        = 1;  // "spiffe://pain-material.local/sensor/door-01" — durable, key/cert-backed
+  string instance_id      = 2;  // the `instance` segment in this module's paths ("door","ch3","led07")
+  string human_label      = 3;  // "Door distance sensor"
+  string type             = 4;  // "vl53l1x-distance-node"
+  string firmware_version = 5;
+  string schema_version   = 6;  // schema this module was built against (compat gate)
+  optional string cert_fingerprint = 7;  // enrolled-cert tie; present, unverified while OFF
+  optional bytes  manifest_sig     = 8;  // signs THIS manifest (HMAC or signature); present, unverified while OFF
+}
+
+message SignalDecl {
+  string        path            = 1;  // concrete domain.instance.field, e.g. "sensor.door.distance_cm"
+  orrery.common.v1.ValueType value_type = 2;
+  orrery.common.v1.Shape     shape      = 3;  // STATE | EVENT
+  string        unit            = 4;  // from the PROJECT-PINNED token list ("cm",
+                                      // "ratio", "hz", "") — free strings drift
+                                      // (cm/centimeter/cms); registry rejects
+                                      // tokens outside the project's list
+  optional orrery.common.v1.Range range = 5;  // lets the router scale/curve generically
+  float         nominal_rate_hz = 6;
+  float         max_rate_hz     = 7;
+  Interpolation interpolation   = 8;  // how the router fills between samples
+
+  // per-signal failure contract (ARCHITECTURE → Runtime contracts → Failure):
+  uint32        stale_after_ms  = 9;   // 0 = never stale, no keepalive obligation (bus.v1 → Retained state)
+  OnStale       on_stale        = 10;
+  optional orrery.common.v1.Value failsafe = 11;  // value used by DEFAULT / FAIL_SAFE
+
+  bool          dedupe          = 12;  // EVENT signals: receivers dedupe by (source.id, boot_epoch, seq)/dedupe_key
+
+  bool          cyclic          = 13;  // value wraps range.max → range.min (phase-like).
+                                       // Interpolation / Smooth / curves must wrap across
+                                       // the seam, never traverse the interior (0.95→0.05
+                                       // is a step of +0.10, not −0.90)
+  Reliability   reliability     = 14;  // delivery class over lossy transports
+  string        blob_schema     = 15;  // REQUIRED when value_type = BLOB: the schema id the
+                                       // payload decodes as (e.g. "waveparams.v1") — this is
+                                       // the declaration bus.v1's `Value.blob` defers to
+
+  // EVENT queue contract — bounded, never SILENTLY lossy (bus.v1 → Event delivery):
+  uint32         max_queue        = 16;  // 0 = impl default (64); overflow → overflow_policy
+  uint32         max_event_age_ms = 17;  // 0 = no age bound; older-than → late_policy
+  OverflowPolicy overflow_policy  = 18;
+  LatePolicy     late_policy      = 19;
+
+  uint32        vec_dim          = 20;  // REQUIRED when value_type = VEC — a vec3
+                                        // position must not route into an RGB port
+
+  // semantic metadata — manifest/tooling-side, NEVER in packets (keep Value lean).
+  // vec_dim makes a position and a color the same shape; semantic tells them apart.
+  Semantic      semantic         = 21;  // optional; compiler warns on mismatched routes
+  CoordFrame    coord_frame      = 22;  // for positional semantics: relative to what?
+}
+enum Semantic {
+  SEMANTIC_UNSPECIFIED = 0;             // fine for plain scalars
+  SEMANTIC_COLOR_RGB        = 1;
+  SEMANTIC_POSITION_M       = 2;        // metres, in coord_frame
+  SEMANTIC_PHASE            = 3;        // cyclic 0..1 (pair with `cyclic`)
+  SEMANTIC_NORMALIZED_RATIO = 4;        // 0..1 gain/amount
+  SEMANTIC_MIDI_7BIT        = 5;        // 0..127 quantized at the adapter
+}
+enum CoordFrame {
+  COORD_FRAME_UNSPECIFIED = 0;
+  COORD_ROOM = 1;  COORD_GROUP = 2;  COORD_MEMBER = 3;  COORD_SCREEN = 4;
+}
+
+// ValueType, Shape, Range → common.proto (orrery.common.v1).
+// Interpolation / OnStale are manifest-specific (stay here):
+enum Interpolation {
+  INTERPOLATION_UNSPECIFIED = 0;
+  INTERPOLATION_STEP   = 1;  // hold — integer-count params (e.g. kicksPerTwist)
+  INTERPOLATION_LINEAR = 2;  // smooth ramps (e.g. the bpm lane) — the usual default
+}
+enum OnStale {
+  ON_STALE_UNSPECIFIED  = 0;
+  ON_STALE_HOLD         = 1;  // keep last value
+  ON_STALE_NULL         = 2;  // mark unavailable
+  ON_STALE_DEFAULT      = 3;  // snap to `failsafe`
+  ON_STALE_DECAY        = 4;  // ramp toward `failsafe`
+  ON_STALE_FREEZE_ROUTE = 5;  // freeze the downstream route
+  ON_STALE_FAIL_SAFE    = 6;  // assert the safety value (lasers / audio)
+}
+enum OverflowPolicy {         // queue full — every drop is COUNTED into _meta, never silent
+  OVERFLOW_POLICY_UNSPECIFIED = 0;  // → DROP_OLDEST
+  OVERFLOW_DROP_OLDEST = 1;         // ring buffer (newest events are the show)
+  OVERFLOW_DROP_NEWEST = 2;
+  OVERFLOW_FAIL_ROUTE  = 3;         // treat the signal as stale → its on_stale path
+}
+enum LatePolicy {             // event older than max_event_age_ms at delivery time
+  LATE_POLICY_UNSPECIFIED = 0;      // → DROP
+  LATE_DROP           = 1;          // a 5 s burst of stale triggers after a reconnect
+                                    // is worse than a visible, counted drop
+  LATE_FIRE           = 2;          // deliver anyway (OSC's late-bundle rule)
+  LATE_COMPRESS_COUNT = 3;          // deliver ONE event whose payload = dropped count
+}
+enum Reliability {            // DDS/ROS QoS in miniature; transports honor per signal
+  RELIABILITY_UNSPECIFIED = 0;  // → BEST_EFFORT
+  RELIABILITY_BEST_EFFORT = 1;  // fire-and-forget; loss stays VISIBLE via
+                                // (boot_epoch, seq) gap counters → the inspector
+  RELIABILITY_ACKED       = 2;  // the transport adapter acks + retransmits
+                                // (app-level over ESP-NOW). NOTE: safety-critical
+                                // paths should be STATE-shaped (level-triggered,
+                                // retained, kept alive) — not ACKED events; a
+                                // blackout is a level, not an edge
+}
+
+// ── render-plane emitter placement ──────────────────────────────
+
+message GroupMembership {
+  string group = 1;             // emitter-group id ("wave", "raster", "laser-array")
+  uint32 index = 2;             // member index within the group (strip 3 of 4)
+  optional uint32 count = 3;    // total members — for f(phase, index, count) local render
+}
+
+// "position is not one number" — ARCHITECTURE → Runtime contracts → Group geometry.
+message Geometry {
+  Topology topology           = 1;
+  optional Vec3  position_m    = 2;                  // physical, metres in room
+  repeated float logical       = 3 [packed = true];  // member's span on the group's normalized
+                                                     // axes — LINE/RING: [begin, end];
+                                                     // GRID: [u0, v0, u1, v1]; POINT: [u, v]
+  optional Vec3  orientation   = 4;                  // facing / rotation
+  repeated float calibration   = 5 [packed = true];  // row-major transform; length disambiguates:
+                                                     // 9 = 3×3 homography (2-D warp), 16 = 4×4
+  uint32 latency_offset_ms     = 6;                  // this member's output-pipeline LAG vs the
+                                                     // group reference; schedulers lead it to match
+  string color_profile         = 7;                  // "srgb" | "ws2812-grb" | gamma id
+  optional float brightness_limit = 8;               // 0..1 hard cap
+  optional SafeEnvelope safe    = 9;
+}
+message Vec3 { float x = 1; float y = 2; float z = 3; }
+// ENFORCED NODE-LOCAL, LAST IN THE CHAIN. The envelope is a property of the
+// device, applied after every bus-driven input — no packet at any priority can
+// exceed it. Upstream (router) clamping is an optimization, never the safety.
+message SafeEnvelope {
+  optional float max_brightness  = 1;  // 0..1 hard cap
+  optional float scan_min_deg    = 2;  // laser scan-angle limits
+  optional float scan_max_deg    = 3;
+  optional bool  require_blanking = 4; // blank when outside envelope
+  optional float max_flash_hz    = 5;  // photosensitivity guard
+}
+enum Topology {
+  TOPOLOGY_UNSPECIFIED = 0;
+  TOPOLOGY_POINT = 1;  TOPOLOGY_LINE = 2;  TOPOLOGY_RING = 3;
+  TOPOLOGY_GRID  = 4;  TOPOLOGY_GRAPH = 5;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  PROJECT-SCOPED — authored by the operator; decides which claims
+//  are permitted, and the authority ladder.
+// ════════════════════════════════════════════════════════════════
+
+message ProjectPolicy {
+  string schema  = 1;                        // "policy.v1"
+  string project = 2;                        // installation name
+  map<string, uint32> authority_ladder = 3;  // name → priority (safety:1000 … idle:100)
+  repeated Role      roles = 4;
+  repeated TrustedId allow = 5;              // enrolled-id → role binding (the allowlist)
+  repeated GroupDef  groups = 6;             // the PROJECT defines groups; members only claim
+  RuntimeModes runtime_modes = 7;            // staging state as LIVE CONFIG, runtime-visible
+}
+message GroupDef {
+  string group = 1;                          // id ("wave")
+  uint32 count = 2;                          // expected member count — registry validates claims
+}
+// The enforcement-off matrix (bus.v1) as config, not doc convention. The
+// inspector BANNERS any show running a permissive mode — staged enforcement
+// must never *look* enforced.
+message RuntimeModes {
+  Mode auth      = 1;                        // OFF | WARN | ENFORCE (authorization checks)
+  Sig  signature = 2;                        // NONE | HMAC | MTLS
+  Mode priority  = 3;                        // OFF = last-writer-wins | WARN | ENFORCE (full ladder)
+  Mode time_sync = 4;                        // OFF = local-only | WARN = offset-estimated | ENFORCE = required
+  // safety has NO field on purpose: SafeEnvelope enforcement is unconditional,
+  // node-local, on from day one. There is no permissive mode to declare.
+  enum Mode { MODE_UNSPECIFIED = 0; OFF = 1; WARN = 2; ENFORCE = 3; }
+  enum Sig  { SIG_UNSPECIFIED = 0; NONE = 1; HMAC = 2; MTLS = 3; }
+}
+message Role {
+  string name = 1;
+  repeated string can_publish    = 2;  // path globs; ${instance} expands to the module's instance_id
+  repeated string cannot_publish = 3;  // explicit denials (clock.* / safety.* / laser.* …)
+  repeated string can_subscribe  = 4;
+  uint32 max_priority = 5;             // ceiling this role may assert on a packet
+}
+message TrustedId {
+  string stable_id   = 1;  // spiffe://…
+  string role        = 2;
+  string instance_id = 3;  // expected instance for this id
+}

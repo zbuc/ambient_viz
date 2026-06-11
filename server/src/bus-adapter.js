@@ -47,8 +47,14 @@ const TOUCH = {
 const KEEPALIVE_TICK_MS = 250;
 
 module.exports = function attachBusAdapter({ bus, inputBus }) {
+  // registerPath is idempotent: when the manifest registry loaded first
+  // (phase 3), the manifest's declaration wins and the values below are
+  // fallbacks for registry-less runs (tests). The keepalive obligation always
+  // follows the EFFECTIVE stale window, whichever source declared it.
+  const staleFor = new Map();
   for (const m of Object.values(MAP)) {
-    bus.registerPath(m.path, { shape: 'state', type: m.type, staleAfterMs: m.staleAfterMs });
+    const entry = bus.registerPath(m.path, { shape: 'state', type: m.type, staleAfterMs: m.staleAfterMs });
+    staleFor.set(m.path, entry.staleAfterMs);
   }
   for (const p of TOUCH.paths) {
     bus.registerPath(p, { shape: 'state', type: 'bool', staleAfterMs: 0 });
@@ -82,7 +88,7 @@ module.exports = function attachBusAdapter({ bus, inputBus }) {
     let v = value;
     if (m.type === 'bool') v = value === true || value === 1;
     else if (m.type === 'float' && typeof v === 'number' && Number.isInteger(v)) v = v + 0; // toValue picks integer; float decl accepts it
-    send(m.path, v, { sourceId: m.source, priority: m.priority }, m.staleAfterMs);
+    send(m.path, v, { sourceId: m.source, priority: m.priority }, staleFor.get(m.path));
   };
 
   const keepalive = setInterval(() => {

@@ -1,0 +1,147 @@
+{
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://pain-material.local/sidecar/mpr121-pad0",
+    "instanceId": "pad0",
+    "humanLabel": "Touch pad electrodes (MPR121 via sidecar)",
+    "type": "mpr121-touch-node",
+    "firmwareVersion": "sidecar",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "sensor_node",
+  "publishes": [
+    {
+      "path": "touch.pad0.e0",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e1",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e2",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e3",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e4",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e5",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e6",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e7",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e8",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e9",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e10",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    },
+    {
+      "path": "touch.pad0.e11",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "unit": "",
+      "nominalRateHz": 1,
+      "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP",
+      "staleAfterMs": 0,
+      "onStale": "ON_STALE_HOLD"
+    }
+  ],
+  "subscribes": []
+}

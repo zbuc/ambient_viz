@@ -199,6 +199,16 @@ derives it from bus-over-SSE. `migration_flag: feed (legacy | bus)`.
 
 ## Phase 3 — Manifest registry + policy (WARN mode)
 
+> **Status (2026-06-10): COMPLETE.** `proto/manifest.proto` (verbatim);
+> manifests for the six PM modules + `policy.json` (ladder, roles, allowlist,
+> `runtime_modes` all WARN/OFF) under `projects/pain-material/manifest/`;
+> registry (`server/src/registry.js`) registers manifest declarations on the
+> bus (type/stale/range now manifest-driven) and installs the WARN-only
+> policy check (allowlist, role globs, priority ceiling, declared-path);
+> duplicate-id/unit/role hygiene at load. Inspector banners permissive modes
+> + warn triage. Validated: zero WARNs on a clean session, rogue publisher
+> flagged-not-rejected, golden replay MATCH, 20/20 tests.
+
 Manifests for sidecar (via bridge adapter), bridge, browser host; registry +
 `ProjectPolicy` with `runtime_modes` all WARN; duplicate-id handling; visible
 modes. **Validates:** zero WARNs on a clean session; an injected rogue

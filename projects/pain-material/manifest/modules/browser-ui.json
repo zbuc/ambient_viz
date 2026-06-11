@@ -1,0 +1,22 @@
+{
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://pain-material.local/browser/ui",
+    "instanceId": "browser",
+    "humanLabel": "Kiosk browser UI (freeze control)",
+    "type": "browser-host",
+    "firmwareVersion": "static/index.html",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "local_ui",
+  "publishes": [
+    { "path": "ui.browser.freeze", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 1 }, "nominalRateHz": 0.1, "maxRateHz": 5,
+      "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 0, "onStale": "ON_STALE_HOLD",
+      "semantic": "SEMANTIC_NORMALIZED_RATIO" }
+  ],
+  "subscribes": [
+    { "path": "sensor.door.distance_cm", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE" },
+    { "path": "clock.daisy.position", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE" }
+  ]
+}

@@ -148,6 +148,15 @@
     color: var(--ink-faint); border-top: 1px solid var(--line);
     background: var(--bg); text-transform: uppercase;
   }
+
+  /* permissive-mode banner: staged enforcement must never LOOK enforced */
+  #banner {
+    display: none; padding: 4px 20px; font-size: 10px; letter-spacing: .2em;
+    text-transform: uppercase; color: var(--amber);
+    border-bottom: 1px solid var(--line); background: rgba(255,180,84,.06);
+  }
+  #banner.on { display: block; }
+  #banner .w { color: var(--red); margin-left: 1.5em; }
 </style>
 </head>
 <body>
@@ -158,6 +167,7 @@
   <span class="stat">packets <b id="npackets">—</b></span>
   <span id="live"><span class="dot"></span><span class="label">LINK</span></span>
 </header>
+<div id="banner"></div>
 <main id="main"></main>
 <footer>every candidate visible pre-resolution — bus.v1 shadow / phase 1 / enforcement off, displayed honestly</footer>
 
@@ -191,6 +201,8 @@
     if (s.writer_candidates.length > 1) chips.push(`<span class="chip info">${s.writer_candidates.length} WRITERS</span>`);
     if (s.writer_candidates.some((c) => c.status === 'would_win_if_priority_ge_legacy'))
       chips.push('<span class="chip info">SHADOW READY</span>');
+    if (s.warned && s.warned.policy) chips.push(`<span class="chip warn">POLICY⚠×${s.warned.policy}</span>`);
+    if (s.warned && s.warned.range) chips.push(`<span class="chip warn">RANGE⚠×${s.warned.range}</span>`);
     if (s.shape === 'event') chips.push(`<span class="chip ok">Q${s.queue_depth}${s.drops ? ` D${s.drops}` : ''}</span>`);
     return chips.join('');
   }
@@ -289,6 +301,26 @@
     let totalPackets = 0;
     for (const p of paths) if (!p.startsWith('_meta.')) totalPackets += data.paths[p].packets;
     setText(document.getElementById('npackets'), totalPackets.toLocaleString());
+
+    // Permissive-mode banner (MANIFEST_PROTOCOL.md: staged enforcement must
+    // never look enforced) + the WARN triage counter.
+    const banner = document.getElementById('banner');
+    if (data.policy) {
+      const m = data.policy.modes;
+      const permissive = Object.values(m).some((v) => v !== 'ENFORCE');
+      const warnBits = [];
+      if (data.policy.warns_total) warnBits.push(`${data.policy.warns_total} packet warns`);
+      if (data.policy.load_warnings.length) warnBits.push(`${data.policy.load_warnings.length} load warnings`);
+      const html = (permissive
+        ? `enforcement permissive — auth:${m.auth} sig:${m.signature} pri:${m.priority} time:${m.time_sync}`
+        : 'enforcement active')
+        + (warnBits.length ? `<span class="w">⚠ ${warnBits.join(' · ')}</span>` : '');
+      setHTML(banner, html);
+      banner.classList.toggle('on', permissive || warnBits.length > 0);
+    } else {
+      setHTML(banner, 'no project policy loaded — bus running without authorization checks');
+      banner.classList.add('on');
+    }
 
     for (const [p, s] of Object.entries(data.paths)) {
       const r = rows.get(p);
