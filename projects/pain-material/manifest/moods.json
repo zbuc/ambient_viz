@@ -37,7 +37,12 @@
         "ReverbWet": 0.55,
         "StabDelayWet": 0.65,
         "StabDecay": 0.85,
-        "TapeFailure": 0.25
+        "TapeFailure": 0.25,
+        "KickGain": 0.45,
+        "HatGain": 0.15,
+        "StabGain": 0.4,
+        "BassGain": 0.5,
+        "SamplerGain": 0.9
       }
     },
     {
@@ -65,7 +70,12 @@
         "ReverbWet": 0.76,
         "StabDelayWet": 0.36,
         "StabDecay": 0.22,
-        "TapeFailure": 0.17
+        "TapeFailure": 0.17,
+        "KickGain": 1.0,
+        "HatGain": 0.45,
+        "StabGain": 0.25,
+        "BassGain": 0.95,
+        "SamplerGain": 0.4
       }
     },
     {
@@ -93,7 +103,12 @@
         "ReverbWet": 0.16,
         "StabDelayWet": 0.75,
         "StabDecay": 0.14,
-        "TapeFailure": 0.7
+        "TapeFailure": 0.7,
+        "KickGain": 0.85,
+        "HatGain": 0.7,
+        "StabGain": 0.45,
+        "BassGain": 0.6,
+        "SamplerGain": 0.3
       }
     },
     {
@@ -121,7 +136,12 @@
         "ReverbWet": 0.17,
         "StabDelayWet": 0.8,
         "StabDecay": 0.54,
-        "TapeFailure": 0.57
+        "TapeFailure": 0.57,
+        "KickGain": 0.55,
+        "HatGain": 0.25,
+        "StabGain": 0.5,
+        "BassGain": 0.4,
+        "SamplerGain": 0.65
       }
     },
     {
@@ -148,7 +168,12 @@
         "ReverbWet": 0.15,
         "StabDelayWet": 0.35,
         "StabDecay": 0.2,
-        "TapeFailure": 0.05
+        "TapeFailure": 0.05,
+        "KickGain": 1.0,
+        "HatGain": 0.6,
+        "StabGain": 0.45,
+        "BassGain": 0.85,
+        "SamplerGain": 0.25
       }
     }
   ]

@@ -45,6 +45,12 @@ pub enum Param {
     BassEnvMod,
     /// Rumble-bass output gain.
     BassGain,
+    /// Kick bus gain (mix level; multiplies the per-hit velocity).
+    KickGain,
+    /// Hi-hat bus gain (closed + open share it).
+    HatGain,
+    /// Sampler (backing track / field-recording bed) gain.
+    SamplerGain,
     /// Master freeze wet/dry (0 = passthrough, 1 = held grain). Mirrors the
     /// visualizer's frame-freeze; the transport that drives it is unconnected.
     Freeze,

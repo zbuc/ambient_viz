@@ -112,6 +112,9 @@ pub fn param_for(name: &str) -> Option<Param> {
         "BassRes" => Param::BassRes,
         "BassEnvMod" => Param::BassEnvMod,
         "BassGain" => Param::BassGain,
+        "KickGain" => Param::KickGain,
+        "HatGain" => Param::HatGain,
+        "SamplerGain" => Param::SamplerGain,
         "Freeze" => Param::Freeze,
         _ => return None,
     })

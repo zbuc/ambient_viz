@@ -93,6 +93,9 @@ pub struct Engine {
     /// Gain multiplier applied to the kick's output. Set per-trigger from
     /// MIDI velocity (0..1), so soft pad hits play a quieter kick.
     kick_velocity: f32,
+    /// Kick bus gain — the mix level, multiplied with the per-hit velocity
+    /// (velocity is *which hit is louder*, this is *how loud the kick sits*).
+    kick_gain: f32,
     /// MIDI note number that triggers the kick. Defaults to 60 (C4) — pads
     /// in "note mode" on most controllers. Change via [`Engine::set_kick_trigger_note`].
     kick_trigger_note: u8,
@@ -210,6 +213,7 @@ impl Engine {
             bass: bass::RumbleBass::new(sample_rate),
             bass_buf: Vec::new(),
             kick_velocity: 1.0,
+            kick_gain: 1.0,
             kick_trigger_note: 60,
             midi_map: MidiMap::new(),
             sequencer: sequencer::Sequencer::new(sample_rate),
@@ -449,6 +453,9 @@ impl Engine {
             Param::BassRes => self.bass.set_resonance(value),
             Param::BassEnvMod => self.bass.set_env_mod(value),
             Param::BassGain => self.bass.set_gain(value),
+            Param::KickGain => self.kick_gain = value.max(0.0),
+            Param::HatGain => self.hihat_gain = value.max(0.0),
+            Param::SamplerGain => self.sampler.set_gain(value),
             Param::Freeze => self.freeze.set_amount(value),
         }
     }
@@ -531,7 +538,7 @@ impl Engine {
             .process(&mut self.kick_buf, self.sample_index);
         // Velocity scales the post-distortion kick — softer hits = quieter
         // *and* slightly less driven character relative to the dry path.
-        let vel = self.kick_velocity;
+        let vel = self.kick_velocity * self.kick_gain;
         let hh_gain = self.hihat_gain;
         for (((out_frame, &k), &h), &st) in output
             .chunks_exact_mut(2)
@@ -645,6 +652,38 @@ mod tests {
         assert!(energy > 1.0, "procgen producer must be audible, got {energy}");
         assert_eq!(eng.sequencer().kick_count(), 0, "grid sequencer must stay idle");
     }
+
+    /// The per-instrument mix params actually modulate the rendered level:
+    /// muting every voice bus silences the (sample-less) engine output.
+    #[test]
+    fn instrument_mix_params_modulate_output() {
+        fn energy(mute: bool) -> f64 {
+            let mut eng = Engine::new(48_000.0);
+            eng.set_producer(procgen::ProducerSel::Procgen);
+            eng.procgen_mut().set_fixed_bpm(120.0);
+            if mute {
+                for p in [Param::KickGain, Param::HatGain, Param::StabGain, Param::BassGain] {
+                    eng.apply_param(p, 0.0);
+                }
+            }
+            let mut out = alloc::vec![0.0f32; 512];
+            let mut e = 0.0f64;
+            for _ in 0..(4 * 48_000 / 256) {
+                eng.process(&[], &mut out);
+                for &s in &out {
+                    e += (s as f64) * (s as f64);
+                }
+            }
+            e
+        }
+        let open = energy(false);
+        let muted = energy(true);
+        assert!(open > 1.0, "unmuted engine must be audible ({open})");
+        assert!(
+            muted < open * 1e-4,
+            "muting every instrument bus must silence the mix ({muted} vs {open})"
+        );
+    }
 }
 
 struct Sampler {
@@ -677,6 +716,10 @@ impl Sampler {
             looping: false,
             gain: 0.7,
         }
+    }
+
+    fn set_gain(&mut self, g: f32) {
+        self.gain = g.max(0.0);
     }
 
     fn load(&mut self, buf: &'static [f32], step: f64) {
