@@ -140,7 +140,7 @@ EMPTY_ROOM_DOWN_ALPHA = 0.25
 # valid zone in the cone, so it publishes the same `distance_cm` topic.
 VL53L5CX_RESOLUTION = 16  # 16 = 4x4 (up to 60 Hz), 64 = 8x8 (up to 15 Hz)
 VL53L5CX_RANGING_HZ = 15
-VL53L5CX_FAR_CM = 75.0  # far reach + no-target snap (published as distance_far_cm)
+VL53L5CX_FAR_CM = 170.0  # far reach + no-target snap (published as distance_far_cm)
 # Which zones form the "cone." None = every zone (closest target anywhere in
 # the FoV). To ignore edge zones grazing the wall/floor, set a tuple of indices
 # (row-major, 0..15 for 4x4 / 0..63 for 8x8) — e.g. the central 2x2 of a 4x4
