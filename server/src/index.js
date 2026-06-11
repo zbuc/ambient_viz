@@ -173,7 +173,10 @@ function handleBusSSE(req, res) {
     };
     res.write(`event: retained\ndata: ${JSON.stringify(pkt)}\n\n`);
   }
-  res.write(`event: ready\ndata: {"boot_epoch":${orreryBus.bootEpoch}}\n\n`);
+  // `capture` tells the kiosk page to start POSTing snapshots (it rode the
+  // legacy /events ready frame until the phase-2 cutover deleted that
+  // reader from the page).
+  res.write(`event: ready\ndata: {"boot_epoch":${orreryBus.bootEpoch},"capture":${capture.enabled}}\n\n`);
   busClients.add(res);
   const heartbeat = setInterval(() => {
     try { res.write(':keepalive\n\n'); } catch { /* */ }

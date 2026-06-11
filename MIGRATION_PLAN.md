@@ -188,6 +188,21 @@ two-layer resolved/candidates view and per-field enforcement truth values.
 > then flip the kiosk URL to `&feed=bus`, soak one full session, and the
 > cleanup PR deletes the legacy reader + the flag.
 >
+> **Status (2026-06-11): CUTOVER ACCEPTED + CLEANUP DONE — PHASE 2
+> COMPLETE.** The gate: the mechanical full-session feed-ab pass over the
+> replayed cutover golden (below) plus the accepted live gate session
+> (`feed=bus` end-to-end, snapshots' inputs/inputs_bus agreeing) — called
+> by the gate owner. Cleanup: the page's legacy `/events` reader, the
+> `feed` migration_flag, and the `AMBIENT_INPUTS_BUS` shadow alias are
+> deleted; `window.AMBIENT_INPUTS` is derived from bus-over-SSE only, the
+> song clock rides `clock.daisy.position`, and the capture-on signal moved
+> to the `/bus/events` ready frame. Snapshots now carry `inputs` (the one
+> state) + `inputs_fx`. A failed `/bus/map` fetch now means NO inputs —
+> degrade-loudly, artifact rollback (invariant 4). feed-ab retired (header
+> notes it; still runs for forensics — both server endpoints survive until
+> phase 9, which owns deleting the legacy SSE topics themselves).
+> `?feed=` in the kiosk URL is now inert.
+>
 > **Status (2026-06-11): FEED BUG FOUND BY THE PHASE-5 LIVE A/B — fixed,
 > resolved-value wire.** The first `feed=bus` kiosk session (run with the
 > phase-5 flags stacked) failed viz-ab with ~5 s-periodic divergences; root

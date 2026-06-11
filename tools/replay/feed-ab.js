@@ -2,7 +2,14 @@
 // Phase-2 feed A/B (MIGRATION_PLAN.md): consumes BOTH browser feeds from a
 // running bridge — legacy /events and bus-over-SSE /bus/events — derives the
 // AMBIENT_INPUTS object from each exactly like the kiosk page does, and
-// compares them continuously. This is the cutover gate tool: run it against a
+// compares them continuously.
+//
+// RETIRED 2026-06-11: the phase-2 cutover gate passed (mechanical
+// full-session run over the replayed cutover golden + the accepted live
+// gate session) and the cleanup PR deleted the page's legacy reader + the
+// `feed` flag. Both server endpoints still exist until phase 9, so this
+// tool still runs for forensics; "legacy" below now means the /events
+// stream itself, not anything the page consumes. This is the cutover gate tool: run it against a
 // full kiosk session; all keys must verdict MATCH (transient transport skew
 // between the two SSE streams is measured and declared, persistent divergence
 // is a REGRESSION, an unmapped legacy key is UNKNOWN and blocks).
