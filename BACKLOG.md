@@ -109,6 +109,18 @@ The new foundational items below are the ones that don't exist yet:
   **lit-html** — rather than React-with-a-bundler; the repo's no-build rule is
   load-bearing on the Pi. Decide once, for the platform UI surface as a whole
   (phase 8 host UI inherits it). — `static/inspector.html`, `MIGRATION_PLAN.md`
+- [ ] **Inspector timeline view** — a secondary `/inspector` view showing
+  events over time (today's view is a point-in-time snapshot; diffing writers
+  or spotting a transient means eyeballing live churn). Configurable lookback
+  window to bound memory consumption: dropdown defaulting to **10m**, options
+  1m / 5m / 10m / 30m / 1h, plus freeform text entry for arbitrary durations.
+  Retention should be enforced where the history is buffered (ring buffer /
+  time-pruned, sized by the selected window) — not just hidden in the render —
+  so a day-long kiosk session can't grow it unbounded. Pairs naturally with
+  the bus's `_meta.*` 1 Hz stream and the two-layer writer-candidates view
+  (e.g. plot resolved value + per-writer values per path).
+  — `static/inspector.html`, `server/src/bus.js`, `MIGRATION_PLAN.md` (shadow
+  visibility)
 
 #### Extraction & layout
 
