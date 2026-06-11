@@ -96,6 +96,18 @@ pub struct Engine {
     /// Kick bus gain — the mix level, multiplied with the per-hit velocity
     /// (velocity is *which hit is louder*, this is *how loud the kick sits*).
     kick_gain: f32,
+    /// Kick-keyed bed ducking: amount (0 = off), envelope state, and the
+    /// per-sample release coefficient (~120 ms time constant).
+    duck_amount: f32,
+    duck_env: f32,
+    duck_coeff: f32,
+    /// Per-frame duck gains for the current block (scratch).
+    duck_buf: Vec<f32>,
+    /// Tempo-synced stab delay: `Some(beats)` = delay time follows the live
+    /// BPM (beats × 60/bpm). `None`/0 = the raw seconds value stands.
+    stab_delay_beats: Option<f32>,
+    /// Last delay seconds actually applied by the sync (update hysteresis).
+    stab_delay_synced_s: f32,
     /// MIDI note number that triggers the kick. Defaults to 60 (C4) — pads
     /// in "note mode" on most controllers. Change via [`Engine::set_kick_trigger_note`].
     kick_trigger_note: u8,
@@ -214,6 +226,13 @@ impl Engine {
             bass_buf: Vec::new(),
             kick_velocity: 1.0,
             kick_gain: 1.0,
+            duck_amount: 0.0,
+            duck_env: 0.0,
+            // exp(-1 / (tau · sr)): falls to ~37% over tau = 120 ms.
+            duck_coeff: libm::expf(-1.0 / (0.12 * sample_rate)),
+            duck_buf: Vec::new(),
+            stab_delay_beats: None,
+            stab_delay_synced_s: 0.0,
             kick_trigger_note: 60,
             midi_map: MidiMap::new(),
             sequencer: sequencer::Sequencer::new(sample_rate),
@@ -456,6 +475,17 @@ impl Engine {
             Param::KickGain => self.kick_gain = value.max(0.0),
             Param::HatGain => self.hihat_gain = value.max(0.0),
             Param::SamplerGain => self.sampler.set_gain(value),
+            Param::BloomAmount => self.bloom.set_amount(value),
+            Param::DuckAmount => self.duck_amount = value.clamp(0.0, 1.0),
+            Param::StabDelayBeats => {
+                self.stab_delay_beats = (value > 0.001).then_some(value);
+            }
+            Param::ReverbSize => self
+                .reverb
+                .set_room_size(AudioParam::linear(value.clamp(0.0, 1.0))),
+            Param::ReverbDamp => self
+                .reverb
+                .set_damping(AudioParam::linear(value.clamp(0.0, 1.0))),
             Param::Freeze => self.freeze.set_amount(value),
         }
     }
@@ -463,6 +493,23 @@ impl Engine {
     /// Render one block. `_input` is reserved for future passthrough/sidechain;
     /// `output` (interleaved stereo) is fully overwritten.
     pub fn process(&mut self, _input: &[f32], output: &mut [f32]) {
+        // 0. Tempo-synced stab delay: follow the live BPM when a beats value
+        //    is set. Hysteresis avoids churning the delay line on sub-ms
+        //    tempo wobble.
+        if let Some(beats) = self.stab_delay_beats {
+            let bpm = match self.producer_sel {
+                procgen::ProducerSel::Grid => self.sequencer.bpm(),
+                procgen::ProducerSel::Procgen => self.procgen.bpm(),
+            };
+            if bpm > 1.0 {
+                let secs = (beats * 60.0 / bpm).clamp(0.01, 1.0);
+                if (secs - self.stab_delay_synced_s).abs() > 0.002 {
+                    self.stab_delay.set_delay_time(AudioParam::seconds(secs));
+                    self.stab_delay_synced_s = secs;
+                }
+            }
+        }
+
         // 1. Sampler fills output (cleared first).
         for s in output.iter_mut() {
             *s = 0.0;
@@ -482,6 +529,7 @@ impl Engine {
         self.stab_buf.resize(n_frames, 0.0);
         self.stab_send.resize(output.len(), 0.0);
         self.bass_buf.resize(n_frames, 0.0);
+        self.duck_buf.resize(n_frames, 1.0);
         for i in 0..n_frames {
             // When disabled, freeze the sequencer clock and fire nothing; the
             // voices still tick (with no trigger) so any ringing tail decays.
@@ -500,6 +548,14 @@ impl Engine {
                 false
             };
             self.kick_buf[i] = self.kick.process(kick_trig);
+            // Kick-keyed bed duck: the envelope snaps to 1 on a kick and
+            // releases exponentially; the gain applies to the bed (the
+            // pre-voice output) in the mix loop below.
+            if kick_trig {
+                self.duck_env = 1.0;
+            }
+            self.duck_env *= self.duck_coeff;
+            self.duck_buf[i] = 1.0 - self.duck_amount * self.duck_env;
             self.hihat_buf[i] =
                 self.hihat_closed.process(evt.closed_hat) + self.hihat_open.process(evt.open_hat);
 
@@ -533,6 +589,15 @@ impl Engine {
                 sequencer::BassEvent::None => {}
             }
             self.bass_buf[i] = self.bass.tick();
+
+            // Producer-announced harmony retunes the bloom (the pad role);
+            // freeze punctuation drives the master freeze directly.
+            if let Some(c) = evt.chord {
+                self.bloom.set_chord(c.notes());
+            }
+            if let Some(f) = evt.freeze {
+                self.freeze.set_amount(f);
+            }
         }
         self.kick_dist
             .process(&mut self.kick_buf, self.sample_index);
@@ -540,16 +605,19 @@ impl Engine {
         // *and* slightly less driven character relative to the dry path.
         let vel = self.kick_velocity * self.kick_gain;
         let hh_gain = self.hihat_gain;
-        for (((out_frame, &k), &h), &st) in output
+        for ((((out_frame, &k), &h), &st), &duck) in output
             .chunks_exact_mut(2)
             .zip(self.kick_buf.iter())
             .zip(self.hihat_buf.iter())
             .zip(self.stab_buf.iter())
+            .zip(self.duck_buf.iter())
         {
             let kick_mix = k * vel;
             let hat_mix = h * hh_gain;
-            out_frame[0] += kick_mix + hat_mix + st;
-            out_frame[1] += kick_mix + hat_mix + st;
+            // The frame currently holds only the bed (sampler) — duck it
+            // against the kick before the voices stack on top.
+            out_frame[0] = out_frame[0] * duck + kick_mix + hat_mix + st;
+            out_frame[1] = out_frame[1] * duck + kick_mix + hat_mix + st;
         }
 
         // 2b. Ping-pong delay on the stab send (wet-only) — fold the bouncing

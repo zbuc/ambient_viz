@@ -115,6 +115,11 @@ pub fn param_for(name: &str) -> Option<Param> {
         "KickGain" => Param::KickGain,
         "HatGain" => Param::HatGain,
         "SamplerGain" => Param::SamplerGain,
+        "BloomAmount" => Param::BloomAmount,
+        "DuckAmount" => Param::DuckAmount,
+        "StabDelayBeats" => Param::StabDelayBeats,
+        "ReverbSize" => Param::ReverbSize,
+        "ReverbDamp" => Param::ReverbDamp,
         "Freeze" => Param::Freeze,
         _ => return None,
     })

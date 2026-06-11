@@ -123,6 +123,14 @@ pub struct StepEvent {
     pub stab_off: Option<Chord>,
     /// Gate event for the monophonic rumble-bass voice.
     pub bass: BassEvent,
+    /// `Some(chord)` = the producer announces its current harmony (procgen:
+    /// every chord boundary). Consumers retune harmony-coupled fx — today
+    /// the bloom bank; the P4 `MUS` telemetry rides the same field. The grid
+    /// sequencer leaves it `None` (the bloom keeps its fixed exhibit tuning).
+    pub chord: Option<Chord>,
+    /// `Some(amount)` = set the master freeze to this amount now (freeze
+    /// punctuation; `Some(0.0)` releases). `None` = no change.
+    pub freeze: Option<f32>,
 }
 
 pub struct Sequencer {
@@ -423,6 +431,12 @@ impl Sequencer {
     }
     pub fn time_seconds(&self) -> f32 {
         self.time_seconds
+    }
+
+    /// Instantaneous tempo at the current playback position (0.0 when no
+    /// tempo curve is loaded).
+    pub fn bpm(&self) -> f32 {
+        bpm_at(&self.bpm_keypoints, self.time_seconds)
     }
 
     /// Reset playback position to the loop start.

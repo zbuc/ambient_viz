@@ -259,7 +259,9 @@ fn main() -> Result<()> {
     // cosine starts at 0 (far/silent), peaks at 1 (full D-Lydian bloom) at the
     // half-period, and returns to 0. This is host-only test scaffolding — the
     // real exhibit drives `set_bloom_amount` from the kiosk distance sensor.
-    {
+    // SKIPPED in procgen/mood mode: there the mood's BloomAmount owns the
+    // bank (retuned to the live harmony) and the pin would fight it.
+    if !procgen {
         use std::f32::consts::PI;
         let bloom_engine = Arc::clone(&engine);
         let period_s = 8.0 * 4.0 * 60.0 / 112.0; // 8 bars · 4 beats · (60/BPM)

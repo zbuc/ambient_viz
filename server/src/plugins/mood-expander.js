@@ -51,6 +51,13 @@ const GENES = [
   'stab_color',
   'note_length',
   'bass_style',
+  'recall',
+  'arc_depth',
+  'wander',
+  'swing',
+  'dropout',
+  'color',
+  'freeze_punct',
 ];
 
 // Same hardcoded project root as index.js's pluginsDir — multi-project

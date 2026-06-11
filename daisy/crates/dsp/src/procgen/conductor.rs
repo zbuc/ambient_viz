@@ -8,7 +8,7 @@
 //! `const` (in flash); the per-bar cost is one weighted sample.
 
 use super::{Genome, Pcg32};
-use crate::chord::{Chord, Key, diatonic_triad};
+use crate::chord::{Chord, Key, diatonic_chord};
 
 /// Transition weights at rest: orbit the tonic, prefer iv / VI / III,
 /// resolve home often. Row = current degree, col = next degree.
@@ -47,6 +47,11 @@ pub struct Conductor {
     /// live genome at the first bar (the period is genome-dependent, so it
     /// can't be fixed at seed time). `None` after resolution.
     pending_hold_frac: Option<f32>,
+    /// Stacked-third extensions above the triad for the CURRENT chord
+    /// (0 = triad, 1 = +7th, 2 = +9th), drawn from the `color` gene each
+    /// time the FSM samples — per-chord, not per-call, so every consumer of
+    /// `chord()` sees one consistent voicing.
+    extensions: usize,
 }
 
 impl Conductor {
@@ -56,6 +61,7 @@ impl Conductor {
             bars_held: 0,
             chord_changed: false,
             pending_hold_frac: None,
+            extensions: 0,
         }
     }
 
@@ -64,6 +70,7 @@ impl Conductor {
         self.bars_held = 0;
         self.chord_changed = false;
         self.pending_hold_frac = None;
+        self.extensions = 0;
     }
 
     /// Seed the phase within the FIRST chord period (0 = the opening chord
@@ -92,9 +99,10 @@ impl Conductor {
         self.chord_changed
     }
 
-    /// The current chord as a diatonic triad in `key`.
+    /// The current chord in `key` — a diatonic triad plus the drawn color
+    /// extensions (7th/9th) for this chord.
     pub fn chord(&self, key: &Key, base_octave: i32) -> Chord {
-        diatonic_triad(key, self.degree, base_octave)
+        diatonic_chord(key, self.degree, base_octave, self.extensions)
     }
 
     /// How many bars each chord holds for, from the `harmonic_rate` gene
@@ -127,6 +135,14 @@ impl Conductor {
         let next = rng.pick_weighted(&weights);
         self.chord_changed = next != self.degree;
         self.degree = next;
+
+        // Harmonic color for the new chord: 0/1/2 stacked extensions, the
+        // `color` gene shifting weight from bare triads toward 7ths/9ths.
+        // Drawn on EVERY sample (fixed draw order) so the stream shape is
+        // independent of whether the degree actually moved.
+        let c = genome.color.clamp(0.0, 1.0);
+        let ext_w = [1.0 - c, c * (1.5 - c), c * c];
+        self.extensions = rng.pick_weighted(&ext_w);
     }
 }
 

@@ -41,7 +41,7 @@ pub const BEATS_PER_BAR: usize = 4;
 pub const STEPS_PER_BAR: usize = STEPS_PER_BEAT * BEATS_PER_BAR;
 
 /// Number of genes in [`Genome`] (= `to_array().len()`).
-pub const GENE_COUNT: usize = 12;
+pub const GENE_COUNT: usize = 19;
 
 /// The slow "intention" parameter set the mood layer / optimizer evolves
 /// (PROCMUSIC.md §4, one CC per gene). All genes are 0..1; semantic ranges
@@ -79,6 +79,25 @@ pub struct Genome {
     /// (downbeat anchor), 1 = stab (short Euclidean hits). Triangle weights;
     /// drawn per chord boundary (PROCMUSIC.md §4, CC 81).
     pub bass_style: f32,
+    /// Motif recall: probability a phrase replays the stored melody motif
+    /// (snapped to the current harmony) instead of wandering (CC 82).
+    pub recall: f32,
+    /// Phrase-arc depth: a sine arc over each phrase modulating density,
+    /// note_length and velocity ±depth/2 around the genome (CC 83).
+    pub arc_depth: f32,
+    /// Key wander: probability per chord change of a pivot transposition
+    /// (±fifth / ±whole-step, same mode) (CC 84).
+    pub wander: f32,
+    /// Swing: odd 16ths delayed by up to a third of a step (CC 85).
+    pub swing: f32,
+    /// Per-bar voice dropout probability (kick / hats / melody drawn
+    /// independently; all-true = an ensemble rest) (CC 86).
+    pub dropout: f32,
+    /// Harmonic color: weight toward diatonic 7th/9th extensions (CC 87).
+    pub color: f32,
+    /// Freeze punctuation: probability per chord boundary of a short master
+    /// freeze hit (CC 88).
+    pub freeze_punct: f32,
 }
 
 impl Default for Genome {
@@ -98,6 +117,13 @@ impl Default for Genome {
             stab_color: 0.2,
             note_length: 0.5,
             bass_style: 0.5, // pure pulse — the historical anchor behavior
+            recall: 0.35,
+            arc_depth: 0.25,
+            wander: 0.0,
+            swing: 0.0,
+            dropout: 0.0,
+            color: 0.15,
+            freeze_punct: 0.0,
         }
     }
 }
@@ -119,6 +145,13 @@ impl Genome {
             &mut self.stab_color,
             &mut self.note_length,
             &mut self.bass_style,
+            &mut self.recall,
+            &mut self.arc_depth,
+            &mut self.wander,
+            &mut self.swing,
+            &mut self.dropout,
+            &mut self.color,
+            &mut self.freeze_punct,
         ] {
             *g = g.clamp(0.0, 1.0);
         }
@@ -142,6 +175,13 @@ impl Genome {
             self.stab_color,
             self.note_length,
             self.bass_style,
+            self.recall,
+            self.arc_depth,
+            self.wander,
+            self.swing,
+            self.dropout,
+            self.color,
+            self.freeze_punct,
         ]
     }
 
@@ -159,6 +199,13 @@ impl Genome {
             stab_color: a[9],
             note_length: a[10],
             bass_style: a[11],
+            recall: a[12],
+            arc_depth: a[13],
+            wander: a[14],
+            swing: a[15],
+            dropout: a[16],
+            color: a[17],
+            freeze_punct: a[18],
         }
     }
 }
@@ -281,6 +328,12 @@ pub struct ProcGen {
     held_chord: Option<(Chord, u32)>,
     /// Gated melody notes awaiting release: (release_step, note).
     melody_offs: Vec<(u32, u8), 8>,
+    /// The active mode (kept so key wander can transpose within it).
+    mode: Mode,
+    /// Per-bar dropout flags (kick, hats, melody), drawn each bar.
+    dropped: (bool, bool, bool),
+    /// Step at which an active freeze-punctuation hit releases.
+    freeze_off_at: Option<u32>,
     enabled: bool,
 }
 
@@ -305,6 +358,9 @@ impl ProcGen {
             start: (0, Mode::Aeolian, 0),
             held_chord: None,
             melody_offs: Vec::new(),
+            mode: Mode::Aeolian,
+            dropped: (false, false, false),
+            freeze_off_at: None,
             enabled: false,
         };
         pg.seed_musical_start();
@@ -324,6 +380,7 @@ impl ProcGen {
         let mode = MODES[self.rng.pick_weighted(&MODE_W)];
         let root_pc = (self.rng.next_u32() % 12) as i32;
         self.key = Key::new(root_pc, mode);
+        self.mode = mode;
 
         // Opening chord: tonic favored, but not guaranteed — a piece may
         // open mid-thought. (ii/v lightly weighted: weak openings.)
@@ -396,12 +453,24 @@ impl ProcGen {
         self.melody_rotation = 0;
         self.held_chord = None;
         self.melody_offs.clear();
+        self.dropped = (false, false, false);
+        self.freeze_off_at = None;
         self.seed_musical_start();
     }
 
     /// Next step index to fire (global, freerunning).
     pub fn step(&self) -> u32 {
         self.step
+    }
+
+    /// Instantaneous tempo (fixed BPM or the timeline curve at the current
+    /// position; 0.0 before any tempo is set).
+    pub fn bpm(&self) -> f32 {
+        if self.bpm_keypoints.is_empty() {
+            self.fixed_bpm
+        } else {
+            bpm_at(&self.bpm_keypoints, self.time_seconds)
+        }
     }
     /// Completed bars since start.
     pub fn bar(&self) -> u32 {
@@ -415,6 +484,11 @@ impl ProcGen {
     /// Current chord root degree (0 = i .. 6 = VII).
     pub fn chord_degree(&self) -> usize {
         self.conductor.degree()
+    }
+
+    /// The active key (seeded, possibly transposed since by `wander`).
+    pub fn key(&self) -> &Key {
+        &self.key
     }
 
     /// Advance one audio sample. Call exactly once per output sample.
@@ -437,13 +511,42 @@ impl ProcGen {
         let step_rate = (bpm / 60.0) * STEPS_PER_BEAT as f32;
         self.step_phase += step_rate / self.sample_rate;
 
-        if self.step_phase < 1.0 {
+        // Swing: odd 16ths fire late by up to a third of a step. The phase
+        // still drops by exactly 1.0, so the following even step lands back
+        // on the grid — the classic long-short swing pair.
+        let threshold = if self.step as usize % 2 == 1 {
+            1.0 + 0.33 * self.genome.swing.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if self.step_phase < threshold {
             return StepEvent::default();
         }
         self.step_phase -= 1.0;
         let evt = self.on_step();
         self.step = self.step.wrapping_add(1);
         evt
+    }
+
+    /// The genome as heard at this step: the phrase arc (a sine over a
+    /// phrase of 2× the chord period) modulates density and note_length
+    /// ±depth/2 around the authored values. Returns the modulated genome and
+    /// a velocity multiplier. Pure function of step position — no draws.
+    fn effective_genome(&self) -> (Genome, f32) {
+        let g = self.genome;
+        let depth = g.arc_depth.clamp(0.0, 1.0);
+        if depth <= 0.0 {
+            return (g, 1.0);
+        }
+        let phrase_bars = (2 * Conductor::chord_period_bars(&g)).max(1);
+        let phrase_steps = phrase_bars as f32 * STEPS_PER_BAR as f32;
+        let p = (self.step % (phrase_bars * STEPS_PER_BAR as u32)) as f32 / phrase_steps;
+        let arc = libm::sinf(core::f32::consts::PI * p); // 0 → 1 → 0
+        let m = 1.0 + depth * (arc - 0.5); // 1 ± depth/2
+        let mut ge = g;
+        ge.density = (g.density * m).clamp(0.0, 1.0);
+        ge.note_length = (g.note_length * m).clamp(0.0, 1.0);
+        (ge, m.clamp(0.5, 1.5))
     }
 
     /// One step's decisions. Runs at step rate (a few Hz – tens of Hz).
@@ -453,7 +556,7 @@ impl ProcGen {
         if sib == 0 {
             self.on_bar();
         }
-        let g = self.genome;
+        let (g, vel_mul) = self.effective_genome();
         let mut evt = StepEvent::default();
 
         // Releases due this step — held chord and/or melody notes whose
@@ -475,10 +578,10 @@ impl ProcGen {
                 self.held_chord = None;
             }
         }
-        let melody_cap = if self.held_chord.is_some() {
-            off_notes.len() - crate::chord::MAX_CHORD / 2
-        } else {
-            off_notes.len()
+        let melody_cap = match &self.held_chord {
+            // Reserve exactly the held chord's width so its release always fits.
+            Some((c, _)) => off_notes.len().saturating_sub(c.notes().len()),
+            None => off_notes.len(),
         };
         self.melody_offs.retain(|&(at, note)| {
             if step >= at && off_n < melody_cap {
@@ -491,17 +594,20 @@ impl ProcGen {
         });
 
         // Kick — Euclidean, thinned by density so an empty room can fall to
-        // a heartbeat. Downbeat carries full weight.
+        // a heartbeat. Downbeat carries full weight. Bar dropouts gate it.
         let kick_pulses = (g.kick_fill * 7.0 * (0.4 + 0.6 * g.density) + 0.5) as usize;
-        if euclid::hit(sib, kick_pulses, STEPS_PER_BAR, 0) {
-            evt.kick_velocity = Some(if sib == 0 { 1.0 } else { 0.6 + 0.2 * g.tension });
+        if !self.dropped.0 && euclid::hit(sib, kick_pulses, STEPS_PER_BAR, 0) {
+            let v = if sib == 0 { 1.0 } else { 0.6 + 0.2 * g.tension };
+            evt.kick_velocity = Some((v * vel_mul).clamp(0.05, 1.0));
         }
 
         // Hats — closed carries the grid, open answers on a sparse rotation.
-        let chat_pulses = (g.hat_fill * 12.0 + 0.5) as usize;
-        evt.closed_hat = euclid::hit(sib, chat_pulses, STEPS_PER_BAR, 0);
-        let ohat_pulses = (g.hat_fill * 3.0 + 0.5) as usize;
-        evt.open_hat = euclid::hit(sib, ohat_pulses, STEPS_PER_BAR, 2);
+        if !self.dropped.1 {
+            let chat_pulses = (g.hat_fill * 12.0 + 0.5) as usize;
+            evt.closed_hat = euclid::hit(sib, chat_pulses, STEPS_PER_BAR, 0);
+            let ohat_pulses = (g.hat_fill * 3.0 + 0.5) as usize;
+            evt.open_hat = euclid::hit(sib, ohat_pulses, STEPS_PER_BAR, 2);
+        }
 
         // Stab — chord-change downbeats voice the new chord whole; otherwise
         // the Markov melody fires on a per-bar-rotated Euclidean gate.
@@ -544,13 +650,26 @@ impl ProcGen {
             self.held_chord = Some((chord, step.wrapping_add(hold)));
             evt.stab = Some(StabHit {
                 chord,
-                velocity: vel,
+                velocity: (vel * vel_mul).clamp(0.05, 1.0),
                 tone: Some(tone),
                 gate: true,
             });
+
+            // Announce the harmony (bloom retune, P4 telemetry)…
+            evt.chord = Some(self.current_chord());
+            // …and maybe punctuate the arrival with a short master freeze.
+            // One unconditional roll (fixed stream shape); intensity and
+            // length draw only when it actually fires.
+            let roll = self.rng.next_f32();
+            if roll < g.freeze_punct.clamp(0.0, 1.0) * 0.5 {
+                evt.freeze = Some(0.55 + 0.35 * self.rng.next_f32());
+                self.freeze_off_at =
+                    Some(step.wrapping_add(1 + (self.rng.next_u32() % 3)));
+            }
         } else {
             let mel_pulses = (g.density * 6.0 + 0.5) as usize;
-            if euclid::hit(sib, mel_pulses, STEPS_PER_BAR, self.melody_rotation) {
+            if !self.dropped.2 && euclid::hit(sib, mel_pulses, STEPS_PER_BAR, self.melody_rotation)
+            {
                 let note = self.melody.next_note(
                     &self.key,
                     self.conductor.degree(),
@@ -580,7 +699,7 @@ impl ProcGen {
                 }
                 evt.stab = Some(StabHit {
                     chord: Chord::from_notes(&[note as i32]),
-                    velocity: vel,
+                    velocity: (vel * vel_mul).clamp(0.05, 1.0),
                     tone: Some(tone),
                     gate: true,
                 });
@@ -589,6 +708,14 @@ impl ProcGen {
 
         if off_n > 0 {
             evt.stab_off = Some(Chord::from_notes(&off_notes[..off_n]));
+        }
+
+        // Release an active freeze-punctuation hit when its moment passes.
+        if let Some(at) = self.freeze_off_at {
+            if step >= at {
+                evt.freeze = Some(0.0);
+                self.freeze_off_at = None;
+            }
         }
 
         // Bass — root-locked, style drawn per chord (drone/pulse/stab via
@@ -606,10 +733,43 @@ impl ProcGen {
         evt
     }
 
-    /// Bar boundary: advance the conductor, re-roll the melody gate rotation.
+    /// Bar boundary: advance the conductor (and maybe wander the key),
+    /// re-roll the melody gate rotation, draw the bar's dropouts, and at
+    /// phrase boundaries decide motif recall. Fixed draw order: conductor
+    /// (FSM + color), wander roll (+interval), rotation, dropouts ×3,
+    /// (phrase: recall roll).
     fn on_bar(&mut self) {
         self.conductor.on_bar(&self.genome, &mut self.rng);
+
+        // Key wander: pivot transposition at chord changes — same mode, root
+        // moved a fifth either way or a whole step. One unconditional roll
+        // per chord change keeps the stream shape stable.
+        if self.conductor.chord_changed() {
+            let roll = self.rng.next_f32();
+            if roll < self.genome.wander.clamp(0.0, 1.0) * 0.35 {
+                const INTERVALS: [i32; 4] = [7, 5, -2, 2];
+                let iv = INTERVALS[(self.rng.next_u32() % 4) as usize];
+                self.key = Key::new(self.key.root_pc() + iv, self.mode);
+            }
+        }
+
         self.melody_rotation = (self.rng.next_u32() as usize) % STEPS_PER_BAR;
+
+        // Per-bar voice dropouts (kick, hats, melody) — three independent
+        // draws; at a high gene all three landing true is an ensemble rest.
+        let p = self.genome.dropout.clamp(0.0, 1.0) * 0.35;
+        self.dropped = (
+            self.rng.next_f32() < p,
+            self.rng.next_f32() < p,
+            self.rng.next_f32() < p,
+        );
+
+        // Phrase boundary (phrase = 2 × the chord period, the arc's cycle):
+        // decide whether the melody replays its motif or records a new one.
+        let phrase_bars = (2 * Conductor::chord_period_bars(&self.genome)).max(1);
+        if self.bar() % phrase_bars == 0 {
+            self.melody.on_phrase(self.genome.recall, &mut self.rng);
+        }
     }
 }
 
@@ -641,6 +801,8 @@ mod tests {
                 && !evt.open_hat
                 && evt.stab.is_none()
                 && evt.stab_off.is_none()
+                && evt.chord.is_none()
+                && evt.freeze.is_none()
                 && evt.bass == BassEvent::None;
             if !empty {
                 out.push((i, evt));
@@ -687,6 +849,16 @@ mod tests {
                 }
                 BassEvent::NoteOff => eat(2),
             }
+            if let Some(c) = e.chord {
+                eat(0xC0DE);
+                for &n in c.notes() {
+                    eat(n as u64);
+                }
+            }
+            if let Some(f) = e.freeze {
+                eat(0xF0);
+                eat(q(f));
+            }
         }
         h
     }
@@ -716,14 +888,14 @@ mod tests {
         // listen, because it is the audible output's identity.
         let events = run(&mut make(96.0), 8, 96.0);
         let d = digest(&events);
-        // Bumped 2026-06-11 (×6): seeded musical start (key/mode/opening
-        // degree), seeded opening-hold phase, per-hit chord character
-        // (voicing/tone/velocity), gated durations (chord + melody holds
-        // with note-offs), the opening chord struck at step 0 with a drawn
-        // hold, then bass styles (drone/pulse/stab per chord via bass_style)
-        // — intended audible changes.
+        // Bumped 2026-06-11 (×7): seeded musical start, opening-hold phase,
+        // per-hit chord character, gated durations, the opening chord
+        // struck at step 0, bass styles, then the conductor batch — motif
+        // recall, phrase arc, key wander, swing, dropouts, harmonic color,
+        // freeze punctuation, chord announce (digest now covers chord +
+        // freeze fields) — intended audible changes.
         assert_eq!(
-            d, 0x29e2f74972462b13,
+            d, 0xf789128fd9fec47f,
             "golden digest mismatch — actual {d:#018x}"
         );
     }
@@ -1036,6 +1208,246 @@ mod tests {
             voicings.len() > chords.iter().map(|s| s.chord.notes()[0] % 12).collect::<std::collections::HashSet<_>>().len(),
             "voicing variants never appear (every degree always voiced identically)"
         );
+    }
+
+    #[test]
+    fn motif_recall_repeats_degree_sequences() {
+        // With recall pinned high and wander off, melody phrases must reuse
+        // the stored motif: the most common opening trigram of phrases
+        // should account for several phrases. With recall 0 it shouldn't.
+        fn top_trigram_count(recall: f32) -> usize {
+            let mut pg = make(240.0);
+            let mut g = Genome::default();
+            g.recall = recall;
+            g.markov_temp = 0.9; // wander-y chain → repeats are unlikely by chance
+            g.harmonic_rate = 0.5;
+            pg.set_genome(g);
+            let secs = 128.0 * STEPS_PER_BAR as f32 / ((240.0 / 60.0) * STEPS_PER_BEAT as f32);
+            // Collect melody pitch classes bucketed per phrase.
+            let phrase_steps =
+                2 * Conductor::chord_period_bars(&g) as usize * STEPS_PER_BAR;
+            let mut phrases: std::vec::Vec<std::vec::Vec<u8>> = std::vec::Vec::new();
+            for _ in 0..((secs * SR) as u64) {
+                let evt = pg.advance();
+                if let Some(s) = evt.stab {
+                    if s.chord.notes().len() == 1 {
+                        let idx = (pg.step().wrapping_sub(1)) as usize / phrase_steps;
+                        while phrases.len() <= idx {
+                            phrases.push(std::vec::Vec::new());
+                        }
+                        phrases[idx].push(s.chord.notes()[0] % 12);
+                    }
+                }
+            }
+            let mut counts: std::collections::HashMap<[u8; 3], usize> = Default::default();
+            for ph in phrases.iter().filter(|p| p.len() >= 3) {
+                *counts.entry([ph[0], ph[1], ph[2]]).or_default() += 1;
+            }
+            counts.values().copied().max().unwrap_or(0)
+        }
+        let with = top_trigram_count(0.95);
+        let without = top_trigram_count(0.0);
+        assert!(
+            with > without && with >= 3,
+            "recall must repeat phrase openings (with {with}, without {without})"
+        );
+    }
+
+    #[test]
+    fn phrase_arc_modulates_density_over_the_phrase() {
+        // With a deep arc, melody hits cluster mid-phrase; flat arc spreads.
+        fn mid_share(arc: f32) -> f32 {
+            let mut pg = make(240.0);
+            let mut g = Genome::default();
+            g.arc_depth = arc;
+            g.density = 0.5;
+            pg.set_genome(g);
+            let phrase_steps =
+                2 * Conductor::chord_period_bars(&g) as usize * STEPS_PER_BAR;
+            let secs = 96.0 * STEPS_PER_BAR as f32 / ((240.0 / 60.0) * STEPS_PER_BEAT as f32);
+            let (mut mid, mut total) = (0u32, 0u32);
+            for _ in 0..((secs * SR) as u64) {
+                let evt = pg.advance();
+                if let Some(s) = evt.stab {
+                    if s.chord.notes().len() == 1 {
+                        total += 1;
+                        let pos = (pg.step().wrapping_sub(1)) as usize % phrase_steps;
+                        let p = pos as f32 / phrase_steps as f32;
+                        if (0.25..0.75).contains(&p) {
+                            mid += 1;
+                        }
+                    }
+                }
+            }
+            mid as f32 / total.max(1) as f32
+        }
+        assert!(
+            mid_share(1.0) > mid_share(0.0) + 0.05,
+            "a deep arc should concentrate melody mid-phrase"
+        );
+    }
+
+    #[test]
+    fn wander_transposes_but_stays_in_a_scale() {
+        let mut pg = make(240.0);
+        let mut g = Genome::default();
+        g.wander = 1.0;
+        g.harmonic_rate = 1.0; // chord (and wander chance) every bar
+        pg.set_genome(g);
+        let start_root = pg.musical_start().0;
+        let secs = 64.0 * STEPS_PER_BAR as f32 / ((240.0 / 60.0) * STEPS_PER_BEAT as f32);
+        let mut roots = std::collections::HashSet::new();
+        for _ in 0..((secs * SR) as u64) {
+            pg.advance();
+            roots.insert(pg.key().root_pc());
+        }
+        assert!(roots.len() >= 2, "full wander must actually transpose ({roots:?})");
+        let _ = start_root;
+        // And with wander 0 the key never moves (the default-genome case is
+        // covered by melody_stays_in_key).
+        let mut still = make(240.0);
+        let r0 = still.key().root_pc();
+        for _ in 0..((secs * SR) as u64) {
+            still.advance();
+        }
+        assert_eq!(still.key().root_pc(), r0, "wander 0 must hold the key");
+    }
+
+    #[test]
+    fn swing_delays_odd_steps() {
+        // Measure the step clock itself (step() increments are observable
+        // every step, events or not): with swing, even→odd gaps stretch and
+        // odd→even gaps shrink — the long-short pair.
+        fn gap_ratio(swing: f32) -> f32 {
+            let mut pg = make(120.0);
+            let mut g = Genome::default();
+            g.swing = swing;
+            pg.set_genome(g);
+            let mut prev_step = pg.step();
+            let mut last_fire: Option<(u64, u32)> = None;
+            let (mut even_to_odd, mut odd_to_even) = (0.0f64, 0.0f64);
+            let mut n = 0u32;
+            for i in 0..(48_000 * 20) {
+                pg.advance();
+                if pg.step() != prev_step {
+                    let fired = prev_step; // the step that just fired
+                    prev_step = pg.step();
+                    if let Some((li, ls)) = last_fire {
+                        let gap = (i - li) as f64;
+                        if ls % 2 == 0 {
+                            even_to_odd += gap;
+                        } else {
+                            odd_to_even += gap;
+                        }
+                        n += 1;
+                    }
+                    last_fire = Some((i, fired));
+                }
+            }
+            assert!(n > 100);
+            (even_to_odd / odd_to_even) as f32
+        }
+        let straight = gap_ratio(0.0);
+        let swung = gap_ratio(1.0);
+        assert!((straight - 1.0).abs() < 0.05, "no swing = even gaps ({straight})");
+        assert!(swung > 1.5, "full swing = long-short pairs (ratio {swung})");
+    }
+
+    #[test]
+    fn dropout_silences_whole_bars() {
+        // High dropout: some bars carry no kick despite a four-on-the-floor
+        // fill; zero dropout: every bar carries kicks.
+        fn bars_with_kick(dropout: f32) -> (u32, u32) {
+            let mut pg = make(240.0);
+            let mut g = Genome::default();
+            g.dropout = dropout;
+            g.kick_fill = 0.7;
+            g.density = 0.7;
+            pg.set_genome(g);
+            let bars = 64u32;
+            let secs = bars as f32 * STEPS_PER_BAR as f32 / ((240.0 / 60.0) * STEPS_PER_BEAT as f32);
+            let mut with = std::collections::HashSet::new();
+            for _ in 0..((secs * SR) as u64) {
+                let evt = pg.advance();
+                if evt.kick_velocity.is_some() {
+                    with.insert(pg.bar());
+                }
+            }
+            (with.len() as u32, bars)
+        }
+        let (clean, total) = bars_with_kick(0.0);
+        assert!(clean >= total - 1, "no dropout → kicks in every bar ({clean}/{total})");
+        let (dropped, total) = bars_with_kick(1.0);
+        assert!(
+            dropped < total - 4,
+            "full dropout must silence several bars ({dropped}/{total})"
+        );
+    }
+
+    #[test]
+    fn color_extends_chords_diatonically() {
+        fn max_chord_size(color: f32) -> usize {
+            let mut pg = make(240.0);
+            let mut g = Genome::default();
+            g.color = color;
+            g.harmonic_rate = 1.0;
+            g.density = 0.0;
+            pg.set_genome(g);
+            let secs = 48.0 * STEPS_PER_BAR as f32 / ((240.0 / 60.0) * STEPS_PER_BEAT as f32);
+            let mut max = 0;
+            for _ in 0..((secs * SR) as u64) {
+                if let Some(s) = pg.advance().stab {
+                    max = max.max(s.chord.notes().len());
+                }
+            }
+            max
+        }
+        assert_eq!(max_chord_size(0.0), 3, "color 0 = bare triads");
+        assert!(max_chord_size(1.0) >= 4, "full color must reach 7ths/9ths");
+    }
+
+    #[test]
+    fn freeze_punctuation_fires_and_releases() {
+        let mut pg = make(240.0);
+        let mut g = Genome::default();
+        g.freeze_punct = 1.0;
+        g.harmonic_rate = 1.0;
+        pg.set_genome(g);
+        let secs = 64.0 * STEPS_PER_BAR as f32 / ((240.0 / 60.0) * STEPS_PER_BEAT as f32);
+        let (mut ons, mut offs) = (0u32, 0u32);
+        for _ in 0..((secs * SR) as u64) {
+            if let Some(f) = pg.advance().freeze {
+                if f > 0.0 {
+                    ons += 1;
+                    assert!((0.55..=0.9).contains(&f), "freeze intensity in range ({f})");
+                } else {
+                    offs += 1;
+                }
+            }
+        }
+        assert!(ons > 5, "high freeze_punct must fire ({ons})");
+        assert!(offs >= ons - 1, "every freeze must release ({ons} on / {offs} off)");
+        // And at zero the master freeze is never touched.
+        let mut quiet = make(240.0);
+        for _ in 0..((secs * SR) as u64) {
+            assert!(quiet.advance().freeze.is_none());
+        }
+    }
+
+    #[test]
+    fn chord_boundaries_announce_the_harmony() {
+        let mut pg = make(240.0);
+        let secs = 32.0 * STEPS_PER_BAR as f32 / ((240.0 / 60.0) * STEPS_PER_BEAT as f32);
+        let mut announced = 0;
+        for _ in 0..((secs * SR) as u64) {
+            let evt = pg.advance();
+            if let Some(c) = evt.chord {
+                announced += 1;
+                assert!(c.notes().len() >= 3);
+                assert_eq!(c.notes(), pg.current_chord().notes());
+            }
+        }
+        assert!(announced >= 2, "chord boundaries must announce ({announced})");
     }
 
     #[test]

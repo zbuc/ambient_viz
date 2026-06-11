@@ -150,8 +150,15 @@ genes are slow intentions and the conductor interpolates/smooths internally.
 | stab_color | 79 | `ProcStabColor` | 0..1 | per-hit tone variance (existing `stabtone` axis) |
 | note_length | 80 | `ProcNoteLength` | 0..1 | bass gate hold length (2–14 steps); phrasing hook for melody durations later |
 | bass_style | 81 | `ProcBassStyle` | 0..1 | bass archetype axis: 0 = drone (pedal per chord), 0.5 = pulse (downbeat anchor), 1 = stab (Euclidean shorts); triangle weights drawn per chord boundary |
+| recall | 82 | `ProcRecall` | 0..1 | motif memory: probability a phrase replays the stored melody motif (snapped to the current harmony) instead of wandering |
+| arc_depth | 83 | `ProcArcDepth` | 0..1 | phrase arc: sine over each phrase (2× chord period) modulating density/note_length/velocity ±depth/2 |
+| wander | 84 | `ProcWander` | 0..1 | key drift: pivot transposition (±fifth/whole-step, same mode) probability per chord change |
+| swing | 85 | `ProcSwing` | 0..1 | odd 16ths delayed up to a third of a step |
+| dropout | 86 | `ProcDropout` | 0..1 | per-bar voice dropouts (kick/hats/melody independent; all = ensemble rest) |
+| color | 87 | `ProcColor` | 0..1 | harmonic color: weight toward diatonic 7th/9th extensions, drawn per chord |
+| freeze_punct | 88 | `ProcFreezePunct` | 0..1 | freeze punctuation: short master-freeze hits at chord arrivals |
 
-(82–85 reserved for genes discovered during listening. `note_length` was the
+(89+ free for genes discovered during listening. `note_length` was the
 first such gene — the duration discussion promoted it out of `bass_activity`
 so "sparser but longer" is expressible. The stab voice is **gated** (P1m+):
 ADSR *shape* lives in the patch, note *duration* belongs to the trigger —
@@ -341,6 +348,18 @@ path between authored aesthetics.
   which the host already captures): a gallery-day restart resumes the walk
   instead of resetting it.
 
+Design requirements recorded for the build (proposed 2026-06-11, no code
+until P6 exists):
+
+- **Novelty pressure** — a small reward penalty for camping in one region of
+  the plane (e.g. distance-weighted against a slow EMA of recent positions):
+  drift insurance against a degenerate objective.
+- **Per-axis mutation scales** — `sigma_x`/`sigma_y` params; the plane need
+  not be isotropic once anchors cluster unevenly.
+- **Persistent region statistics** — long-run mean reward per plane region
+  kept in the plugin snapshot, so accumulated room response survives
+  restarts and can warm-start the walk.
+
 ## 9. Modes & coexistence with backing-track projects
 
 Backing-track playback (today's SD-player firmware) and procgen are **separate
@@ -412,9 +431,11 @@ validator + captured sensor sessions on the Pi side).
   P7.
 - **Contextual bandit** — alternative optimizer; switch criterion in §1.
 - **14-bit CC pairs** — only if a gene proves resolution-starved.
-- **CA percussion texture**, **pads generator** (needs a pad voice first),
-  **multi-zone spatial features** (needs added ToF hardware; the
-  `room_features.v1` plugin escape hatch).
+- **CA percussion texture**, **multi-zone spatial features** (needs added
+  ToF hardware; the `room_features.v1` plugin escape hatch). (The pad role
+  is now covered by the bloom bank retuning to the announced harmony —
+  `BloomAmount` + `StepEvent.chord`; a dedicated pad *synth* voice remains
+  open if the resonator texture proves insufficient.)
 - **Runtime producer switching / generative interludes** — post-QSPI (§9).
 - **Visualizer consumption of `music.conductor.*` / `seq.*`** — the BACKLOG
   "Sequencer event → visualizer feed" item; P4 makes the signals exist.

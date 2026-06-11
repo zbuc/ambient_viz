@@ -113,12 +113,19 @@ impl Key {
 /// degree's major/minor/diminished quality falls out automatically (the
 /// programmatic mirror of the roman-numeral parser).
 pub fn diatonic_triad(key: &Key, degree: usize, base_octave: i32) -> Chord {
+    diatonic_chord(key, degree, base_octave, 0)
+}
+
+/// A diatonic chord with `extensions` extra stacked thirds above the triad
+/// (1 = diatonic 7th, 2 = 7th + 9th). Quality keeps falling out of the scale.
+pub fn diatonic_chord(key: &Key, degree: usize, base_octave: i32, extensions: usize) -> Chord {
     let root = (base_octave + 1) * 12 + key.root_pc;
-    Chord::from_notes(&[
-        root + key.degree_semitones(degree),
-        root + key.degree_semitones(degree + 2),
-        root + key.degree_semitones(degree + 4),
-    ])
+    let mut notes = [0i32; 5];
+    let n = 3 + extensions.min(2);
+    for (i, slot) in notes[..n].iter_mut().enumerate() {
+        *slot = root + key.degree_semitones(degree + 2 * i);
+    }
+    Chord::from_notes(&notes[..n])
 }
 
 /// The seven diatonic modes — programmatic mirror of the `key:` mode names,

@@ -57,11 +57,25 @@ pub fn nearest_chord_tone(degree: usize, chord_degree: usize) -> usize {
     best
 }
 
+/// Max motif length (in notes) the recall mechanism stores per phrase.
+pub const MOTIF_MAX: usize = 8;
+
 pub struct MelodyGen {
     /// Current scale degree (0-based, 0..7).
     degree: usize,
     /// Last emitted MIDI note, or -1 before the first note.
     last_note: i32,
+    /// Motif memory: the first [`MOTIF_MAX`] degrees emitted in a recorded
+    /// phrase. Markov gives contour but no long-term structure; replaying a
+    /// stored motif at later phrases (snapped to the then-current harmony)
+    /// is what makes the line thematic instead of a perpetual wander.
+    motif: [u8; MOTIF_MAX],
+    motif_len: usize,
+    /// `Some(i)` = replaying `motif[i..]` instead of drawing from the chain.
+    replay_idx: Option<usize>,
+    /// Capturing the current phrase into `motif` (replay phrases never
+    /// record, so a finished replay doesn't mutate the stored theme).
+    recording: bool,
 }
 
 impl MelodyGen {
@@ -69,12 +83,39 @@ impl MelodyGen {
         Self {
             degree: 0,
             last_note: -1,
+            motif: [0; MOTIF_MAX],
+            motif_len: 0,
+            replay_idx: None,
+            recording: false,
         }
     }
 
     pub fn reset(&mut self) {
         self.degree = 0;
         self.last_note = -1;
+        self.motif_len = 0;
+        self.replay_idx = None;
+        self.recording = false;
+    }
+
+    /// Is a motif replay currently in progress? (test/telemetry)
+    pub fn replaying(&self) -> bool {
+        self.replay_idx.is_some()
+    }
+
+    /// Phrase boundary: with probability `recall`, replay the stored motif
+    /// through this phrase; otherwise record this phrase as the new motif.
+    /// Draws exactly once (fixed stream shape regardless of outcome).
+    pub fn on_phrase(&mut self, recall: f32, rng: &mut Pcg32) {
+        let roll = rng.next_f32();
+        if self.motif_len >= 3 && roll < recall.clamp(0.0, 1.0) {
+            self.replay_idx = Some(0);
+            self.recording = false;
+        } else {
+            self.replay_idx = None;
+            self.motif_len = 0; // record afresh
+            self.recording = true;
+        }
     }
 
     pub fn degree(&self) -> usize {
@@ -97,20 +138,41 @@ impl MelodyGen {
         genome: &Genome,
         rng: &mut Pcg32,
     ) -> u8 {
-        // 1. Markov step with temperature.
-        let tau = 0.35 + 1.3 * genome.markov_temp.clamp(0.0, 1.0);
-        let row = &MELODY_T[self.degree % 7];
-        let mut weights = [0.0f32; 7];
-        for (w, &p) in weights.iter_mut().zip(row.iter()) {
-            *w = powf(p, 1.0 / tau);
-        }
-        let mut degree = rng.pick_weighted(&weights);
+        // 1. Degree: replay the stored motif when active, else a Markov step
+        //    with temperature. Replayed degrees still pass the harmony
+        //    constraints below, so the theme adapts to the current chord.
+        let mut degree = match self.replay_idx {
+            Some(i) if i < self.motif_len => {
+                self.replay_idx = Some(i + 1);
+                if i + 1 >= self.motif_len {
+                    self.replay_idx = None; // motif done — back to the chain
+                }
+                self.motif[i] as usize
+            }
+            _ => {
+                self.replay_idx = None;
+                let tau = 0.35 + 1.3 * genome.markov_temp.clamp(0.0, 1.0);
+                let row = &MELODY_T[self.degree % 7];
+                let mut weights = [0.0f32; 7];
+                for (w, &p) in weights.iter_mut().zip(row.iter()) {
+                    *w = powf(p, 1.0 / tau);
+                }
+                rng.pick_weighted(&weights)
+            }
+        };
 
         // 2. Chord-tone snap on strong beats.
         if strong && !is_chord_tone(degree, chord_degree) {
             degree = nearest_chord_tone(degree, chord_degree);
         }
         self.degree = degree;
+
+        // Record the emitted (post-snap) degree into the motif while a fresh
+        // phrase is being captured (replay phrases never record).
+        if self.recording && self.motif_len < MOTIF_MAX {
+            self.motif[self.motif_len] = degree as u8;
+            self.motif_len += 1;
+        }
 
         // 3. Octave placement: scan the degree's placements around the
         //    register center AND around the previous note; keep the placement

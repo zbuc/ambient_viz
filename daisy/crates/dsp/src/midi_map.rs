@@ -51,6 +51,18 @@ pub enum Param {
     HatGain,
     /// Sampler (backing track / field-recording bed) gain.
     SamplerGain,
+    /// Resonant bloom bank amount (0 = silent, 1 = full ring). Under the
+    /// procgen producer the bank retunes to the current chord (a pad).
+    BloomAmount,
+    /// Kick-keyed ducking of the sampler bed (0 = none, 1 = full pump).
+    DuckAmount,
+    /// Stab delay time in BEATS at the live tempo (0 = sync off; the raw
+    /// `StabDelayTime` seconds value then applies). 0.75 = dotted 8th.
+    StabDelayBeats,
+    /// Reverb room size (0..1) — the space morph axis.
+    ReverbSize,
+    /// Reverb damping (0..1).
+    ReverbDamp,
     /// Master freeze wet/dry (0 = passthrough, 1 = held grain). Mirrors the
     /// visualizer's frame-freeze; the transport that drives it is unconnected.
     Freeze,

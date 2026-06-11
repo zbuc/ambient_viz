@@ -88,6 +88,33 @@ impl BloomBank {
         }
     }
 
+    /// Retune the bank to a chord (MIDI notes, low to high). The six slots
+    /// keep the fixed bank's rising layout — root, second tone, root + oct,
+    /// third tone, second + oct, top/color note — wrapping for small chords,
+    /// so the same onset/width staging applies to whatever harmony the
+    /// producer announces. Cheap (six `set_freq`s); the procgen producer
+    /// calls it per chord change, turning the bloom into a pad that pulls
+    /// the program material into the CURRENT chord. Grid/exhibit paths never
+    /// call it, so the fixed D Lydian tuning stands there.
+    pub fn set_chord(&mut self, notes: &[u8]) {
+        if notes.is_empty() {
+            return;
+        }
+        let n = notes.len();
+        let f = |i: usize| crate::fm_stab::midi_to_freq(notes[i % n]);
+        let freqs = [
+            f(0),
+            f(1),
+            f(0) * 2.0,
+            f(2),
+            f(1) * 2.0,
+            if n > 3 { f(n - 1) } else { f(2) * 2.0 },
+        ];
+        for (v, freq) in self.voices.iter_mut().zip(freqs) {
+            v.svf.set_freq(freq);
+        }
+    }
+
     /// Set the "proximity" amount in `[0, 1]`. Updates every resonator's Q and
     /// its entry envelope. Cheap — call per audio block (or per control tick).
     pub fn set_amount(&mut self, amount: f32) {
