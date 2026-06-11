@@ -310,8 +310,10 @@ flip, not a schema migration. The order roughly tracks blast radius. Detail in
   to a Daisy sink.* — `daisy/PLAN_USB_COMPOSITE.md` Phase E, `ARCHITECTURE.md` (Transports)
 - [ ] **Tempo Pi→Daisy (or onboard `bpm_at`)** for the dsp Sequencer — parked until the
   sequencer is instantiated; prefer onboard `bpm_at(own POS)` over a tempo CC. *Clock
-  distribution across a transport edge — see the clock abstraction under Platform.* —
-  mem `daisy-tempo-sequencer-future`, `ARCHITECTURE.md` (Clock)
+  distribution across a transport edge — see the clock abstraction under Platform.*
+  **Resolution designed**: `PROCMUSIC.md` P3 instantiates the sequencer clock on-device
+  and picks onboard `bpm_at` (no tempo CC) — this item closes when P3 lands. —
+  mem `daisy-tempo-sequencer-future`, `ARCHITECTURE.md` (Clock), `PROCMUSIC.md` (§5, P3)
 - [ ] **Tape model quality** — oversampling (hysteresis, chew shaper), FIR crossfade on
   loss-filter changes, DC blocker, bypass smoothing, head-bump↔speed coupling, pre-tape
   EQ, mid/side, bias param, decorrelated stereo hiss, JA f32 audit. — `daisy/TAPE_SIMULATION.md`
@@ -565,9 +567,22 @@ as the human-editable loop source; build the stream layer instead.
   feed the audio engine **and** the visualizer identically; "directorial intent" =
   choosing/blending/swapping producers per timeline section (some lanes from `.pat`
   loops, others generated on the fly). The visualizer never knows which. *This is
-  the bus **source-producer contract** in the architecture.* — `ARCHITECTURE.md`
-  (module taxonomy / Symbolic sources), conversation 2026-06-08 (new), mem
-  `exhibit-composition-structure`
+  the bus **source-producer contract** in the architecture.* **Now elaborated by
+  `PROCMUSIC.md`** (producer enum `Grid(Sequencer) | Conductor(ProcGen)`, sensor-driven
+  evolutionary loop, phased plan); child items below track its build phases. —
+  `ARCHITECTURE.md` (module taxonomy / Symbolic sources), conversation 2026-06-08 (new),
+  mem `exhibit-composition-structure`, `PROCMUSIC.md`
+  - [ ] **P1: `dsp::procgen` on the Mac host** — conductor (chord FSM, density/tension,
+    bar clock) + Euclidean drums + constrained-Markov melody + bass rules, hardcoded
+    genome, `Producer` enum behind `Engine`, host rig flag; golden `StepEvent` traces +
+    musical-constraint tests + listening time. — `PROCMUSIC.md` (§5, P1)
+  - [ ] **P3: firmware procgen build** — `procgen` feature instantiating the synth
+    voices + producer on the Daisy for the first time (today's firmware is the SD
+    player); riskiest phase — heap/CPU budget against 504 KB AXI + 667 µs SAI block. —
+    `PROCMUSIC.md` (P3)
+  - [ ] **P6: `music_optimizer.v1` plugin** — (1+1)-ES on the plugin host
+    (REPLAYABLE/SNAPSHOTTABLE), `derived.room.reward` in, `music.genome.*` out,
+    genome→CC 70–85 bindings via the resolved-binding pattern. — `PROCMUSIC.md` (§7, P6)
 - [ ] **MIDI output (parallel, optional, later)** — *only* if external gear/DAW enters
   the loop (hardware synth voicing the stabs, recording the generative output). The
   host already links `midir`; add a MIDI *out* alongside the JSON event stream — an
