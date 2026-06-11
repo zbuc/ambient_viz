@@ -158,4 +158,4 @@ function applyRegistry(registry, bus) {
   });
 }
 
-module.exports = { loadRegistry, applyRegistry };
+module.exports = { loadRegistry, applyRegistry, globToRegex };

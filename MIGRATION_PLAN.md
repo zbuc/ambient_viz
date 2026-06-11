@@ -216,6 +216,19 @@ publisher is flagged. **PM impact:** zero.
 
 ## Phase 4 — Simulator + first compiled mapping: tape failure
 
+> **Status (2026-06-10): 4A COMPLETE.** `proto/router.proto` (verbatim from
+> ROUTER_IR.md) + codegen; graph simulator `tools/sim/` (maturity level 2:
+> manifests + policy + graph → output + `_meta` logs, virtual-clock
+> deterministic — 63 min simulates in ~1 s, runs byte-identical);
+> `bus-adapter` clock made injectable so the sim drives the *production*
+> writer discipline. Gate: identity graph (Input→Output echo per mapped path
+> at incumbent−1 — the 4C shadow shape) over the mock golden: 281,353 in =
+> 281,353 echoed, 0 mismatches, 72,096 arbitration checks 0 violations, all
+> echo candidates `would_win_if_priority_ge_legacy`, 0 WARNs/rejects, 25/25
+> tests. Note: real-sensor golden re-record is needed before the 4E gate
+> numbers are tuned (a 4C shadow session doubles as the recording); 4B
+> compiler correctness validates fine against the mock golden.
+
 The public phase is one phase; **internally it lands as six gated
 milestones**, so simulator, compiler, adapter, and arbitration bugs are never
 being hunted simultaneously:

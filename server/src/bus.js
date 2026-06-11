@@ -400,11 +400,15 @@ class OrreryBus extends EventEmitter {
   // `_meta.<path>.<field>` at 1 Hz, as ordinary bus signals — the inspector
   // (or any remote subscriber) needs no privileged API.
   _publishMeta() {
+    const cutoff = this.nowMono() - 5000;
     for (const [p, entry] of this.paths) {
       if (p.startsWith('_meta.')) continue;
       const lastWriter = entry.shape === 'state' && entry.resolved ? entry.resolved.sourceId : '';
       let seqGaps = 0;
       for (const w of entry.writers.values()) seqGaps += w.seqGaps;
+      // Prune the 5 s rate window here too — snapshot() used to be the only
+      // pruner, so _meta rate_hz inflated whenever no inspector was polling.
+      entry.counters.window = entry.counters.window.filter((t) => t >= cutoff);
       const fields = {
         rate_hz: entry.counters.window.length / 5,
         last_writer: lastWriter,

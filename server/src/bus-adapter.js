@@ -46,7 +46,17 @@ const TOUCH = {
 // obligation from BUS_PROTOCOL.md, at the lowest rate that can't go stale.
 const KEEPALIVE_TICK_MS = 250;
 
-module.exports = function attachBusAdapter({ bus, inputBus }) {
+// Time is injectable so the graph simulator (tools/sim, phase 4) can run this
+// exact writer discipline under its virtual clock: `now` stamps sends, and
+// `scheduleRepeating(fn, ms)` owns the keepalive cadence (returns a cancel).
+// Defaults preserve live behavior byte-for-byte.
+const defaultScheduleRepeating = (fn, ms) => {
+  const t = setInterval(fn, ms);
+  if (t.unref) t.unref();
+  return () => clearInterval(t);
+};
+
+function attachBusAdapter({ bus, inputBus, now = Date.now, scheduleRepeating = defaultScheduleRepeating }) {
   // registerPath is idempotent: when the manifest registry loaded first
   // (phase 3), the manifest's declaration wins and the values below are
   // fallbacks for registry-less runs (tests). The keepalive obligation always
@@ -71,7 +81,7 @@ module.exports = function attachBusAdapter({ bus, inputBus }) {
     const prev = last.get(path);
     if (!force && prev && prev.value === v) return;
     bus.publishState(path, v, opts);
-    last.set(path, { value: v, atMs: Date.now(), opts, staleAfterMs });
+    last.set(path, { value: v, atMs: now(), opts, staleAfterMs });
   };
 
   const onChange = (entry) => {
@@ -91,19 +101,23 @@ module.exports = function attachBusAdapter({ bus, inputBus }) {
     send(m.path, v, { sourceId: m.source, priority: m.priority }, staleFor.get(m.path));
   };
 
-  const keepalive = setInterval(() => {
-    const now = Date.now();
+  const cancelKeepalive = scheduleRepeating(() => {
+    const t = now();
     for (const [path, rec] of last) {
-      if (rec.staleAfterMs > 0 && now - rec.atMs >= rec.staleAfterMs / 2) {
+      if (rec.staleAfterMs > 0 && t - rec.atMs >= rec.staleAfterMs / 2) {
         send(path, rec.value, rec.opts, rec.staleAfterMs, true);
       }
     }
   }, KEEPALIVE_TICK_MS);
-  if (keepalive.unref) keepalive.unref();
 
   inputBus.on('change', onChange);
   return {
-    stop: () => { inputBus.off('change', onChange); clearInterval(keepalive); },
+    stop: () => { inputBus.off('change', onChange); cancelKeepalive(); },
     MAP, TOUCH,
   };
-};
+}
+
+module.exports = attachBusAdapter;
+module.exports.MAP = MAP;
+module.exports.TOUCH = TOUCH;
+module.exports.PRIORITIES = { PRI_SENSOR, PRI_CLOCK, PRI_LOCAL_UI };

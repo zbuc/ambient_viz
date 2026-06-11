@@ -19,3 +19,7 @@ server/.orrery-boot-epoch
 # proto codegen intermediates (generated JS in server/src/gen IS committed)
 proto/.gen-ts/
 proto/node_modules/
+
+# replay-harness and graph-simulator run outputs (large, regenerable from the golden)
+projects/pain-material/fixtures/*/replays/
+projects/pain-material/fixtures/*/sims/

@@ -1,0 +1,181 @@
+// orrery router.v1 — the routing layer as a compiled, typed graph.
+// Schema-of-record: ROUTER_IR.md (this file is its verbatim IDL).
+// The compiler reads manifest.v1 (validation/authorization); the runtime
+// graph reads/writes bus.v1 packets.
+
+syntax = "proto3";
+package orrery.router.v1;
+
+import "common.proto";  // orrery.common.v1.{Value, RateDomain, MemberParam}
+// manifest.v1 is read by the COMPILER (validation/authorization), not the runtime graph
+
+message RouterGraph {
+  string   schema           = 1;  // "router.v1"
+  repeated Node nodes       = 2;  // main control-plane DAG
+  repeated Replicated reps  = 3;  // per-group / per-wildcard-match subgraphs
+  WildcardPolicy wildcard_policy = 4;
+  optional uint32 reload_ramp_ms = 5;  // crossfade STATE outputs on reload (anti-discontinuity).
+                                       // EVENT outputs never ramp: queued events survive the
+                                       // swap, deduped by (source, boot_epoch, seq) — no
+                                       // drops, no replays (rule 9)
+}
+
+message Node {
+  string id = 1;                  // unique within its (sub)graph
+  orrery.common.v1.RateDomain rate_domain = 2;
+  oneof op {
+    Input   input   = 10;
+    Const   const   = 11;
+    Curve   curve   = 12;
+    Scale   scale   = 13;
+    Smooth  smooth  = 14;  // HOLDS STATE (filter memory)
+    Gate    gate    = 15;
+    Combine combine = 16;  // blend
+    Select  select  = 17;  // fallback / pick
+    Delay   delay   = 18;  // HOLDS STATE — the only legal way to make a cycle
+    Member  member  = 19;  // Replicated-only: this instance's params
+    Output  output  = 20;  // writer to a sink
+    Envelope envelope = 21; // HOLDS STATE — EVENT/STATE → STATE (follower)
+    Trigger  trigger  = 22; // HOLDS STATE (arm flag) — STATE → EVENT (edge detect)
+    Latch    latch    = 23; // HOLDS STATE — EVENT → STATE (hold/toggle/count)
+    Normalize normalize = 24; // pure — signal-parameterized (value-lo)/(hi-lo)
+  }
+}
+
+// ── sources ──
+message Input {
+  string path = 1;             // bus SignalPath; may be a wildcard (REDUCE) feeding a Combine/Select
+  bool   wildcard_reduce = 2;  // true → emits the matched set for a downstream reducer
+}
+message Const  { orrery.common.v1.Value value = 1; }
+message Member {                          // valid only inside a Replicated subgraph
+  orrery.common.v1.MemberParam which = 1;  // MEMBER_INDEX / COUNT / LOGICAL / POSITION
+}
+
+// ── pure scalar/transfer ops ──
+message Curve {
+  string input = 1;
+  Kind   kind  = 2;                       // LINEAR | EASE_IN_QUAD | EASE_OUT_QUAD | EASE_IN_OUT | STEP | LUT
+  repeated float lut = 3;                 // when kind = LUT: N equally-spaced points over
+                                          // [in_min, in_max], linear between entries
+  double in_min=4; double in_max=5; double out_min=6; double out_max=7;
+  bool   clamp = 8;
+  enum Kind { KIND_UNSPECIFIED=0; LINEAR=1; EASE_IN_QUAD=2; EASE_OUT_QUAD=3; EASE_IN_OUT=4; STEP=5; LUT=6; }
+}
+message Scale { string input=1; double mul=2; double add=3; }
+message Normalize {                       // (value − lo) / (hi − lo), clamped 0..1
+  string input=1;
+  string lo=2; string hi=3;               // NODE IDS, not constants — the endpoints are
+                                          // live signals. This is how LEARNED CALIBRATION
+                                          // (the empty-room distance_far_cm) parameterizes
+                                          // a graph; Curve's static in_min/in_max can't.
+  bool invert=4;                          // emit 1 − result (near = hot: the reversed ramp)
+  // degenerate span (hi ≈ lo): step at lo (0 below, 1 at/past) — never NaN (rule 13)
+}
+message Gate  {
+  string input=1; string control=2; double threshold=3;
+  Mode mode=4; optional orrery.common.v1.Value blocked_value=5;
+  enum Mode { MODE_UNSPECIFIED=0; ABOVE=1; BELOW=2; }
+}
+
+// ── temporal (HOLD STATE) ──
+message Smooth {
+  string input=1; Kind kind=2;
+  double time_constant_ms=3;              // ONE_POLE — interpreted IN THIS NODE'S rate_domain
+  double slew_per_s=4;                    // SLEW
+  double min_cutoff_hz=5;                 // ONE_EURO — cutoff at rest (lower = smoother/laggier when still)
+  double beta=6;                          // ONE_EURO — speed coefficient (higher = snappier on fast moves)
+  enum Kind { KIND_UNSPECIFIED=0; ONE_POLE=1; SLEW=2; ONE_EURO=3; }
+}
+message Delay { string input=1; uint32 frames=2; } // explicit delay; breaks cycles.
+                                                   // frames are counted IN THIS NODE'S
+                                                   // rate_domain (same rule as Smooth's
+                                                   // time params) — so TICK DOMAINS ONLY:
+                                                   // RATE_CONTROL has no tick to count,
+                                                   // rejected there (rule 11).
+
+// ── shape conversion (EVENT ↔ STATE; all HOLD STATE) ──
+// The explicit bridges between the two shapes — the reference visualizer's
+// envelope followers (bassPulse) and edge detectors (onset) live here, not
+// in hidden per-edge behavior.
+message Envelope {                         // EVENT or STATE in → STATE out
+  string input=1;
+  Mode   mode=2;
+  double attack_ms=3;                      // AR only; time params interpreted in
+  double release_ms=4;                     //   this node's rate_domain (cf. Smooth)
+  enum Mode { MODE_UNSPECIFIED=0;
+              PEAK_FOLLOW=1;               // instant attack, exponential release (bassPulse)
+              AR=2; }                      // attack/release ramp (gate-style)
+}
+message Trigger {                          // STATE in → EVENT out on threshold crossing
+  string input=1;
+  double threshold=2;
+  double hysteresis=3;                     // value-domain band to re-arm (anti-chatter)
+  Edge   edge=4;
+  enum Edge { EDGE_UNSPECIFIED=0; RISING=1; FALLING=2; BOTH=3; }
+}
+message Latch {                            // EVENT in → STATE out
+  string input=1;                          // the event stream
+  optional string reset=2;                 // optional second event stream → back to `idle`
+  Mode   mode=3;
+  optional orrery.common.v1.Value idle=4;  // value before first event / after reset
+  enum Mode { MODE_UNSPECIFIED=0;
+              HOLD_PAYLOAD=1;              // sample-and-hold the event payload
+              TOGGLE=2;                    // bool flip per event
+              COUNT=3; }                   // monotonic event counter
+}
+
+// ── multi-input ──
+message Combine {                          // BLEND
+  repeated string inputs=1;                // fixed order = deterministic for non-commutative modes
+  Mode mode=2; repeated double weights=3;  // weights parallel to inputs for WEIGHTED
+  enum Mode { MODE_UNSPECIFIED=0; SUM=1; MUL=2; MIN=3; MAX=4; AVG=5; WEIGHTED=6; }
+}
+message Select {                           // FALLBACK / pick
+  repeated string inputs=1; Mode mode=2;
+  optional string index_input=3;           // for BY_INDEX
+  uint32 hysteresis_ms=4;                  // anti-thrash when switching sources; interpreted in
+                                           // this node's rate_domain (dt-aware in RATE_CONTROL,
+                                           // same rule as Smooth's time params)
+  enum Mode { MODE_UNSPECIFIED=0; FIRST_LIVE=1; HIGHEST_PRIORITY=2; BY_INDEX=3; }
+}
+
+// ── sink writer ──
+message Output {
+  string input=1;
+  string target=2;                         // bus SignalPath; may use ${member}/${instance} inside a Replicated
+  Shape  shape=3;                          // STATE | EVENT
+  uint32 priority=4;                       // authority value; ≤ role.max_priority (checked vs ProjectPolicy)
+  optional string authority_role=5;        // role asserting this write
+  enum Shape { SHAPE_UNSPECIFIED=0; STATE=1; EVENT=2; }
+}
+
+// ── replication: groups & wildcard fan-out, unified ──
+message Replicated {
+  Over   over = 1;                         // GROUP:<id>  or  MATCH:<wildcard path>
+  string bind = 2;                         // substitution var: "${member}" or "${instance}"
+  orrery.common.v1.RateDomain rate_domain = 3;
+  oneof body {
+    NodeGraph     graph  = 4;              // simple shaping, expressed in nodes
+    PluginBinding plugin = 5;              // heavy/generative logic → a versioned plugin
+  }
+  message Over { oneof of { string group = 1; string match = 2; } }
+}
+message NodeGraph { repeated Node nodes = 1; string output_node = 2; }
+message PluginBinding {
+  string asset = 1;                        // versioned plugin, e.g. "wave.v1" / "laser.edge_tracer.v1"
+  map<string, string> inputs = 2;          // plugin input name → node id or bus path
+  map<string, double> params = 3;          // static params (scan_rate, intensity, …)
+}
+
+message WildcardPolicy {
+  Expansion  expansion   = 1;              // COMPILE_TIME (default) | DYNAMIC
+  repeated string require_tag = 2;
+  repeated string exclude_tag = 3;         // e.g. ["debug","calibration"]
+  OnNewMatch on_new_match = 4;             // IGNORE_UNTIL_RELOAD (default) | ADD
+  uint32     max_matches  = 5;             // bounded fan-out guard
+  MatchAgainst match_against = 6;          // EXPECTED (default) | DISCOVERED — what the snapshot resolves against
+  enum Expansion    { EXPANSION_UNSPECIFIED=0; COMPILE_TIME=1; DYNAMIC=2; }
+  enum OnNewMatch   { ON_NEW_MATCH_UNSPECIFIED=0; IGNORE_UNTIL_RELOAD=1; ADD=2; }
+  enum MatchAgainst { MATCH_AGAINST_UNSPECIFIED=0; EXPECTED=1; DISCOVERED=2; } // UNSPECIFIED → EXPECTED
+}
