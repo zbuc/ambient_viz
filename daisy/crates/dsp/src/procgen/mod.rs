@@ -299,6 +299,10 @@ impl ProcGen {
         let degree = self.rng.pick_weighted(&DEGREE_W);
         self.conductor.set_degree(degree);
         self.melody.set_degree(degree);
+        // ...and the phase within the first chord period, so the opening
+        // chord's duration varies with the seed too (otherwise the first
+        // change always lands at exactly `chord_period_bars`).
+        self.conductor.seed_hold_fraction(self.rng.next_f32());
         self.start = (root_pc, mode, degree);
     }
 
@@ -577,10 +581,10 @@ mod tests {
         // listen, because it is the audible output's identity.
         let events = run(&mut make(96.0), 8, 96.0);
         let d = digest(&events);
-        // Bumped 2026-06-11: seeded musical start (key/mode/opening degree
-        // now drawn from the seed) — an intended audible change.
+        // Bumped 2026-06-11 (×2): seeded musical start (key/mode/opening
+        // degree), then seeded opening-hold phase — intended audible changes.
         assert_eq!(
-            d, 0x50fe7449f1af3233,
+            d, 0x0433c3d46972a6ed,
             "golden digest mismatch — actual {d:#018x}"
         );
     }
@@ -730,6 +734,30 @@ mod tests {
         }
         assert!(keys.len() >= 6, "16 seeds gave only {} distinct keys", keys.len());
         assert!(degrees.len() >= 2, "opening degree never varies");
+    }
+
+    #[test]
+    fn opening_chord_duration_varies_with_the_seed() {
+        // Bar index of the first harmonic move, per seed. Pre-fix this was
+        // always chord_period_bars (6 at the default genome).
+        fn first_change_bar(seed: u64) -> u32 {
+            let mut pg = ProcGen::new(SR, seed);
+            pg.set_fixed_bpm(240.0); // fast: 16 steps/bar at 16 steps/s
+            let start = pg.chord_degree();
+            for _ in 0..(48_000 * 60) {
+                pg.advance();
+                if pg.chord_degree() != start {
+                    return pg.bar();
+                }
+            }
+            panic!("no chord change in 60 s");
+        }
+        let bars: std::collections::HashSet<u32> = (0..10u64).map(first_change_bar).collect();
+        assert!(
+            bars.len() >= 3,
+            "10 seeds gave only {} distinct opening-chord durations: {bars:?}",
+            bars.len()
+        );
     }
 
     #[test]

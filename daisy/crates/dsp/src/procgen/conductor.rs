@@ -43,6 +43,10 @@ pub struct Conductor {
     bars_held: u32,
     /// Did the most recent `on_bar` change the chord?
     chord_changed: bool,
+    /// Seeded phase within the first chord period, resolved against the
+    /// live genome at the first bar (the period is genome-dependent, so it
+    /// can't be fixed at seed time). `None` after resolution.
+    pending_hold_frac: Option<f32>,
 }
 
 impl Conductor {
@@ -51,6 +55,7 @@ impl Conductor {
             degree: 0,
             bars_held: 0,
             chord_changed: false,
+            pending_hold_frac: None,
         }
     }
 
@@ -58,6 +63,15 @@ impl Conductor {
         self.degree = 0;
         self.bars_held = 0;
         self.chord_changed = false;
+        self.pending_hold_frac = None;
+    }
+
+    /// Seed the phase within the FIRST chord period (0 = the opening chord
+    /// holds for the full period, →1 = it changes early), so the first
+    /// harmonic move lands at a seed-dependent bar instead of always bar
+    /// `period`. Clamped so the opening chord always sounds for ≥ 2 bars.
+    pub fn seed_hold_fraction(&mut self, frac: f32) {
+        self.pending_hold_frac = Some(frac.clamp(0.0, 1.0));
     }
 
     /// Current chord root degree (0 = i .. 6 = VII).
@@ -92,6 +106,10 @@ impl Conductor {
 
     /// Advance one bar. Samples the blended FSM when the hold period elapses.
     pub fn on_bar(&mut self, genome: &Genome, rng: &mut Pcg32) {
+        if let Some(f) = self.pending_hold_frac.take() {
+            let period = Self::chord_period_bars(genome);
+            self.bars_held = ((f * period as f32) as u32).min(period.saturating_sub(2));
+        }
         self.bars_held += 1;
         self.chord_changed = false;
         if self.bars_held < Self::chord_period_bars(genome) {
@@ -144,6 +162,36 @@ mod tests {
             if !at_boundary {
                 assert!(!c.chord_changed(), "chord moved mid-period at bar {bar}");
             }
+        }
+    }
+
+    #[test]
+    fn seeded_hold_fraction_moves_the_first_sampling() {
+        // Bars until the FSM first samples (bars_held resets) — independent
+        // of whether the sample happens to re-pick the same degree.
+        fn sampling_bars(frac: f32) -> std::vec::Vec<u32> {
+            let mut c = Conductor::new();
+            c.seed_hold_fraction(frac);
+            let mut rng = Pcg32::new(3, 1);
+            let g = Genome::default(); // period 6
+            let mut bars = std::vec::Vec::new();
+            for bar in 1..=20u32 {
+                c.on_bar(&g, &mut rng);
+                if c.bars_held == 0 {
+                    bars.push(bar);
+                }
+            }
+            bars
+        }
+        let period = Conductor::chord_period_bars(&Genome::default());
+        let full = sampling_bars(0.0);
+        let late = sampling_bars(0.9);
+        assert_eq!(full[0], period, "zero phase = the full opening period");
+        assert!(late[0] < full[0], "a late phase must shorten the opening hold ({} !< {})", late[0], full[0]);
+        assert!(late[0] >= 2, "the opening chord must sound for at least 2 bars");
+        // The fraction applies to the FIRST period only; later ones run full.
+        for w in late.windows(2) {
+            assert_eq!(w[1] - w[0], period, "later periods run full length");
         }
     }
 
