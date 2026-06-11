@@ -375,7 +375,8 @@ being hunted simultaneously:
 
 Shadow-by-priority per mapping: **distance→twist**, then **distance→bitmap**,
 then the **MPR121 tint envelopes** (twelve explicit chains; `Replicated` only
-if its absence actually hurts). Each mapping is a `migration_flag` with
+if its absence actually hurts — *resolved 2026-06-11: presentation layer, no
+chains; see the status block below*). Each mapping is a `migration_flag` with
 `delete_by` its own cleanup PR. `applyAutomation()` shrinks until empty.
 
 > **Status (2026-06-11): distance→twist SHADOW LANDED — kiosk A/B session
@@ -452,18 +453,24 @@ if its absence actually hurts). Each mapping is a `migration_flag` with
 > in-page consumer — twist's cleanup keeps it if bitmap hasn't cut over
 > yet).
 >
-> **Tint envelopes (mapping 3) — needs a decision before code:** the 12
-> AR envelopes (rise 8 s / fall 18 s) evolve continuously from sparse
-> touch-edge packets, so an arrival-driven RATE_CONTROL `Envelope` would
-> freeze between touches — useless. ROUTER_IR is explicit: self-evolving
-> behavior needs a **tick domain** (first tick-domain implementation in the
-> engine) or stays at the consumer. The honest alternatives: (a) implement
-> `RATE_RENDER_FRAME`-style ticks in the bridge engine and migrate the
-> envelopes whole; (b) declare the envelope **presentation smoothing** (like
-> COLOR_LERP) — the migratable mapping is just electrode→color table +
-> touch_mask fan-in, and the AR stays browser-side. (b) is smaller and
-> arguably truer (the envelope is render-rate visual conduct), but it sets
-> the precedent for what "the mapping" means. Decide before building.
+> **Status (2026-06-11): tint envelopes RESOLVED BY DECISION — presentation
+> layer, no graph.** Chris's call: the 12 AR envelopes (rise 8 s / fall
+> 18 s), the electrode→color blend, and the saturation floor are render-rate
+> visual conduct, not signal routing. Consequence: **mapping 3 has no
+> router-graph component and no phase-5 flag.** The signal transport is
+> already bus-native — `touch.pad0.e0..e11` declared since phase 3, fanned
+> into the legacy `touch_mask` by the phase-2 browser feed — so the tint
+> path cuts over with the `feed` flag, and the envelope state +
+> `TOUCH_COLORS` table stay in the visualizer until phase 8 formalizes them
+> as typed plugin params (rise/fall taus, palette). **The precedent this
+> sets:** router graphs own *sensor signal shaping* (ramps, filters,
+> normalization against learned endpoints); render-rate aesthetic conduct
+> (envelopes against the frame clock, color blending, quantize/realloc
+> discipline) belongs to the consuming host/plugin. Phase 5's mapping list
+> therefore closes with **twist + bitmap**: once they cut over and their
+> cleanup PRs land, `applyAutomation()` retains only timeline lane
+> evaluation — phase 7/8 scope, exactly the boundary this phase promised
+> not to cross.
 
 **Boundary (keeps clock work out of this phase):** phase 5 consumes
 `timeline.*` as **ordinary STATE only** (the `Combine MUL` directorial clamp
