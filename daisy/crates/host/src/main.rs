@@ -28,6 +28,10 @@ fn main() -> Result<()> {
     // with the step sequencer disabled (track + processing, no drum pattern).
     let args: Vec<String> = env::args().skip(1).collect();
     let no_seq = args.iter().any(|a| a == "--no-seq");
+    // `--procgen` swaps the grid sequencer for the procedural conductor
+    // (PROCMUSIC.md P1 audition rig). Tempo comes from the timeline sidecar
+    // when one is loaded, else a fixed default; seed via PROCGEN_SEED.
+    let procgen = args.iter().any(|a| a == "--procgen");
     let audio_path = args.into_iter().find(|a| !a.starts_with("--"));
 
     let host = cpal::default_host();
@@ -77,7 +81,7 @@ fn main() -> Result<()> {
         mp3_path = Some(path.to_path_buf());
     } else {
         eprintln!(
-            "no audio path provided — output will be silent.\n  usage: cargo run -p host -- <file> [--no-seq]"
+            "no audio path provided — no backing track (voices still play).\n  usage: cargo run -p host -- [<file>] [--no-seq] [--procgen]"
         );
     }
 
@@ -99,6 +103,24 @@ fn main() -> Result<()> {
     if no_seq {
         engine.lock().unwrap().set_sequencer_enabled(false);
         println!("--no-seq: step sequencer disabled (no kick/hat/stab triggers)");
+    }
+
+    if procgen {
+        let mut eng = engine.lock().unwrap();
+        eng.set_producer(dsp::ProducerSel::Procgen);
+        let seed = std::env::var("PROCGEN_SEED")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok());
+        if let Some(seed) = seed {
+            eng.procgen_mut().reset(seed);
+        }
+        // Fixed fallback tempo; a timeline sidecar (below) overrides it.
+        eng.procgen_mut().set_fixed_bpm(96.0);
+        println!(
+            "--procgen: procedural producer selected (genome {:?}, seed {})",
+            eng.procgen().genome(),
+            seed.map(|s| s.to_string()).unwrap_or_else(|| "default".into()),
+        );
     }
 
     // MIDI CC bindings — shared with the Daisy firmware via
@@ -210,6 +232,10 @@ fn main() -> Result<()> {
                     {
                         let mut eng = engine.lock().unwrap();
                         eng.sequencer_mut().set_tempo(keypoints.clone(), dur);
+                        if procgen {
+                            // The conductor rides the same tempo curve.
+                            eng.procgen_mut().set_tempo(keypoints.clone(), dur);
+                        }
                     }
 
                     // Sibling `.pat` drum-grid file. If present, override the

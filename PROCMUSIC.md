@@ -179,12 +179,15 @@ daisy/crates/dsp/src/procgen/
   bassgen.rs    — root-locked gate/hold rules
 ```
 
-- **Producer abstraction is an enum, not a trait object** (no vtables in the
-  audio path): `enum Producer { Grid(Sequencer), Conductor(ProcGen) }`, both
-  yielding one `StepEvent` per sample at the existing
-  `Engine::process()` call site. The voices, the master chain, and any
-  downstream `seq.*` consumer never know which producer is playing — this is
-  the BACKLOG source-producer contract, realized.
+- **Producer abstraction is an enum selector, not a trait object** (no
+  vtables in the audio path): the engine owns both producers and a
+  `ProducerSel { Grid, Procgen }` chooses which `advance()` the audio path
+  consults, both yielding one `StepEvent` per sample at the existing
+  `Engine::process()` call site. Keeping both constructed makes the deferred
+  runtime mode-switch (§8) a field write, and the host auditions either mode
+  from one binary. The voices, the master chain, and any downstream `seq.*`
+  consumer never know which producer is playing — this is the BACKLOG
+  source-producer contract, realized.
 - **Compiled unconditionally in `dsp`** (it's small and the Mac host needs it);
   the **firmware** gains a `procgen` cargo feature gating voice + producer
   instantiation, with `flash-*/bin-*` aliases following the

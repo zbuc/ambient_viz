@@ -31,6 +31,7 @@ pub mod limiter;
 pub mod midi;
 pub mod midi_map;
 pub mod pain_voice;
+pub mod procgen;
 pub mod sequencer;
 pub mod svf;
 pub mod tape;
@@ -45,6 +46,7 @@ pub use hihat::HiHat;
 pub use midi::{MidiByteParser, MidiMessage};
 pub use midi_map::{MidiMap, Param, install_kiosk_bindings};
 pub use pain_voice::PainMaterialVoice;
+pub use procgen::{Genome, ProcGen, ProducerSel};
 pub use svf::Svf;
 pub use wavetable::{WtFilterType, WtPatch, WtSynth};
 
@@ -96,6 +98,12 @@ pub struct Engine {
     kick_trigger_note: u8,
     midi_map: MidiMap,
     sequencer: sequencer::Sequencer,
+    /// Procedural StepEvent producer (PROCMUSIC.md). Constructed alongside
+    /// the grid sequencer — `producer_sel` chooses which one the audio path
+    /// consults, so a later timeline-driven switch is just a field write.
+    procgen: procgen::ProcGen,
+    /// Which producer drives the voices. Defaults to the grid sequencer.
+    producer_sel: procgen::ProducerSel,
     reverb: Reverb,
     /// Resonant "bloom" bank — rings the pre-tape master into a fixed D Lydian
     /// chord, scaled by a "proximity" amount. Stands in for the exhibit's ToF
@@ -205,6 +213,10 @@ impl Engine {
             kick_trigger_note: 60,
             midi_map: MidiMap::new(),
             sequencer: sequencer::Sequencer::new(sample_rate),
+            // Default seed is arbitrary but FIXED — determinism is the
+            // contract; hosts that want variety reseed via `procgen_mut()`.
+            procgen: procgen::ProcGen::new(sample_rate, 0x5052_4F43), // "PROC"
+            producer_sel: procgen::ProducerSel::Grid,
             reverb,
             bloom: bloom::BloomBank::new(sample_rate),
             tape: tape::TapeProcessor::new(sample_rate),
@@ -313,6 +325,23 @@ impl Engine {
     /// Read-only view of the sequencer (current step, time, etc.).
     pub fn sequencer(&self) -> &sequencer::Sequencer {
         &self.sequencer
+    }
+
+    /// Select which StepEvent producer drives the voices.
+    pub fn set_producer(&mut self, sel: procgen::ProducerSel) {
+        self.producer_sel = sel;
+    }
+    pub fn producer(&self) -> procgen::ProducerSel {
+        self.producer_sel
+    }
+
+    /// Mutable access to the procedural producer (genome, key, tempo, seed).
+    pub fn procgen_mut(&mut self) -> &mut procgen::ProcGen {
+        &mut self.procgen
+    }
+    /// Read-only view of the procedural producer (chord telemetry, bar).
+    pub fn procgen(&self) -> &procgen::ProcGen {
+        &self.procgen
     }
 
     /// Mutable access to the tape processor (enable/disable, hiss level, etc.).
@@ -446,7 +475,10 @@ impl Engine {
             // When disabled, freeze the sequencer clock and fire nothing; the
             // voices still tick (with no trigger) so any ringing tail decays.
             let evt = if self.sequencer_enabled {
-                self.sequencer.advance()
+                match self.producer_sel {
+                    procgen::ProducerSel::Grid => self.sequencer.advance(),
+                    procgen::ProducerSel::Procgen => self.procgen.advance(),
+                }
             } else {
                 sequencer::StepEvent::default()
             };
@@ -568,6 +600,34 @@ impl Engine {
         self.limiter.process(output);
 
         self.sample_index += (output.len() / 2) as u64;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// End-to-end wiring: selecting the procedural producer must drive the
+    /// voices — rendered audio is non-silent and finite, and the grid
+    /// sequencer's counters stay untouched (the producers don't cross).
+    #[test]
+    fn engine_procgen_producer_makes_sound() {
+        let mut eng = Engine::new(48_000.0);
+        eng.set_producer(procgen::ProducerSel::Procgen);
+        eng.procgen_mut().set_fixed_bpm(120.0);
+
+        let mut out = alloc::vec![0.0f32; 512];
+        let mut energy = 0.0f64;
+        // ~4 s — enough for the downbeat kick/bass and several melody hits.
+        for _ in 0..(4 * 48_000 / 256) {
+            eng.process(&[], &mut out);
+            for &s in &out {
+                assert!(s.is_finite());
+                energy += (s as f64) * (s as f64);
+            }
+        }
+        assert!(energy > 1.0, "procgen producer must be audible, got {energy}");
+        assert_eq!(eng.sequencer().kick_count(), 0, "grid sequencer must stay idle");
     }
 }
 

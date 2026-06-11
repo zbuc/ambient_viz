@@ -44,6 +44,17 @@ impl Chord {
         &self.notes[..self.len as usize]
     }
 
+    /// Build a chord from raw MIDI numbers (clamped to 0..=127, truncated at
+    /// [`MAX_CHORD`]). The programmatic entry point for generated harmony —
+    /// the parsers below remain the text entry points.
+    pub fn from_notes(notes: &[i32]) -> Chord {
+        let mut c = Chord::default();
+        for &n in notes {
+            c.push(n);
+        }
+        c
+    }
+
     fn push(&mut self, midi: i32) {
         if self.len as usize >= MAX_CHORD {
             return;
@@ -72,6 +83,33 @@ impl Default for Key {
             scale: AEOLIAN,
         }
     }
+}
+
+impl Key {
+    /// Tonic pitch class, 0 = C .. 11 = B.
+    pub fn root_pc(&self) -> i32 {
+        self.root_pc
+    }
+
+    /// Semitones above the tonic of scale `degree` (0-based). Degrees past 6
+    /// wrap with an octave lift, so stacking thirds (`d`, `d+2`, `d+4`)
+    /// voices upward naturally.
+    pub fn degree_semitones(&self, degree: usize) -> i32 {
+        self.scale[degree % 7] + 12 * (degree / 7) as i32
+    }
+}
+
+/// The diatonic triad on `degree` (0-based: 0 = i .. 6 = vii), voiced close
+/// from `base_octave` — thirds stacked *within the key's scale*, so each
+/// degree's major/minor/diminished quality falls out automatically (the
+/// programmatic mirror of the roman-numeral parser).
+pub fn diatonic_triad(key: &Key, degree: usize, base_octave: i32) -> Chord {
+    let root = (base_octave + 1) * 12 + key.root_pc;
+    Chord::from_notes(&[
+        root + key.degree_semitones(degree),
+        root + key.degree_semitones(degree + 2),
+        root + key.degree_semitones(degree + 4),
+    ])
 }
 
 const IONIAN: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
