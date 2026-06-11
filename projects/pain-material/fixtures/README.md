@@ -84,3 +84,19 @@ local. Re-record a fresh golden after every cutover.
 Mock-mode (`MOCK=1`) captures are not replayable: the mock publishes directly
 onto the in-process bus, bypassing the `/ingest` boundary the harness
 re-injects. Capture real or scripted sessions (`tools/replay/smoke-session.js`).
+
+## Tracked goldens
+
+- **`golden-mock-2026-06-10T20-28-44Z-pid3067/`** — 63.3 min on the Pi, real
+  Daisy, all sensors via sidecar mocks (phase-0 Deliverable 1; the phases 0–4B
+  baseline). Replay: 12 MATCH + 1 declared EXPECTED_DIFFERENCE.
+- **`golden-real-2026-06-11T03-15-13Z-pid6205/`** — 3.6 min on the Pi, real
+  Daisy + real VL53L5CX + dual AM312 (`MOTION_PRESENCE=1`), touch ballast;
+  config `d720648` (near 75 / far 170, the far claim *valid* and accepted —
+  the first golden exercising live learned endpoints rather than defaults).
+  Directed choreography: full ramp both directions (0.1→170.7 cm), hysteresis
+  loitering, forced no-target dropouts (snap to far=170), brisk exit/re-entry,
+  empty bookends. Verified 2026-06-11: replay (speed 1) all MATCH incl. CC 23
+  + 3 entry bells + 2 exit voices; identity sim MATCH; 4B tape validation
+  MATCH (1218 predicted / 1220 captured). The real-sensor golden the 4E
+  tolerance tuning draws from.

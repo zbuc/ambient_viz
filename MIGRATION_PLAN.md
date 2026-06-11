@@ -243,6 +243,19 @@ publisher is flagged. **PM impact:** zero.
 > The validator mirrors the guards (counted, declared); **4C must hoist this
 > conditioning to the bridge ingest boundary** (effective values on the bus,
 > defaults as a low-priority writer) before the live shadow can compare.
+>
+> **Status (2026-06-11): real-sensor golden recorded + verified.**
+> `fixtures/golden-real-2026-06-11T03-15-13Z-pid6205/` (3.6 min directed
+> choreography, real VL53L5CX + AM312s + Daisy, config `d720648` near 75 /
+> far 170): replay at speed 1 all MATCH (incl. CC 23, 3 entry bells, 2 exit
+> voices), identity sim MATCH, 4B tape validation MATCH with
+> `conditioned_drops: []` — the far=170 claim is valid, so this golden is the
+> first to exercise Normalize's LIVE learned endpoints rather than defaults.
+> The phase-0 "re-record on real sensors" caveat is satisfied; 4E tolerance
+> tuning draws from this capture. (Two earlier takes failed usefully: one
+> caught a disconnected Daisy via zero CC 23; one caught `VL53L5CX_FAR_CM=75`
+> == near, rejected consumer-side everywhere — the second real-hardware
+> invalid-far claim, reinforcing the 4C conditioning hoist.)
 
 The public phase is one phase; **internally it lands as six gated
 milestones**, so simulator, compiler, adapter, and arbitration bugs are never
