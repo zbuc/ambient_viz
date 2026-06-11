@@ -321,3 +321,84 @@ test('mulberry32: deterministic per seed, state round-trips', () => {
   assert.deepEqual([c.rand(), c.rand()], tail);
   for (const v of seqA) assert.ok(v >= 0 && v < 1);
 });
+
+// ── arrival-driven delivery (phase 6.1 ruling 1) ─────────────────────────────
+
+const pluginGenTop = require('../src/gen/plugin');
+function arrivalAsset(seen) {
+  return {
+    manifest: pluginGenTop.PluginManifest.fromJSON({
+      asset: 'arr', version: 1, kind: 'GENERATOR', humanLabel: '', schemaVersion: 'plugin.v1',
+      inputs: [
+        { name: 'level', valueType: 'VALUE_TYPE_FLOAT', shape: 'SHAPE_STATE', unit: '', required: true },
+        { name: 'kick', valueType: 'VALUE_TYPE_INT', shape: 'SHAPE_EVENT', unit: '', required: false },
+      ],
+      params: [],
+      outputs: [{ name: 'out', valueType: 'VALUE_TYPE_FLOAT', shape: 'SHAPE_EVENT', unit: '', required: true, dest: 'BUS', media: 'SIGNAL', busPath: 'seq.arr.out' }],
+      memberNeeds: [], rateDomain: 'RATE_CONTROL', requiresHostTick: true, determinism: 'REPLAYABLE', stateModel: 'STATELESS',
+    }),
+    create: () => ({
+      tick() {},
+      onInput(port, v, ctx) { seen.push({ port, v, t: ctx.now }); },
+      snapshot: () => ({}), restore() {},
+    }),
+  };
+}
+
+test('onInput: per-arrival delivery of the RESOLVED value, samples never collapsed, own publishes skipped', () => {
+  const bus = makeBus();
+  bus.registerPath('sensor.a.level', { shape: 'state', type: 'float' });
+  const seen = [];
+  const assets = builtinAssets();
+  assets.set('arr.v1', arrivalAsset(seen));
+  const host = makeHost(bus, [{
+    instance: 'p', seed: 1, authorityRole: 'plugin_host', priority: 300,
+    binding: { asset: 'arr.v1', inputs: { level: 'sensor.a.level', kick: 'sensor.a.kick' }, params: {} },
+  }], { assets });
+  // A burst of three samples between ticks: ALL delivered, in arrival order
+  // (the consecutive-fresh-sample contract a ZOH tick can't honor).
+  bus.advance(10); bus.publishState('sensor.a.level', 1, { sourceId: 'spiffe://t/live', priority: 300 });
+  bus.advance(1); bus.publishState('sensor.a.level', 2, { sourceId: 'spiffe://t/live', priority: 300 });
+  bus.advance(1); bus.publishState('sensor.a.level', 3, { sourceId: 'spiffe://t/live', priority: 300 });
+  // A shadowed keepalive must deliver the RESOLVED value, not its payload.
+  bus.advance(1); bus.publishState('sensor.a.level', 99, { sourceId: 'spiffe://t/defaults', priority: 100 });
+  assert.deepStrictEqual(seen.map((s) => [s.port, s.v]), [
+    ['level', 1], ['level', 2], ['level', 3], ['level', 3],
+  ]);
+  assert.equal(host.inspect()[0].arrivals, 4);
+  host.stop();
+  bus.advance(1); bus.publishState('sensor.a.level', 5, { sourceId: 'spiffe://t/live', priority: 300 });
+  assert.equal(seen.length, 4, 'stop() detaches the arrival subscription');
+});
+
+test('onInput priming: retained state already on the bus is delivered once at host creation', () => {
+  const bus = makeBus();
+  bus.registerPath('sensor.a.level', { shape: 'state', type: 'float' });
+  bus.publishState('sensor.a.level', 7, { sourceId: 'spiffe://t/live', priority: 300 }); // BEFORE the host exists
+  const seen = [];
+  const assets = builtinAssets();
+  assets.set('arr.v1', arrivalAsset(seen));
+  const host = makeHost(bus, [{
+    instance: 'p', seed: 1, authorityRole: 'plugin_host', priority: 300,
+    binding: { asset: 'arr.v1', inputs: { level: 'sensor.a.level' }, params: {} },
+  }], { assets });
+  assert.deepStrictEqual(seen.map((s) => [s.port, s.v]), [['level', 7]]);
+  host.stop();
+});
+
+test('a throwing onInput crashes the instance like a throwing tick', () => {
+  const bus = makeBus();
+  bus.registerPath('sensor.a.level', { shape: 'state', type: 'float' });
+  const assets = builtinAssets();
+  const boom = arrivalAsset([]);
+  boom.create = () => ({ tick() {}, onInput() { throw new Error('arrival-kaboom'); }, snapshot: () => ({}), restore() {} });
+  assets.set('arr.v1', boom);
+  const host = makeHost(bus, [{
+    instance: 'p', seed: 1, authorityRole: 'plugin_host', priority: 300,
+    binding: { asset: 'arr.v1', inputs: { level: 'sensor.a.level' }, params: {} },
+  }], { assets });
+  bus.publishState('sensor.a.level', 1, { sourceId: 'spiffe://t/live', priority: 300 });
+  assert.match(host.inspect()[0].crashed.message, /arrival-kaboom/);
+  bus.publishState('sensor.a.level', 2, { sourceId: 'spiffe://t/live', priority: 300 }); // no further delivery, no throw
+  host.stop();
+});

@@ -124,6 +124,25 @@ occupied fractions identical to 3 decimals. Legacy `computeOccupancy` stays
 authoritative until a kiosk gate session passes this validator's live lanes
 — only then does legacy rebind (the 6.1 two-step).
 
+## Phase 6.1 step two — presence choreography gate
+
+```sh
+node tools/sim/validate-presence.js projects/pain-material/fixtures/<golden>/
+```
+
+The `presence_choreography.v1` plugin (the trigger-stack port:
+bell/toll/voice/murmur, occupancy from the graph, seeded draws) against two
+references. **Lane A** — seeded equivalence vs the independent frozen-spec
+model (`presence-legacy-model.js`): same bus packets, ticks, occupancy, and
+seed → note_on decision sequences exactly equal, draw-for-draw. **Lane B** —
+the goldens' captured `trigger` events: deterministic classes (entry, exit
+voice) within ±2500 ms; toll/murmur are the phase-0 stochastic lanes
+(EXPECTED); an OFF-mode capture's exit-voice lane is a declared
+occupancy-config mismatch (the graph bakes motion fusion ON). Passed
+2026-06-11 ×4 goldens (lane A: 2/5/1/85 fires draw-for-draw; mock lane B:
+76=76 distance-mode entries). Capture MOTION_PRESENCE is auto-detected and
+applied to both sides.
+
 ## Phase 6.0 — plugin host gate
 
 ```sh

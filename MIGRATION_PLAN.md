@@ -668,6 +668,53 @@ clock contract in early.
 > carries `legacy_occupancy` + `bus_tx` — the validator's live lanes), then
 > legacy rebinds. **Then step two:** host arrival-driven delivery + the
 > `presence_choreography.v1` port + debug-event decision comparison.
+>
+> **Status (2026-06-11): 6.1 STEP TWO LANDED — trigger stack ported, both
+> offline lanes MATCH ×4 goldens; ONE kiosk session is the cutover gate
+> (Chris waived the multi-day correlation — gate owner's call, recorded).**
+> The host gained **arrival-driven delivery** (ruling 1): a plugin
+> implementing `onInput(port, value, ctx)` is invoked synchronously on every
+> accepted STATE packet for a bound port, in bus arrival order, with the
+> RESOLVED value, plus **late-joiner priming** (retained values delivered
+> once at host creation, path-sorted — the host attaches after the adapter's
+> one-shot boot claims). `presence_choreography.v1`
+> (`server/src/plugins/presence-choreography.js`) is the verbatim port of
+> bell/toll/voice/murmur: occupancy is an INPUT (`derived.room.occupied` —
+> the graph engine's synchronous publish reaches onInput before the
+> distance/motion packet that caused it, preserving legacy's
+> compute-occupancy-first ordering); every Math.random became ctx.rand with
+> the legacy draw order preserved; outputs are `seq.presence.note_on`
+> ([ch, note, vel] — nothing consumes it until cutover) and
+> `seq.presence.debug` (armed/fire/suppressed/scheduled instrumentation,
+> inspector-only). Eval sites are legacy's exactly: fresh distance sample
+> (the only site advancing the approach-sustain counter), motion edge, tick.
+> One port bug found by the gate: legacy's `lastBellMs = 0` means "never"
+> against epoch wall-clock but is RECENT on the monotonic timeline — the
+> literal port cooldown-blocked the session's first bell; ported the intent
+> (−Infinity).
+>
+> **Gate (`tools/sim/validate-presence.js`), two lanes — compare decisions,
+> not dice:** lane A, seeded equivalence — the hosted plugin vs an
+> INDEPENDENT frozen-spec model (`presence-legacy-model.js`), same packets,
+> same ticks, same occupancy graph, same seed: note_on sequences EXACTLY
+> equal, draw-for-draw (cutover 2=2, real 5=5, viz 1=1, mock 85=85). Lane B,
+> capture faithfulness — plugin fires classified by reason vs the goldens'
+> captured trigger events: deterministic classes (entry bells, exit voices)
+> within ±2500 ms (real golden: 3=3 entries, 2=2 exit voices; mock: 76=76
+> distance-mode entries — the arrival-driven approach gate reproducing real
+> legacy decisions); toll/murmur are the phase-0-declared stochastic lanes
+> (unseeded Math.random in the capture), reported EXPECTED. One declared
+> config class: the mock golden ran MOTION_PRESENCE=off while the occupancy
+> graph bakes the production fusion ON, so its exit-voice lane is an
+> occupancy-mode mismatch (EXPECTED_DIFFERENCE), with the ON-mode goldens
+> carrying that proof. 73/73 tests; all standing gates re-verified; live
+> boot shows presence armed with primed inputs. **The single kiosk session
+> now gates everything at once:** occupancy live lanes (validate-occupancy)
+> + presence decision correlation (validate-presence over the new capture)
+> + the standing gates. After it passes: the cutover PR — MIDI adapter
+> rebinds strike/speak to `seq.presence.note_on`, daisy-position's trigger
+> stack + `legacy_occupancy` tap deleted (it shrinks to serial owner + MIDI
+> adapter + POS reader), occupancy rebind folded in, fresh golden recorded.
 
 The riskiest phase; it gets a de-risking precursor:
 
