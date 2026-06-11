@@ -269,6 +269,10 @@ pub struct ProcGen {
     /// telemetry for hosts to print/pin; `set_key` overrides the key without
     /// touching this record.
     start: (i32, Mode, usize),
+    /// The currently-held (gated) chord and the step its gate releases.
+    held_chord: Option<(Chord, u32)>,
+    /// Gated melody notes awaiting release: (release_step, note).
+    melody_offs: Vec<(u32, u8), 8>,
     enabled: bool,
 }
 
@@ -291,6 +295,8 @@ impl ProcGen {
             rng: Pcg32::new(seed, 0x6f7272657279), // stream: "orrery"
             melody_rotation: 0,
             start: (0, Mode::Aeolian, 0),
+            held_chord: None,
+            melody_offs: Vec::new(),
             enabled: false,
         };
         pg.seed_musical_start();
@@ -380,6 +386,8 @@ impl ProcGen {
         self.bass.reset();
         self.rng = Pcg32::new(seed, 0x6f7272657279);
         self.melody_rotation = 0;
+        self.held_chord = None;
+        self.melody_offs.clear();
         self.seed_musical_start();
     }
 
@@ -440,6 +448,40 @@ impl ProcGen {
         let g = self.genome;
         let mut evt = StepEvent::default();
 
+        // Releases due this step — held chord and/or melody notes whose
+        // drawn duration has elapsed. Gathered first so a release and a new
+        // strike can share the step (the engine processes offs before ons).
+        // The buffer is one Chord wide (MAX_CHORD); melody collection leaves
+        // headroom for a chord release while a chord is held — uncollected
+        // melody offs just wait a step (their tails are already ringing).
+        let mut off_notes = [0i32; crate::chord::MAX_CHORD];
+        let mut off_n = 0usize;
+        if let Some((chord, at)) = self.held_chord {
+            if step >= at {
+                for &note in chord.notes() {
+                    if off_n < off_notes.len() {
+                        off_notes[off_n] = note as i32;
+                        off_n += 1;
+                    }
+                }
+                self.held_chord = None;
+            }
+        }
+        let melody_cap = if self.held_chord.is_some() {
+            off_notes.len() - crate::chord::MAX_CHORD / 2
+        } else {
+            off_notes.len()
+        };
+        self.melody_offs.retain(|&(at, note)| {
+            if step >= at && off_n < melody_cap {
+                off_notes[off_n] = note as i32;
+                off_n += 1;
+                false
+            } else {
+                true
+            }
+        });
+
         // Kick — Euclidean, thinned by density so an empty room can fall to
         // a heartbeat. Downbeat carries full weight.
         let kick_pulses = (g.kick_fill * 7.0 * (0.4 + 0.6 * g.density) + 0.5) as usize;
@@ -458,10 +500,10 @@ impl ProcGen {
         let strong = sib % STEPS_PER_BEAT == 0;
         if sib == 0 && self.conductor.chord_changed() {
             // Per-hit character, like the melody path: a drawn voicing
-            // (root / first inversion / spread third) and tone/velocity
-            // jitter — otherwise every chord announcement is the identical
-            // hit (same envelope length, same brightness, same register).
-            // Fixed draw order: voicing, tone, velocity.
+            // (root / first inversion / spread third), tone/velocity jitter,
+            // and a GATED duration — the chord sustains for a drawn number
+            // of steps (note_length-centered), then releases into the
+            // patch's decay. Fixed draw order: voicing, tone, velocity, hold.
             let chord = voice_variant(
                 self.current_chord(),
                 self.rng.pick_weighted(&[0.5, 0.25, 0.25]),
@@ -470,10 +512,25 @@ impl ProcGen {
                 (g.brightness + g.stab_color * (self.rng.next_f32() - 0.5)).clamp(0.0, 1.0);
             let vel = (0.5 + 0.3 * g.tension + 0.2 * (self.rng.next_f32() - 0.5))
                 .clamp(0.05, 1.0);
+            // A beat at minimum, up to ~2 bars; jittered ±30%.
+            let base = 4.0 + 28.0 * g.note_length.clamp(0.0, 1.0);
+            let hold = (base * (0.7 + 0.6 * self.rng.next_f32())).max(1.0) as u32;
+            // A still-held previous chord releases right now, with this step's
+            // other offs (its scheduled release would land after the new hit).
+            if let Some((prev, _)) = self.held_chord.take() {
+                for &note in prev.notes() {
+                    if off_n < off_notes.len() {
+                        off_notes[off_n] = note as i32;
+                        off_n += 1;
+                    }
+                }
+            }
+            self.held_chord = Some((chord, step.wrapping_add(hold)));
             evt.stab = Some(StabHit {
                 chord,
                 velocity: vel,
                 tone: Some(tone),
+                gate: true,
             });
         } else {
             let mel_pulses = (g.density * 6.0 + 0.5) as usize;
@@ -490,12 +547,32 @@ impl ProcGen {
                 let vel = (0.35 + 0.4 * g.density
                     + 0.25 * g.tension * (self.rng.next_f32() - 0.5))
                     .clamp(0.05, 1.0);
+                // Gated melody: duration in steps (a 16th up to ~half a bar),
+                // note_length-centered with per-note jitter. Draw order:
+                // (markov draws), tone, velocity, hold.
+                let base = 1.0 + 6.0 * g.note_length.clamp(0.0, 1.0);
+                let hold = (base * (0.6 + 0.8 * self.rng.next_f32())).max(1.0) as u32;
+                // Queue the release; if the queue is somehow full, release the
+                // oldest pending note now rather than leaking a held voice.
+                if self.melody_offs.push((step.wrapping_add(hold), note)).is_err() {
+                    let (_, oldest) = self.melody_offs.swap_remove(0);
+                    if off_n < off_notes.len() {
+                        off_notes[off_n] = oldest as i32;
+                        off_n += 1;
+                    }
+                    let _ = self.melody_offs.push((step.wrapping_add(hold), note));
+                }
                 evt.stab = Some(StabHit {
                     chord: Chord::from_notes(&[note as i32]),
                     velocity: vel,
                     tone: Some(tone),
+                    gate: true,
                 });
             }
+        }
+
+        if off_n > 0 {
+            evt.stab_off = Some(Chord::from_notes(&off_notes[..off_n]));
         }
 
         // Bass — root-locked anchor on the current chord.
@@ -544,6 +621,7 @@ mod tests {
                 && !evt.closed_hat
                 && !evt.open_hat
                 && evt.stab.is_none()
+                && evt.stab_off.is_none()
                 && evt.bass == BassEvent::None;
             if !empty {
                 out.push((i, evt));
@@ -573,6 +651,13 @@ mod tests {
                 }
                 eat(q(s.velocity));
                 eat(s.tone.map(q).unwrap_or(u64::MAX));
+                eat(s.gate as u64);
+            }
+            if let Some(off) = e.stab_off {
+                eat(0x0FF);
+                for &n in off.notes() {
+                    eat(n as u64);
+                }
             }
             match e.bass {
                 BassEvent::None => eat(0),
@@ -612,11 +697,12 @@ mod tests {
         // listen, because it is the audible output's identity.
         let events = run(&mut make(96.0), 8, 96.0);
         let d = digest(&events);
-        // Bumped 2026-06-11 (×3): seeded musical start (key/mode/opening
-        // degree), seeded opening-hold phase, then per-hit chord character
-        // (voicing/tone/velocity draws) — intended audible changes.
+        // Bumped 2026-06-11 (×4): seeded musical start (key/mode/opening
+        // degree), seeded opening-hold phase, per-hit chord character
+        // (voicing/tone/velocity), then gated durations (chord + melody
+        // holds with note-offs) — intended audible changes.
         assert_eq!(
-            d, 0x419adcef0edf8ad3,
+            d, 0x81d9f25a6e5191cd,
             "golden digest mismatch — actual {d:#018x}"
         );
     }
@@ -790,6 +876,81 @@ mod tests {
             "10 seeds gave only {} distinct opening-chord durations: {bars:?}",
             bars.len()
         );
+    }
+
+    #[test]
+    fn note_durations_follow_note_length_and_vary_per_note() {
+        // Mean steps between a melody note-on and its note-off must track the
+        // note_length gene, and individual durations must vary (per-note draw).
+        fn durations(note_length: f32) -> std::vec::Vec<u32> {
+            let mut pg = make(240.0);
+            let mut g = Genome::default();
+            g.note_length = note_length;
+            pg.set_genome(g);
+            let mut on_step: std::collections::HashMap<u8, u32> = Default::default();
+            let mut durs = std::vec::Vec::new();
+            let secs = 64.0 * STEPS_PER_BAR as f32 / ((240.0 / 60.0) * STEPS_PER_BEAT as f32);
+            for _ in 0..((secs * SR) as u64) {
+                let evt = pg.advance();
+                let fired = pg.step().wrapping_sub(1);
+                if let Some(s) = evt.stab {
+                    if s.chord.notes().len() == 1 {
+                        on_step.insert(s.chord.notes()[0], fired);
+                    }
+                }
+                if let Some(off) = evt.stab_off {
+                    for &n in off.notes() {
+                        if let Some(on) = on_step.remove(&n) {
+                            durs.push(fired.wrapping_sub(on));
+                        }
+                    }
+                }
+            }
+            durs
+        }
+        let short = durations(0.05);
+        let long = durations(0.95);
+        assert!(short.len() > 20 && long.len() > 20, "need offs to compare");
+        let mean = |v: &[u32]| v.iter().sum::<u32>() as f32 / v.len() as f32;
+        assert!(
+            mean(&long) > mean(&short) * 2.0,
+            "long note_length ({}) must dwarf short ({})",
+            mean(&long),
+            mean(&short)
+        );
+        let distinct: std::collections::HashSet<u32> = long.iter().copied().collect();
+        assert!(distinct.len() >= 3, "per-note duration draw never varies");
+    }
+
+    #[test]
+    fn held_chord_releases_and_yields_to_the_next() {
+        let mut pg = make(240.0);
+        let mut g = Genome::default();
+        g.harmonic_rate = 1.0; // chord per bar → strikes outlive holds
+        g.density = 0.0; // melody silent: only chord ons/offs in the stream
+        pg.set_genome(g);
+        let secs = 32.0 * STEPS_PER_BAR as f32 / ((240.0 / 60.0) * STEPS_PER_BEAT as f32);
+        let (mut ons, mut off_notes) = (0u32, 0u32);
+        let mut held: std::collections::HashSet<u8> = Default::default();
+        for _ in 0..((secs * SR) as u64) {
+            let evt = pg.advance();
+            if let Some(off) = evt.stab_off {
+                for &n in off.notes() {
+                    assert!(held.remove(&n), "release of a note that isn't held ({n})");
+                    off_notes += 1;
+                }
+            }
+            if let Some(s) = evt.stab {
+                assert!(s.gate, "procgen chord hits are gated");
+                ons += 1;
+                for &n in s.chord.notes() {
+                    held.insert(n);
+                }
+            }
+        }
+        assert!(ons > 10, "expected many chord strikes ({ons})");
+        assert!(off_notes > 0, "gated chords must release");
+        assert!(held.len() <= 6, "held set stays bounded (no leaked gates)");
     }
 
     #[test]

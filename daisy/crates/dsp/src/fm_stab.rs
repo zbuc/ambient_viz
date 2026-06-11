@@ -13,9 +13,16 @@
 //! - a **waveshaper** ([`Shaper`]) on the voice output — `HardClip` or
 //!   `Foldback` add aggressive upper harmonics that a polite `Tanh` won't.
 //!
-//! Two envelopes shape it: an **amp** envelope (fast attack, exponential
-//! decay, no sustain) for the percussive stab, and a **mod** envelope that
-//! decays the FM index so the attack is bright and the tail mellows.
+//! Two envelopes shape it: an **amp** envelope for the percussive stab, and
+//! a **mod** envelope that decays the FM index so the attack is bright and
+//! the tail mellows. The amp envelope has two trigger modes:
+//! - **one-shot** (`note_on`): attack → exponential decay to silence — the
+//!   classic stab; the patch's `decay_s` is the note's whole length.
+//! - **gated** (`note_on_gated` … `note_off`): attack → **hold** at full
+//!   level until the gate releases, then the same exponential decay acts as
+//!   the release. ADSR *shape* stays in the patch; note *duration* belongs
+//!   to whatever pulls the trigger (an 8th, a 16th, held for a bar — the
+//!   same contract the rumble bass already has).
 //!
 //! Rendering is per-sample (`tick`), matching the engine's per-sample
 //! sequencer loop. We drive `Oscillator::tick(freq_hz)` directly, so the
@@ -171,6 +178,8 @@ impl FmPatch {
 enum Stage {
     Idle,
     Attack,
+    /// Gated sustain: full level until `note_off` drops the voice to Decay.
+    Hold,
     Decay,
 }
 
@@ -181,6 +190,8 @@ struct FmVoice {
     patch: FmPatch,
 
     stage: Stage,
+    /// Gated trigger: after the attack, park in `Hold` until `note_off`.
+    gated: bool,
     amp: f32,
     attack_inc: f32,
     decay_coeff: f32,
@@ -216,6 +227,7 @@ impl FmVoice {
             car_freq: 0.0,
             patch: FmPatch::default(),
             stage: Stage::Idle,
+            gated: false,
             amp: 0.0,
             attack_inc: 1.0,
             decay_coeff: 0.0,
@@ -251,9 +263,11 @@ impl FmVoice {
         velocity: f32,
         patch: &FmPatch,
         tone: Option<f32>,
+        gated: bool,
         sample_rate: f32,
         age: u64,
     ) {
+        self.gated = gated;
         self.note = note;
         self.car_freq = midi_to_freq(note);
         self.patch = *patch;
@@ -293,6 +307,19 @@ impl FmVoice {
         self.mod_decay_coeff = exp_coeff(mod_decay_s, sample_rate);
     }
 
+    /// Release a gated voice: drop from Hold (or a still-rising Attack) into
+    /// the exponential decay, which doubles as the release stage.
+    fn note_off(&mut self) {
+        if self.stage != Stage::Idle {
+            self.gated = false;
+            if self.stage == Stage::Hold {
+                self.stage = Stage::Decay;
+            }
+            // A gated voice released mid-attack finishes the attack, then the
+            // `gated == false` check below routes it straight into Decay.
+        }
+    }
+
     #[inline]
     fn tick(&mut self) -> f32 {
         match self.stage {
@@ -301,8 +328,12 @@ impl FmVoice {
                 self.amp += self.attack_inc;
                 if self.amp >= 1.0 {
                     self.amp = 1.0;
-                    self.stage = Stage::Decay;
+                    self.stage = if self.gated { Stage::Hold } else { Stage::Decay };
                 }
+            }
+            Stage::Hold => {
+                // Sustain at full level; the mod envelope keeps mellowing
+                // below, so a held note's brightness still breathes.
             }
             Stage::Decay => {
                 self.amp *= self.decay_coeff;
@@ -379,10 +410,39 @@ impl FmStab {
     /// Start one note with an optional per-hit `tone` (0..1). `None` =
     /// pristine; `Some(t)` co-varies brightness/length/filtering.
     pub fn note_on_toned(&mut self, note: u8, velocity: f32, tone: Option<f32>) {
+        self.strike(note, velocity, tone, false);
+    }
+
+    /// Start a GATED note: it sustains after the attack until [`Self::note_off`]
+    /// releases it into the patch's decay. Duration belongs to the trigger.
+    pub fn note_on_gated(&mut self, note: u8, velocity: f32, tone: Option<f32>) {
+        self.strike(note, velocity, tone, true);
+    }
+
+    fn strike(&mut self, note: u8, velocity: f32, tone: Option<f32>, gated: bool) {
         self.counter = self.counter.wrapping_add(1);
         let age = self.counter;
         let idx = self.pick_voice();
-        self.voices[idx].note_on(note, velocity, &self.patch, tone, self.sample_rate, age);
+        self.voices[idx].note_on(note, velocity, &self.patch, tone, gated, self.sample_rate, age);
+    }
+
+    /// Release every gated voice currently playing `note`. One-shot voices on
+    /// the same note are unaffected (they are already decaying).
+    pub fn note_off(&mut self, note: u8) {
+        for v in self.voices.iter_mut() {
+            if v.note == note && v.gated {
+                v.note_off();
+            }
+        }
+    }
+
+    /// Release every gated voice (panic button / producer switch).
+    pub fn release_all(&mut self) {
+        for v in self.voices.iter_mut() {
+            if v.gated {
+                v.note_off();
+            }
+        }
     }
 
     /// Trigger every note of a chord at once (pristine, no per-hit tone).
@@ -395,6 +455,14 @@ impl FmStab {
     pub fn play_chord_toned(&mut self, notes: &[u8], velocity: f32, tone: Option<f32>) {
         for &n in notes {
             self.note_on_toned(n, velocity, tone);
+        }
+    }
+
+    /// Trigger a gated chord — every note sustains until released (per-note
+    /// [`Self::note_off`] or [`Self::release_all`]).
+    pub fn play_chord_gated(&mut self, notes: &[u8], velocity: f32, tone: Option<f32>) {
+        for &n in notes {
+            self.note_on_gated(n, velocity, tone);
         }
     }
 
@@ -510,6 +578,52 @@ mod tests {
             tail += bank.tick().abs();
         }
         assert!(tail == 0.0, "stab should decay to silence, got {tail}");
+    }
+
+    #[test]
+    fn gated_note_sustains_until_released_then_decays() {
+        // RMS over a window, n samples in.
+        fn rms(bank: &mut FmStab, n: usize) -> f64 {
+            let mut e = 0.0f64;
+            for _ in 0..n {
+                let s = bank.tick();
+                e += (s * s) as f64;
+            }
+            (e / n as f64).sqrt()
+        }
+
+        let mut bank = FmStab::new(48_000.0);
+        bank.set_decay(0.05); // one-shot would be dead in ~150 ms
+        bank.note_on_gated(60, 1.0, None);
+
+        // Held: still at full strength 1 s in — far past the one-shot decay.
+        let early = rms(&mut bank, 4_800);
+        for _ in 0..48_000 {
+            bank.tick();
+        }
+        let held = rms(&mut bank, 4_800);
+        assert!(held > early * 0.5, "held note must sustain ({held:.4} vs {early:.4})");
+
+        // Release: decays to true silence (voice returns to Idle).
+        bank.note_off(60);
+        for _ in 0..48_000 {
+            bank.tick();
+        }
+        let mut tail = 0.0f32;
+        for _ in 0..480 {
+            tail += bank.tick().abs();
+        }
+        assert_eq!(tail, 0.0, "released note must decay to silence");
+
+        // And the one-shot path is unaffected: same patch, no gate, silent
+        // long before the 1 s mark.
+        let mut oneshot = FmStab::new(48_000.0);
+        oneshot.set_decay(0.05);
+        oneshot.note_on(60, 1.0);
+        for _ in 0..48_000 {
+            oneshot.tick();
+        }
+        assert_eq!(rms(&mut oneshot, 480), 0.0, "one-shot must still die on its own");
     }
 
     #[test]

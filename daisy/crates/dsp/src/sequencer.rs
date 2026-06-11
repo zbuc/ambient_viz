@@ -69,6 +69,10 @@ pub struct StabHit {
     /// short / filtered, high = bright / long / open. `None` (lane absent or a
     /// `.` cell) plays the pristine patch with no filter.
     pub tone: Option<f32>,
+    /// `true` = gated: the notes sustain until a matching [`StepEvent::stab_off`]
+    /// releases them — duration belongs to the producer, ADSR shape to the
+    /// patch. `false` = the classic one-shot stab (grid patterns).
+    pub gate: bool,
 }
 
 /// Gate event for the monophonic bass voice. Unlike the fire-and-forget stab,
@@ -113,6 +117,10 @@ pub struct StepEvent {
     pub open_hat: bool,
     /// `Some(hit)` = trigger an FM stab chord this sample.
     pub stab: Option<StabHit>,
+    /// `Some(notes)` = release these gated stab notes this sample (the
+    /// note-off half of a `StabHit { gate: true, .. }`). Processed before
+    /// `stab`, so a release and a new strike can share a sample.
+    pub stab_off: Option<Chord>,
     /// Gate event for the monophonic rumble-bass voice.
     pub bass: BassEvent,
 }
@@ -482,6 +490,7 @@ impl Sequencer {
                     chord,
                     velocity: sv,
                     tone: if tv >= 0.0 { Some(tv) } else { None },
+                    gate: false, // grid stabs stay one-shot
                 });
                 self.prog_cursor = self.prog_cursor.wrapping_add(1);
                 self.stab_count += 1;

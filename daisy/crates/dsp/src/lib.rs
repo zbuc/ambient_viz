@@ -409,9 +409,13 @@ impl Engine {
                 if note == self.kick_trigger_note {
                     self.trigger_kick(velocity as f32 / 127.0);
                 } else {
-                    // Playable FM stab — auditions the synth from a controller.
-                    self.stabs.note_on(note, velocity as f32 / 127.0);
+                    // Playable FM stab — gated, so a held controller key
+                    // sustains and key-up releases (duration at the keys).
+                    self.stabs.note_on_gated(note, velocity as f32 / 127.0, None);
                 }
+            }
+            MidiMessage::NoteOff { note, .. } => {
+                self.stabs.note_off(note);
             }
             _ => {}
         }
@@ -492,9 +496,21 @@ impl Engine {
             self.hihat_buf[i] =
                 self.hihat_closed.process(evt.closed_hat) + self.hihat_open.process(evt.open_hat);
 
+            // Releases first, so a release and a new strike on the same
+            // sample free their voices before allocation.
+            if let Some(off) = evt.stab_off {
+                for &n in off.notes() {
+                    self.stabs.note_off(n);
+                }
+            }
             if let Some(hit) = evt.stab {
-                self.stabs
-                    .play_chord_toned(hit.chord.notes(), hit.velocity, hit.tone);
+                if hit.gate {
+                    self.stabs
+                        .play_chord_gated(hit.chord.notes(), hit.velocity, hit.tone);
+                } else {
+                    self.stabs
+                        .play_chord_toned(hit.chord.notes(), hit.velocity, hit.tone);
+                }
             }
             let st = self.stabs.tick();
             self.stab_buf[i] = st;

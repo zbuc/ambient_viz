@@ -152,9 +152,11 @@ genes are slow intentions and the conductor interpolates/smooths internally.
 
 (81–85 reserved for genes discovered during listening. `note_length` was the
 first such gene — the duration discussion promoted it out of `bass_activity`
-so "sparser but longer" is expressible. True per-hit melody envelope decay
-decoupled from the brightness/length `stabtone` axis is future voice work;
-until then mood anchors reach stab length through the `StabDecay` fx param.)
+so "sparser but longer" is expressible. The stab voice is **gated** (P1m+):
+ADSR *shape* lives in the patch, note *duration* belongs to the trigger —
+`StabHit { gate: true }` sustains until a `stab_off` releases it into the
+patch's decay, the same contract the bass lane always had. `note_length`
+drives both bass holds and the drawn melody/chord gate durations.)
 
 **The clamp is structural, in two places — no clamp graph needed:**
 
