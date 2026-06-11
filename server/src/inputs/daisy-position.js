@@ -8,7 +8,10 @@
 //  WRITE (Phase E): we tunnel sensor/freeze control to the Daisy as raw 3-byte
 //    MIDI CC frames `[0xB0, cc, value]` (the firmware frames + decodes them):
 //      - `distance_cm`  -> CC 23 (tape failure): near (the onset) = present =
-//        pristine, far (≥ the sensor's reach) = absent = tape eaten.
+//        pristine, far (≥ the sensor's reach) = absent = tape eaten. Since
+//        migration phase 4D this CC consumes the orrery bus's RESOLVED
+//        `fx.tape.failure` (legacy ramp = incumbent writer); see the 4D block
+//        below.
 //      - `distance_near_cm` / `distance_far_cm` -> set the onset + far reach of
 //        that curve (config-driven / sensor-mode dependent); not forwarded to
 //        the Daisy, they only shape the distance_cm mapping above.
@@ -20,6 +23,7 @@
 
 const { SerialPort, ReadlineParser } = require('serialport');
 const capture = require('../capture'); // phase-0 boundary tap; no-op when off
+const { attachResolvedBinding } = require('../cc-binding'); // 4D transport-adapter consumer
 
 // macOS has no stable device name (it's /dev/cu.usbmodemXXXX); the Pi is
 // /dev/ttyACM0. Require an explicit DAISY_SERIAL on macOS.
@@ -44,6 +48,22 @@ const FAR_DEFAULT_CM = 130;
 let nearCm = NEAR_DEFAULT_CM;
 let farCm = FAR_DEFAULT_CM;
 const MIN_WRITE_MS = 33; // cap each CC to ~30 Hz (complication #13)
+
+// ── Phase 4D: fx.tape.failure rides the orrery bus (MIGRATION_PLAN.md) ──────
+// The tape-failure CC is a formal transport-adapter binding now: the legacy
+// ramp below PUBLISHES its value to the bus as the incumbent writer (sensor
+// rung, 300) and writeCc is driven by the bus's arbitrated RESOLVED value —
+// which the incumbent still wins, so the CC 23 byte stream is unchanged while
+// proving the adapter reads arbitration. The candidate router graph shadows
+// at 299 (incumbent−1); 4E swaps the two priorities, 4F deletes the ramp.
+//
+// migration_flag: tape_cc (bus | legacy) — env TAPE_CC=legacy reverts CC 23
+// to the direct writeCc call. owner: phase-4d; delete_by: the 4F legacy-ramp
+// deletion PR. Also degrades (loudly) to direct when no orrery bus is wired.
+const TAPE_PATH = 'fx.tape.failure';
+const LEGACY_TAPE_SOURCE = 'spiffe://pain-material.local/bridge/legacy-tape';
+const PRI_TAPE_INCUMBENT = 300; // the sensor rung — the incumbent priority
+const TAPE_CC_LEGACY = (process.env.TAPE_CC || 'bus') === 'legacy';
 
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const envNum = (k, d) => { const v = parseFloat(process.env[k]); return Number.isFinite(v) ? v : d; };
@@ -179,6 +199,24 @@ let reopenTimer = null;
 let triggerTimer = null;
 const lastCc = {}; // cc# -> last value sent (dedupe)
 const lastWriteAt = {}; // cc# -> last write time (throttle)
+
+// 4D tape-over-bus state: the orrery bus when the binding is active (null =
+// legacy direct path), the binding's detach, and the incumbent writer's
+// on-change dedupe (writer discipline; writeCc's own dedupe made unchanged
+// publishes no-ops anyway, so the CC stream is identical either way).
+let tapeBus = null;
+let detachTapeBinding = null;
+let lastTapePublished;
+
+// Legacy incumbent writer: the ramp's value, published on change at the
+// sensor rung. The consumer-side near/far guards above this stay until 4F —
+// since 4C the bus adapter applies the same conditioning at ingest, so the
+// two computations are value-identical (proven on the real golden).
+function publishLegacyTape(failure) {
+  if (lastTapePublished === failure) return;
+  lastTapePublished = failure;
+  tapeBus.publishState(TAPE_PATH, failure, { sourceId: LEGACY_TAPE_SOURCE, priority: PRI_TAPE_INCUMBENT });
+}
 
 // Bell-on-entry state.
 let lastDistanceCm = null; // most recent distance_cm
@@ -462,7 +500,11 @@ function onChange(name, value) {
     const span = farCm - nearCm;
     // Reversed: failure 1 at the near onset, 0 at the far reach.
     const failure = span > 0 ? clamp((farCm - value) / span, 0, 1) : (value <= nearCm ? 1 : 0);
-    writeCc(CC_TAPE_FAILURE, failure * 127);
+    // 4D: the value goes to the bus (incumbent writer); the resolved-value
+    // binding below drives writeCc in the same synchronous tick. Direct call
+    // only on the legacy flag / no-bus fallback.
+    if (tapeBus) publishLegacyTape(failure);
+    else writeCc(CC_TAPE_FAILURE, failure * 127);
     lastDistanceCm = value;
     updateTriggers(Date.now(), true);
   } else if (name === 'distance_velocity_cm_s') {
@@ -472,13 +514,30 @@ function onChange(name, value) {
   }
 }
 
-module.exports = ({ publish, bus }) => {
+module.exports = ({ publish, bus, orreryBus }) => {
   const portPath = process.env.DAISY_SERIAL || DEFAULT_PATH;
   if (!portPath) {
     console.warn(
       'daisy-position: no port — set DAISY_SERIAL=/dev/cu.usbmodemXXXX (macOS has no fixed name)',
     );
     return;
+  }
+
+  // 4D: CC 23 consumes the bus's arbitrated resolved value; the legacy ramp
+  // publishes as the incumbent writer (see publishLegacyTape). One flag, one
+  // fallback: TAPE_CC=legacy (or a missing orrery bus) restores the direct
+  // writeCc path wholesale.
+  if (orreryBus && !TAPE_CC_LEGACY) {
+    tapeBus = orreryBus;
+    detachTapeBinding = attachResolvedBinding({
+      bus: orreryBus,
+      path: TAPE_PATH,
+      onResolved: (v) => writeCc(CC_TAPE_FAILURE, clamp(v, 0, 1) * 127),
+    });
+    console.log('daisy-position: CC 23 bound to bus-resolved fx.tape.failure '
+      + '(4D; legacy incumbent @300, candidate shadows @299)');
+  } else {
+    console.log(`daisy-position: CC 23 on the legacy direct path (${TAPE_CC_LEGACY ? 'TAPE_CC=legacy' : 'no orrery bus wired'})`);
   }
 
   const scheduleReopen = () => {
@@ -550,6 +609,9 @@ module.exports = ({ publish, bus }) => {
 module.exports.stop = () => {
   if (reopenTimer) { clearTimeout(reopenTimer); reopenTimer = null; }
   if (triggerTimer) { clearInterval(triggerTimer); triggerTimer = null; }
+  if (detachTapeBinding) { detachTapeBinding(); detachTapeBinding = null; }
+  tapeBus = null;
+  lastTapePublished = undefined;
   if (port) {
     try { port.close(); } catch { /* */ }
     port = null;

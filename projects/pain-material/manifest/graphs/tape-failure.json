@@ -10,6 +10,6 @@
 
     { "id": "tape_out", "rateDomain": "RATE_CONTROL",
       "output": { "input": "nearness", "target": "fx.tape.failure", "shape": "STATE",
-                  "priority": 300, "authorityRole": "router" } }
+                  "priority": 299, "authorityRole": "router" } }
   ]
 }

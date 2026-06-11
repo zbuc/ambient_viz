@@ -279,6 +279,30 @@ publisher is flagged. **PM impact:** zero.
 > exact**. Legacy CC == sim graph == live graph on real-sensor data.
 > Remaining for 4C exit: one full kiosk session with the inspector showing
 > the candidate (doubles as a fresh golden with `bus_tx` aboard); then 4D.
+>
+> **Status (2026-06-11): 4D IMPLEMENTATION COMPLETE — rides the same pending
+> kiosk soak as 4C.** The MIDI adapter is a formal transport adapter: (1) the
+> legacy ramp in `daisy-position.js` now PUBLISHES its value as the incumbent
+> bus writer (`bridge/legacy-tape`, sensor rung 300, on-change, new
+> `legacy_ramp` role + manifest — the whole module is 4F's deletion target);
+> (2) the candidate graph moved to **299 (incumbent−1)** — the doctrine's
+> pre-cutover shadow shape, now real on the kiosk inspector
+> (`would_win_if_priority_ge_legacy`); (3) CC 23 is driven by a
+> resolved-value binding (`server/src/cc-binding.js`): on every
+> `fx.tape.failure` packet it reads the bus's arbitrated RESOLVED value —
+> never the packet payload, same rule as the engine — and feeds `writeCc`
+> (quantize/dedupe/cap unchanged, same synchronous tick). `daisy-serial`'s
+> manifest declares the subscription. `migration_flag: tape_cc (bus |
+> legacy)` — env `TAPE_CC=legacy` restores the direct call; owner phase-4d,
+> delete_by the 4F cleanup PR. **Proof (real golden replayed through the 4D
+> bridge at speed 1):** all 12 lanes MATCH, including **CC 23: 1220 golden =
+> 1220 replay writes** — the adapter reading arbitration is byte-identical to
+> the direct call — and the live lane still exact (**1701 = 1701** value
+> changes, capture `bus_tx` vs sim, candidate at 299); offline validator
+> MATCH; 42/42 tests (6 new on the binding: shadowed-candidate suppression,
+> lone-candidate boot, release handover, stale flip, rule-13 quarantine,
+> detach). **4E cutover is now literally the priority swap** (graph 299→300,
+> legacy 300→299) after the soak session passes the quality gate.
 
 The public phase is one phase; **internally it lands as six gated
 milestones**, so simulator, compiler, adapter, and arbitration bugs are never

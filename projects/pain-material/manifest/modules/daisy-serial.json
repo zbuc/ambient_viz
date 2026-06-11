@@ -3,7 +3,7 @@
   "identity": {
     "stableId": "spiffe://pain-material.local/daisy/serial",
     "instanceId": "daisy",
-    "humanLabel": "Daisy song position (USB-CDC POS/RESET)",
+    "humanLabel": "Daisy serial transport (USB-CDC POS/RESET in; MIDI CC out, phase 4D)",
     "type": "daisy-seed-cdc",
     "firmwareVersion": "qspi",
     "schemaVersion": "manifest.v1"
@@ -15,5 +15,7 @@
       "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 1000, "onStale": "ON_STALE_HOLD",
       "cyclic": true }
   ],
-  "subscribes": []
+  "subscribes": [
+    { "path": "fx.tape.failure" }
+  ]
 }

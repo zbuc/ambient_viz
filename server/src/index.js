@@ -78,9 +78,11 @@ try {
 busAdapter = attachBusAdapter({ bus: orreryBus, inputBus });
 console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch})`);
 
-// Phase-4C: the compiled router graph runs LIVE as a shadow writer — it
-// publishes fx.tape.failure on the bus at candidate priority; NOTHING
-// consumes it (the legacy CC 23 serial path is untouched, PM impact zero).
+// Phase-4C/4D: the compiled router graph runs LIVE as a shadow writer — it
+// publishes fx.tape.failure on the bus at candidate priority (299,
+// incumbent−1). Since 4D the legacy ramp is the incumbent bus writer (300,
+// in daisy-position) and the MIDI adapter consumes the RESOLVED value, so
+// the candidate stays shadowed: CC 23 is still legacy's byte stream.
 // Its writes are tapped into the capture stream (`bus_tx`) so any recorded
 // session carries the live graph output for offline diffing
 // (tools/sim/validate-tape.js compares it against the simulated graph and
@@ -111,7 +113,7 @@ try {
   });
   routerEngine.start();
   console.log(`orrery router: LIVE (shadow) — ${compiled.nodes.size} nodes from ${path.basename(graphPath)}, `
-    + 'fx.tape.failure candidate, nothing consumes it');
+    + 'fx.tape.failure candidate @299 (CC 23 reads the RESOLVED value; legacy incumbent @300 wins)');
 } catch (e) {
   console.warn(`orrery router: NOT RUNNING (${e.message}) — legacy unaffected`);
 }
@@ -198,8 +200,11 @@ if (MOCK) {
 const DAISY = process.env.DAISY === '1' || process.env.DAISY === 'true' || !!process.env.DAISY_SERIAL;
 if (DAISY) {
   // `bus` lets it tail distance_cm / freeze and write them back to the Daisy as
-  // CC frames on the same port (Phase E).
-  require('./inputs/daisy-position')({ publish, bus: inputBus });
+  // CC frames on the same port (Phase E). `orreryBus` makes it a formal
+  // transport adapter (phase 4D): the legacy tape ramp publishes
+  // fx.tape.failure as the incumbent writer and CC 23 consumes the bus's
+  // arbitrated RESOLVED value — legacy still winning, byte stream unchanged.
+  require('./inputs/daisy-position')({ publish, bus: inputBus, orreryBus });
   console.log('daisy-position source: enabled');
 }
 
