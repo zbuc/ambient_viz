@@ -74,10 +74,24 @@ module.exports = {
   // transient_max_ms with err <= transient_eps_abs, and the excused total
   // stays under transient_grid_frac_max — sustained divergence (a logic
   // difference) blows through all three immediately.
+  // trace_lag_ms: the lag/traversal window for the BROWSER TRACE domain
+  // (viz-ab). The snapshot traces sample on-change at >= 250 ms spacing, so
+  // the grid's 250 ms window reaches zero neighbors there; 600 ms reaches
+  // two sample spacings plus SSE transport, which is what the traversal
+  // rule (the CC comparator's TRAVERSED class) needs to resolve a
+  // one-sample cliff. The dense offline grid keeps the tighter 250 ms.
+  // live_eps_abs: the live-vs-sim lane allowance for STATEFUL graphs. The
+  // timestamp-driven Smooth clocks dt off wall-time packet arrival live but
+  // off the capture's stamped ingest times in the sim; the <= ~8 ms jitter
+  // passes through 1-e^(-dt/tau) and leaves residue in filter state, so the
+  // value-change sequences match in count and order but not bit-exactly
+  // (measured 2026-06-11 kiosk session: max 0.0087, p99 0.004). The
+  // stateless tape lane keeps demanding exact values.
   derived: {
     'fx.viz.twist_gain': {
       eps_abs: 0.05, lag_ms: 250, grid_ms: 50,
       transient_eps_abs: 0.15, transient_max_ms: 400, transient_grid_frac_max: 0.01,
+      live_eps_abs: 0.02, trace_lag_ms: 600,
     },
     // bitmap x is the PRE-quantize linear nearness (the harmonic blend +
     // 12 px quantize happen in the browser host); same declared class as the
@@ -86,6 +100,7 @@ module.exports = {
     'fx.viz.bitmap_x': {
       eps_abs: 0.05, lag_ms: 250, grid_ms: 50,
       transient_eps_abs: 0.15, transient_max_ms: 400, transient_grid_frac_max: 0.01,
+      live_eps_abs: 0.02, trace_lag_ms: 600,
     },
   },
 

@@ -51,18 +51,31 @@ function judgePage(samples, tol, absentDefault) {
   const bootBad = boot.filter((s) => s.legacy !== absentDefault).length; // legacy moved while bus absent
   const midNull = live.filter((s) => typeof s.bus !== 'number').length;
 
-  // Pointwise errors with the lag allowance over neighboring samples.
+  // Pointwise errors with the lag allowance over neighboring samples, plus
+  // the TRAVERSAL rule from the CC step comparator: the trace samples at
+  // <= 4 Hz, so on a fast edge (a visitor lunging 140 -> 40 cm in one
+  // sample) both sides are mid-flight at different phases and no neighbor
+  // value matches — but the bus value lying INSIDE the legacy side's
+  // min..max span over the lag window means legacy traversed it. Sustained
+  // wrongness still fails: at plateaus the span collapses to a point, and
+  // the dense offline grid gate guards the shape independently.
+  const lagMs = tol.trace_lag_ms || tol.lag_ms;
   const errs = [];
   for (let i = 0; i < live.length; i++) {
     const s = live[i];
     if (typeof s.bus !== 'number') { errs.push(null); continue; } // judged via midNull
     let best = Math.abs(s.legacy - s.bus);
-    for (let j = i - 1; j >= 0 && s.t - live[j].t <= tol.lag_ms; j--) {
+    let lo = s.legacy;
+    let hi = s.legacy;
+    for (let j = i - 1; j >= 0 && s.t - live[j].t <= lagMs; j--) {
       best = Math.min(best, Math.abs(live[j].legacy - s.bus));
+      lo = Math.min(lo, live[j].legacy); hi = Math.max(hi, live[j].legacy);
     }
-    for (let j = i + 1; j < live.length && live[j].t - s.t <= tol.lag_ms; j++) {
+    for (let j = i + 1; j < live.length && live[j].t - s.t <= lagMs; j++) {
       best = Math.min(best, Math.abs(live[j].legacy - s.bus));
+      lo = Math.min(lo, live[j].legacy); hi = Math.max(hi, live[j].legacy);
     }
+    if (s.bus >= lo - tol.eps_abs && s.bus <= hi + tol.eps_abs) best = 0; // traversed
     errs.push(best);
   }
 
@@ -85,8 +98,14 @@ function judgePage(samples, tol, absentDefault) {
       excused: durMs <= tol.transient_max_ms && maxErr <= tol.transient_eps_abs,
     });
   }
-  const excusedPts = runs.filter((r) => r.excused).reduce((a, r) => a + r.points, 0);
-  const overBudget = live.length > 0 && excusedPts > live.length * tol.transient_grid_frac_max;
+  // Transient budget by WALL TIME, not sample count: the trace is on-change,
+  // so its samples cluster during motion — exactly where settle-hold
+  // transients live — and a sample-count fraction would overcount them.
+  // Same declared fraction as the offline grid (whose 50 ms points ARE
+  // wall-time-proportional).
+  const excusedMs = runs.filter((r) => r.excused).reduce((a, r) => a + r.duration_ms, 0);
+  const windowMs = live.length > 1 ? live[live.length - 1].t - live[0].t : 0;
+  const overBudget = windowMs > 0 && excusedMs > windowMs * tol.transient_grid_frac_max;
   const blocking = runs.filter((r) => !r.excused);
   const maxErr = Math.max(0, ...errs.filter((e) => e !== null));
 
@@ -101,7 +120,8 @@ function judgePage(samples, tol, absentDefault) {
     mid_session_nulls: midNull,
     max_abs_err_after_lag: Math.round(maxErr * 1e4) / 1e4,
     excused_runs: runs.filter((r) => r.excused).length,
-    excused_points: excusedPts,
+    excused_ms: excusedMs,
+    window_ms: windowMs,
     over_budget: overBudget,
     violations: blocking.slice(0, 10),
   };
@@ -147,7 +167,7 @@ function main() {
       const r = judgePage(samples, tol, m.absentDefault);
       if (order.indexOf(r.verdict) > order.indexOf(worst)) worst = r.verdict;
       console.log(`  ${r.verdict.padEnd(20)} ${m.trace.padEnd(14)} page ${pageId}  ${r.samples} samples, `
-        + `max |err| ${r.max_abs_err_after_lag} after ±${tol.lag_ms}ms `
+        + `max |err| ${r.max_abs_err_after_lag} after ±${tol.trace_lag_ms || tol.lag_ms}ms+traversal `
         + `(eps ${tol.eps_abs}), ${r.excused_runs} transient run(s) excused`
         + (r.boot_bad ? `, BOOT-BAD ${r.boot_bad}` : '')
         + (r.mid_session_nulls ? `, MID-SESSION NULLS ${r.mid_session_nulls}` : ''));

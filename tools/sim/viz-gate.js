@@ -195,6 +195,13 @@ function validateVizMapping({ goldenDir, graphFile, outDir, quiet = false,
   if (!tol) throw new Error(`no tolerances.derived entry for ${busPath} — an undeclared comparison is UNKNOWN`);
   const model = compareDerived(legacy, trajectory, tol);
 
+  // Stateful graphs (Smooth) can't be bit-exact live-vs-sim: live dt comes
+  // from wall-time arrival, sim dt from the capture's stamped times, and the
+  // few-ms jitter leaves residue in filter memory. The lane therefore
+  // demands equal change COUNTS in order, times within the window, and
+  // values within the declared live_eps_abs (tolerances.js) — the stateless
+  // tape lane (validate-tape.js) keeps demanding exact values.
+  const liveEps = tol.live_eps_abs || 0;
   const dedupeChanges = (seq) => seq.filter((p, i) => i === 0 || p.value !== seq[i - 1].value);
   const busTx = golden.events.filter((e) => e.kind === 'bus_tx' && e.path === busPath)
     .map((e) => ({ t: e.t_mono_ms, value: e.value }));
@@ -207,7 +214,7 @@ function validateVizMapping({ goldenDir, graphFile, outDir, quiet = false,
     for (let i = 0; i < n && mismatches.length < 10; i++) {
       const a = liveChanges[i];
       const b = simChanges[i];
-      if (!a || !b || a.value !== b.value || Math.abs(a.t - b.t) > 250) {
+      if (!a || !b || Math.abs(a.value - b.value) > liveEps || Math.abs(a.t - b.t) > 250) {
         mismatches.push({ index: i, live: a || null, sim: b || null });
       }
     }

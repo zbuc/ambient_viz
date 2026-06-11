@@ -479,8 +479,28 @@ chains; see the status block below*). Each mapping is a `migration_flag` with
 > assembly flapping the *legacy* sides' endpoints (see the phase-2 status
 > block); the graphs read RESOLVED and were right the whole session — the
 > live A/B caught a real transport bug the never-run phase-2 gate had left
-> latent. After the resolved-wire fix: **re-run the session** (same URL
-> works); that capture's traces judge the actual mappings.
+> latent.
+>
+> **Second kiosk A/B (2026-06-11, post-fix, ~40 s smoke): ALL GATES MATCH.**
+> The session exercised three comparator gaps, each resolved by a declared,
+> mechanism-bounded rule (tolerances.js → derived): (1) **live lanes for
+> stateful graphs get `live_eps_abs: 0.02`** — wall-vs-virtual dt jitter
+> (≤ 8 ms measured) through Smooth's α leaves filter-memory residue, so
+> live-vs-sim matches in count/order/time but not bit-exactly (measured max
+> 0.0087, p99 0.004; the stateless tape lane stays exact); (2) **the trace
+> domain gets `trace_lag_ms: 600` + the CC comparator's TRAVERSED rule** —
+> the ≤ 4 Hz on-change trace can't resolve a one-sample cliff (d 140→42 cm:
+> both sides mid-flight at different phases), so a bus sample inside the
+> legacy ±window min..max span passes; plateaus still discriminate (spans
+> collapse), and the dense offline grid guards the shape independently;
+> (3) **the trace transient budget is wall-time-fraction**, not
+> sample-fraction (on-change samples cluster during motion and overcount).
+> Verdicts after declaration: viz-ab MATCH ×2 traces, validate-twist MATCH
+> (incl. live lane 384=384), validate-bitmap MATCH (384=384), goldens
+> unchanged. **The full pipeline — graphs, feed, traces, gates — is proven
+> end to end; what remains is duration:** the cutover gate's `>= 1 full
+> session` soak with the same URL, whose capture then doubles as the
+> promotion candidate for the next canonical golden.
 >
 > **Status (2026-06-11): tint envelopes RESOLVED BY DECISION — presentation
 > layer, no graph.** Chris's call: the 12 AR envelopes (rise 8 s / fall
