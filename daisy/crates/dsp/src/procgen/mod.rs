@@ -211,6 +211,24 @@ impl Pcg32 {
     }
 }
 
+/// One of three chord voicings: 0 = as given (close position), 1 = first
+/// inversion (root lifted an octave), 2 = spread (middle note lifted an
+/// octave). Notes clamp at the MIDI ceiling rather than wrapping.
+fn voice_variant(chord: Chord, variant: usize) -> Chord {
+    let src = chord.notes();
+    let mut notes = [0i32; 8];
+    let n = src.len().min(8);
+    for (d, &s) in notes.iter_mut().zip(src.iter()) {
+        *d = s as i32;
+    }
+    match variant {
+        1 if n >= 2 => notes[0] += 12,
+        2 if n >= 3 => notes[1] += 12,
+        _ => {}
+    }
+    Chord::from_notes(&notes[..n])
+}
+
 /// Which `StepEvent` producer the engine consults. Both stay constructed —
 /// selection is a mode, not a rebuild — so a later timeline-driven switch
 /// (PROCMUSIC.md §8, deferred) is a field write.
@@ -439,10 +457,23 @@ impl ProcGen {
         // the Markov melody fires on a per-bar-rotated Euclidean gate.
         let strong = sib % STEPS_PER_BEAT == 0;
         if sib == 0 && self.conductor.chord_changed() {
+            // Per-hit character, like the melody path: a drawn voicing
+            // (root / first inversion / spread third) and tone/velocity
+            // jitter — otherwise every chord announcement is the identical
+            // hit (same envelope length, same brightness, same register).
+            // Fixed draw order: voicing, tone, velocity.
+            let chord = voice_variant(
+                self.current_chord(),
+                self.rng.pick_weighted(&[0.5, 0.25, 0.25]),
+            );
+            let tone =
+                (g.brightness + g.stab_color * (self.rng.next_f32() - 0.5)).clamp(0.0, 1.0);
+            let vel = (0.5 + 0.3 * g.tension + 0.2 * (self.rng.next_f32() - 0.5))
+                .clamp(0.05, 1.0);
             evt.stab = Some(StabHit {
-                chord: self.current_chord(),
-                velocity: 0.5 + 0.3 * g.tension,
-                tone: Some(g.brightness),
+                chord,
+                velocity: vel,
+                tone: Some(tone),
             });
         } else {
             let mel_pulses = (g.density * 6.0 + 0.5) as usize;
@@ -581,10 +612,11 @@ mod tests {
         // listen, because it is the audible output's identity.
         let events = run(&mut make(96.0), 8, 96.0);
         let d = digest(&events);
-        // Bumped 2026-06-11 (×2): seeded musical start (key/mode/opening
-        // degree), then seeded opening-hold phase — intended audible changes.
+        // Bumped 2026-06-11 (×3): seeded musical start (key/mode/opening
+        // degree), seeded opening-hold phase, then per-hit chord character
+        // (voicing/tone/velocity draws) — intended audible changes.
         assert_eq!(
-            d, 0x0433c3d46972a6ed,
+            d, 0x419adcef0edf8ad3,
             "golden digest mismatch — actual {d:#018x}"
         );
     }
@@ -757,6 +789,33 @@ mod tests {
             bars.len() >= 3,
             "10 seeds gave only {} distinct opening-chord durations: {bars:?}",
             bars.len()
+        );
+    }
+
+    #[test]
+    fn chord_hits_vary_in_voicing_tone_and_velocity() {
+        let mut pg = make(240.0);
+        let mut g = Genome::default();
+        g.harmonic_rate = 1.0; // chord moves every bar → many chord hits
+        pg.set_genome(g);
+        let events = run(&mut pg, 64, 240.0);
+        let chords: std::vec::Vec<StabHit> = events
+            .iter()
+            .filter_map(|(_, e)| e.stab)
+            .filter(|s| s.chord.notes().len() >= 3)
+            .collect();
+        assert!(chords.len() > 10, "expected many chord hits ({})", chords.len());
+        let tones: std::collections::HashSet<u32> =
+            chords.iter().map(|s| (s.tone.unwrap() * 1000.0) as u32).collect();
+        let vels: std::collections::HashSet<u32> =
+            chords.iter().map(|s| (s.velocity * 1000.0) as u32).collect();
+        let voicings: std::collections::HashSet<std::vec::Vec<u8>> =
+            chords.iter().map(|s| s.chord.notes().to_vec()).collect();
+        assert!(tones.len() > 3, "chord tones never vary ({} distinct)", tones.len());
+        assert!(vels.len() > 3, "chord velocities never vary ({} distinct)", vels.len());
+        assert!(
+            voicings.len() > chords.iter().map(|s| s.chord.notes()[0] % 12).collect::<std::collections::HashSet<_>>().len(),
+            "voicing variants never appear (every degree always voiced identically)"
         );
     }
 
