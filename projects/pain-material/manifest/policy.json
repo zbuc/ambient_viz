@@ -45,13 +45,6 @@
       "cannotPublish": ["clock.*", "safety.*", "transport.*"],
       "canSubscribe": [],
       "maxPriority": 100
-    },
-    {
-      "name": "legacy_ramp",
-      "canPublish": ["fx.tape.failure"],
-      "cannotPublish": ["clock.*", "safety.*", "sensor.*", "touch.*", "ui.*", "transport.*"],
-      "canSubscribe": [],
-      "maxPriority": 300
     }
   ],
   "allow": [
@@ -62,8 +55,7 @@
     { "stableId": "spiffe://pain-material.local/daisy/serial", "role": "clock_source", "instanceId": "daisy" },
     { "stableId": "spiffe://pain-material.local/browser/ui", "role": "local_ui", "instanceId": "browser" },
     { "stableId": "spiffe://pain-material.local/bridge/router", "role": "router", "instanceId": "main" },
-    { "stableId": "spiffe://pain-material.local/bridge/defaults", "role": "defaults", "instanceId": "defaults" },
-    { "stableId": "spiffe://pain-material.local/bridge/legacy-tape", "role": "legacy_ramp", "instanceId": "legacy-tape" }
+    { "stableId": "spiffe://pain-material.local/bridge/defaults", "role": "defaults", "instanceId": "defaults" }
   ],
   "groups": [],
   "runtimeModes": {

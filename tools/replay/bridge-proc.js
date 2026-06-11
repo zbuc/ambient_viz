@@ -14,7 +14,7 @@ const SHIM = path.join(__dirname, 'serialport-shim.js');
 
 // Env keys that shape bridge behavior — scrubbed from the inherited shell env
 // so a run is controlled entirely by what the caller passes in.
-const SCRUB = /^(PORT|HOST|MOCK|DAISY|CAPTURE|INGEST_TOKEN|MOTION_|BELL_|TOLL_|VOICE_|REPLAY_SERIAL_PORT|TAPE_CC)/;
+const SCRUB = /^(PORT|HOST|MOCK|DAISY|CAPTURE|INGEST_TOKEN|MOTION_|BELL_|TOLL_|VOICE_|REPLAY_SERIAL_PORT)/;
 
 function getFreePort() {
   return new Promise((resolve, reject) => {

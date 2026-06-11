@@ -78,11 +78,12 @@ try {
 busAdapter = attachBusAdapter({ bus: orreryBus, inputBus });
 console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch})`);
 
-// Phase-4C/4D/4E: the compiled router graph runs LIVE and, since the 4E
-// cutover, OWNS fx.tape.failure at the sensor rung (300) — the legacy ramp
-// (daisy-position) shadows it at 299 and the MIDI adapter consumes the
-// RESOLVED value, so CC 23 is the graph's output. Pre-delete rollback =
-// swap the two priorities back (graph json + daisy-position constant).
+// The compiled router graph (migration phase 4, complete): it OWNS
+// fx.tape.failure at the sensor rung (300) and the MIDI adapter consumes
+// the RESOLVED value — CC 23 IS the graph's output; the legacy ramp was
+// deleted in 4F, so rollback is artifact-level (redeploy the previous
+// release). A graph load failure now silences the tape effect entirely —
+// the catch below is correspondingly loud.
 // Its writes are tapped into the capture stream (`bus_tx`) so any recorded
 // session carries the live graph output for offline diffing
 // (tools/sim/validate-tape.js compares it against the simulated graph and
@@ -112,10 +113,11 @@ try {
     tap: (target, value) => capture.event('bus_tx', { path: target, value }),
   });
   routerEngine.start();
-  console.log(`orrery router: LIVE (incumbent since 4E) — ${compiled.nodes.size} nodes from ${path.basename(graphPath)}, `
-    + 'fx.tape.failure @300 drives CC 23 via the resolved-value binding (legacy ramp shadows @299)');
+  console.log(`orrery router: LIVE — ${compiled.nodes.size} nodes from ${path.basename(graphPath)}, `
+    + 'fx.tape.failure @300 drives CC 23 via the resolved-value binding (sole writer since 4F)');
 } catch (e) {
-  console.warn(`orrery router: NOT RUNNING (${e.message}) — legacy unaffected`);
+  console.error(`orrery router: NOT RUNNING (${e.message}) — CC 23 (tape failure) WILL NOT MOVE; `
+    + 'no legacy fallback since 4F. Fix the graph/manifests or redeploy the previous release.');
 }
 
 // ── bus-over-SSE (phase 2): the browser feed's transport ────────────────────
@@ -201,9 +203,8 @@ const DAISY = process.env.DAISY === '1' || process.env.DAISY === 'true' || !!pro
 if (DAISY) {
   // `bus` lets it tail distance_cm / freeze and write them back to the Daisy as
   // CC frames on the same port (Phase E). `orreryBus` makes it a formal
-  // transport adapter (phase 4D): CC 23 consumes the bus's arbitrated
-  // RESOLVED fx.tape.failure — owned by the router graph since the 4E
-  // cutover, with the legacy ramp publishing one rung below as the shadow.
+  // transport adapter: CC 23 consumes the bus's arbitrated RESOLVED
+  // fx.tape.failure, owned solely by the router graph (4F deleted the ramp).
   require('./inputs/daisy-position')({ publish, bus: inputBus, orreryBus });
   console.log('daisy-position source: enabled');
 }
