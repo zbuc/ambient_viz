@@ -715,6 +715,41 @@ clock contract in early.
 > rebinds strike/speak to `seq.presence.note_on`, daisy-position's trigger
 > stack + `legacy_occupancy` tap deleted (it shrinks to serial owner + MIDI
 > adapter + POS reader), occupancy rebind folded in, fresh golden recorded.
+>
+> **Status (2026-06-11): the rebind mechanism landed —
+> `migration_flag: presence_cc (legacy | bus)`** (env `PRESENCE_CC`, owner
+> phase-6.1, delete_by the 6.1 cleanup PR). Under `bus` the plugin's
+> `seq.presence.note_on` events drive the serial note-ons (a packet-reactive
+> EVENT binding, `cc-binding.js → attachEventBinding`) while the legacy
+> stack keeps deciding and capturing `trigger` events without touching the
+> wire — legacy becomes the shadow, the phase-5 applied-candidate gate
+> shape. Default `legacy` is byte-identical to before.
+>
+> **The gate session (runbook — one session gates everything, per Chris):**
+> on the Pi, from a pulled main:
+>
+> ```sh
+> CAPTURE=1 PRESENCE_CC=bus MOTION_PRESENCE=1 ./run_kiosk.sh
+> ```
+>
+> The audience hears the candidate; if anything misbehaves, restarting with
+> `PRESENCE_CC=legacy` is the whole rollback. Run a normal session (a few
+> entries/exits, dwell long enough for a toll, touch + freeze traffic),
+> then judge the new capture dir:
+>
+> ```sh
+> node tools/sim/validate-occupancy.js <SESSION>  # occupancy live lanes
+> node tools/sim/validate-presence.js  <SESSION>  # decision correlation
+> node tools/sim/validate-tape.js      <SESSION>  # standing gates
+> node tools/sim/validate-twist.js     <SESSION>
+> node tools/sim/validate-bitmap.js    <SESSION>
+> node tools/sim/validate-plugin.js    <SESSION>
+> ```
+>
+> All MATCH → accept: the cleanup PR deletes the legacy trigger stack, the
+> `legacy_occupancy` tap, and the `presence_cc` flag (rollback becomes
+> artifact-level, invariant 4), and the session is promoted as the phase-6
+> golden.
 
 The riskiest phase; it gets a de-risking precursor:
 

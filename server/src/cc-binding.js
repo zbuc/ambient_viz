@@ -27,4 +27,22 @@ function attachResolvedBinding({ bus, path, onResolved }) {
   return () => bus.off('packet', handler);
 }
 
-module.exports = { attachResolvedBinding };
+// Phase-6.1 EVENT-sink binding: the consumer half of "the adapter rebinds
+// strike/speak". EVENTs interleave with no arbitration, so the sink reacts
+// to every ACCEPTED event packet on `path`, in bus arrival order, payload
+// as-is — ordering and dedupe are already the bus's (per-source seq +
+// dedupe keys), and the packet stream is the same one /bus/events forwards.
+// This consumer deliberately does NOT drain the path's queue: the plugin
+// host's inspection ring remains the declared queue drainer, and a
+// packet-reactive sink works whether or not anything drains.
+function attachEventBinding({ bus, path, onEvent }) {
+  const { fromValue } = require('./bus');
+  const handler = (rec) => {
+    if (!rec.accepted || !rec.pkt.event || rec.pkt.event.path !== path) return;
+    onEvent(fromValue(rec.pkt.event.payload));
+  };
+  bus.on('packet', handler);
+  return () => bus.off('packet', handler);
+}
+
+module.exports = { attachResolvedBinding, attachEventBinding };

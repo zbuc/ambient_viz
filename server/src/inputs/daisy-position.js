@@ -23,7 +23,7 @@
 
 const { SerialPort, ReadlineParser } = require('serialport');
 const capture = require('../capture'); // phase-0 boundary tap; no-op when off
-const { attachResolvedBinding } = require('../cc-binding'); // 4D transport-adapter consumer
+const { attachResolvedBinding, attachEventBinding } = require('../cc-binding'); // 4D/6.1 transport-adapter consumers
 
 // macOS has no stable device name (it's /dev/cu.usbmodemXXXX); the Pi is
 // /dev/ttyACM0. Require an explicit DAISY_SERIAL on macOS.
@@ -57,6 +57,20 @@ const MIN_WRITE_MS = 33; // cap each CC to ~30 Hz (complication #13)
 // tape_cc flag; rollback from here is artifact-level only (redeploy the
 // previous release — migration doctrine, invariant 4).
 const TAPE_PATH = 'fx.tape.failure';
+
+// ── presence strike/speak source (migration phase 6.1) ──────────────────────
+// migration_flag: presence_cc (legacy | bus) — owner phase-6.1, delete_by the
+// 6.1 cleanup PR (with the whole trigger stack below).
+//   legacy (default): the in-process bell/toll/voice/murmur stack drives
+//     note-on serial writes, exactly as always. The presence_choreography.v1
+//     plugin runs in pure shadow (its seq.presence.note_on is unconsumed).
+//   bus: the plugin's seq.presence.note_on events drive the serial writes
+//     (the cutover shape); the legacy stack KEEPS RUNNING and keeps recording
+//     its decisions as `trigger` capture events — it just stops writing the
+//     port, becoming the shadow the comparator judges against. Pre-delete
+//     rollback = restart with PRESENCE_CC=legacy.
+const PRESENCE_PATH = 'seq.presence.note_on';
+const PRESENCE_SOURCE = /^bus$/i.test(process.env.PRESENCE_CC || '') ? 'bus' : 'legacy';
 
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const envNum = (k, d) => { const v = parseFloat(process.env[k]); return Number.isFinite(v) ? v : d; };
@@ -194,6 +208,7 @@ const lastCc = {}; // cc# -> last value sent (dedupe)
 const lastWriteAt = {}; // cc# -> last write time (throttle)
 
 let detachTapeBinding = null; // resolved-value binding teardown (stop())
+let detachPresenceBinding = null; // 6.1 note_on event-binding teardown (stop())
 
 // Bell-on-entry state.
 let lastDistanceCm = null; // most recent distance_cm
@@ -247,7 +262,9 @@ function writeCc(cc, value) {
   lastWriteAt[cc] = now;
 }
 
-function writeNoteOn(note, velocity, channel = 0) {
+// The raw note-on frame writer — the one path to the wire, used by whichever
+// side the presence_cc flag selects.
+function sendNoteOn(note, velocity, channel = 0) {
   if (!port || !port.isOpen) return;
   // note-on; velocity 0 would read as note-off, so floor at 1. The channel
   // selects the FM timbre on the firmware's shared bank (0 = bell, 1 = industrial).
@@ -255,6 +272,15 @@ function writeNoteOn(note, velocity, channel = 0) {
   const v = clamp(Math.round(velocity), 1, 127);
   const ch = clamp(Math.round(channel), 0, 15);
   portWrite(Buffer.from([0x90 | ch, n, v]), { type: 'note_on', ch, note: n, vel: v });
+}
+
+// The LEGACY trigger stack's writer: under presence_cc=bus its strikes stop
+// reaching the wire (the plugin drives it via the event binding below) while
+// the stack keeps deciding + capturing `trigger` events — the shadow side of
+// the 6.1 live comparison.
+function writeNoteOn(note, velocity, channel = 0) {
+  if (PRESENCE_SOURCE !== 'legacy') return;
+  sendNoteOn(note, velocity, channel);
 }
 
 // Roll the next toll to a random point in [TOLL_MIN_S, TOLL_MAX_S].
@@ -511,6 +537,21 @@ module.exports = ({ publish, bus, orreryBus }) => {
       onResolved: (v) => writeCc(CC_TAPE_FAILURE, clamp(v, 0, 1) * 127),
     });
     console.log('daisy-position: CC 23 bound to bus-resolved fx.tape.failure (router graph is the sole writer)');
+    if (PRESENCE_SOURCE === 'bus') {
+      // The 6.1 cutover shape: the plugin's [ch, note, vel] events drive the
+      // wire; legacy keeps deciding silently (writeNoteOn gates on the flag).
+      detachPresenceBinding = attachEventBinding({
+        bus: orreryBus,
+        path: PRESENCE_PATH,
+        onEvent: (payload) => {
+          if (!Array.isArray(payload) || payload.length < 3) return; // malformed: never a frame
+          sendNoteOn(payload[1], payload[2], payload[0]);
+        },
+      });
+      console.log('daisy-position: strikes/speech bound to seq.presence.note_on (presence_cc=bus — legacy stack is the SHADOW)');
+    } else {
+      console.log('daisy-position: strikes/speech from the legacy trigger stack (presence_cc=legacy — plugin shadows on the bus)');
+    }
   } else {
     // The graph is the only producer since 4F — without the bus there is no
     // tape-failure CC at all. Loud, because the deck would sit pristine.
@@ -587,6 +628,7 @@ module.exports.stop = () => {
   if (reopenTimer) { clearTimeout(reopenTimer); reopenTimer = null; }
   if (triggerTimer) { clearInterval(triggerTimer); triggerTimer = null; }
   if (detachTapeBinding) { detachTapeBinding(); detachTapeBinding = null; }
+  if (detachPresenceBinding) { detachPresenceBinding(); detachPresenceBinding = null; }
   if (port) {
     try { port.close(); } catch { /* */ }
     port = null;

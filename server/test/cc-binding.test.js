@@ -96,3 +96,35 @@ test('non-finite resolved values are quarantined at the hardware boundary', () =
   assert.deepEqual(seen, [0.5]);
   bus.stop();
 });
+
+// ── phase-6.1 EVENT-sink binding (the strike/speak rebind mechanism) ─────────
+
+const { attachEventBinding } = require('../src/cc-binding');
+
+test('event binding: accepted events on the path deliver payloads in arrival order; others ignored', () => {
+  const bus = makeBus();
+  bus.registerPath('seq.presence.note_on', { shape: 'event', type: 'vec' });
+  const seen = [];
+  const detach = attachEventBinding({ bus, path: 'seq.presence.note_on', onEvent: (p) => seen.push(p) });
+  bus.publishEvent('seq.presence.note_on', [0, 81, 100], { sourceId: 'spiffe://t/host' });
+  bus.publishEvent('seq.presence.note_on', [2, 7, 100], { sourceId: 'spiffe://t/host' });
+  bus.publishEvent('seq.other.thing', [9, 9, 9], { sourceId: 'spiffe://t/host' });
+  bus.publishState('fx.tape.failure', 0.5, { sourceId: 'spiffe://t/host', priority: 300 }); // STATE never delivers
+  assert.deepEqual(seen, [[0, 81, 100], [2, 7, 100]]);
+  detach();
+  bus.publishEvent('seq.presence.note_on', [1, 2, 3], { sourceId: 'spiffe://t/host' });
+  assert.equal(seen.length, 2, 'detach stops delivery');
+  bus.stop();
+});
+
+test('event binding: rejected packets (type, duplicate) never reach the sink', () => {
+  const bus = makeBus();
+  bus.registerPath('seq.presence.note_on', { shape: 'event', type: 'vec' });
+  const seen = [];
+  attachEventBinding({ bus, path: 'seq.presence.note_on', onEvent: (p) => seen.push(p) });
+  bus.publishEvent('seq.presence.note_on', 'not-a-vec', { sourceId: 'spiffe://t/host' }); // type-rejected
+  bus.publishEvent('seq.presence.note_on', [0, 81, 100], { sourceId: 'spiffe://t/host', dedupeKey: 'k1' });
+  bus.publishEvent('seq.presence.note_on', [0, 81, 100], { sourceId: 'spiffe://t/host', dedupeKey: 'k1' }); // duplicate
+  assert.deepEqual(seen, [[0, 81, 100]]);
+  bus.stop();
+});
