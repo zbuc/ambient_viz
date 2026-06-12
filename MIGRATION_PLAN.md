@@ -871,6 +871,23 @@ upstream already depends on this.)
 > lights up from the snapshots — plus the standing gates. On acceptance the
 > cleanup PR deletes the legacy `daisyPosRebase` reader and the flag; the
 > module becomes the sole lane clock.
+>
+> **Status (2026-06-12): ACCEPTED + CLEANUP DONE — PHASE 7 COMPLETE.**
+> Chris accepted on the offline evidence with the live session WAIVED (gate
+> owner's call, recorded): the offline gate ran the REAL consumer module
+> over five real captured POS streams including all four genuine loop
+> wraps, and the only behavioral deltas from legacy are the measured slope
+> (±1%) and the declared stall-freeze improvement — the anchoring mechanics
+> are identical. The first live exposure of the tuple as sole clock is the
+> next kiosk run; rollback is artifact-level (invariant 4). Cleanup: the
+> legacy rebase reader and the `songclock` migration_flag are deleted
+> (`?songclock=` inert); the SongClock module is the sole lane clock;
+> snapshots carry the tuple value + state, and the validator's live lane
+> now compares each snapshot's page-side value against a re-derivation at
+> the bridge timestamp (live module == re-derived module, ≤ 50 ms) — a
+> standing regression lane on every future capture. Re-verified post-
+> cleanup: songclock gate MATCH ×5 goldens, 90/90 tests. **Next: phase 8**
+> (host/plugin split of the visualizer — the long arc).
 
 ## Phase 8 — Host/plugin split of the visualizer (the long arc)
 

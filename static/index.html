@@ -4273,11 +4273,11 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
   // hard-snap on a backward jump (loop wrap / reconnect rebases the basis).
   const song = { have: false, pos: 0, wall: 0 };
   window.AMBIENT_SONG = song;
-  // Phase 7: the formal clock-contract consumer — the SongClock module
+  // The clock-contract consumer (phase 7): the SongClock module
   // (static/song-clock.js) extrapolates from the (position, rate) tuple;
-  // clock.daisy.rate feeds the slope below. Both clocks are maintained every
-  // session; the `songclock` migration_flag (frame loop) picks which one the
-  // lanes consume, and the snapshot carries both for the offline A/B.
+  // clock.daisy.rate feeds the slope below. Sole lane clock since the
+  // phase-7 cutover; `song` above remains the raw-anchor record (snapshot
+  // diagnostics).
   const songClock = window.SongClock ? window.SongClock.createSongClock() : null;
   window.AMBIENT_SONG_CLOCK = songClock;
   const updateSong = (value) => {
@@ -7024,36 +7024,26 @@ async function init() {
   // jump); `?clock=local` forces the local audio element; default `auto` uses the
   // Daisy when present and falls back to local audio otherwise (dev).
   const SONG_CLOCK_MODE = (new URLSearchParams(location.search).get('clock') || 'auto').toLowerCase();
-  const SONG_STALE_MS = 2000;
-  // migration_flag: songclock (rebase | tuple) — owner phase-7, delete_by the
-  // phase-7 cleanup PR. `rebase` (default) is the legacy reader: anchor on
-  // every report, extrapolate at a HARDCODED rate 1.0, and fall back to the
-  // raw anchor once stale (a 2 s rewind at the stall boundary). `tuple` is
-  // the clock contract: the SongClock module extrapolates with the published
-  // clock.daisy.rate and FREEZES at the stale boundary (the declared
-  // improvement). Both are computed every frame; snapshots carry both.
-  const SONG_CLOCK_IMPL = (new URLSearchParams(location.search).get('songclock') || 'rebase').toLowerCase();
-  function daisyPosRebase() {
-    const s = window.AMBIENT_SONG;
-    if (!s || !s.have) return null;
-    const age = performance.now() - s.wall;
-    return age <= SONG_STALE_MS ? s.pos + age / 1000 : s.pos;
-  }
-  function daisyPosTuple() {
+  // The extrapolated Daisy song position (seconds) — the SongClock module
+  // (static/song-clock.js) consuming the (position, rate) tuple, SOLE lane
+  // clock since the phase-7 cutover (the legacy hardcoded-rate rebase reader
+  // and its `songclock` migration_flag are deleted; `?songclock=` in the
+  // kiosk URL is inert; rollback is artifact-level). Stale = freeze at the
+  // boundary, never the legacy 2 s rewind.
+  function daisyPos() {
     const c = window.AMBIENT_SONG_CLOCK;
     return c ? c.now(performance.now()) : null;
   }
-  // Interpolated Daisy song position (seconds) from the CDC POS feed, or null.
-  function daisyPos() {
-    return SONG_CLOCK_IMPL === 'tuple' ? daisyPosTuple() : daisyPosRebase();
-  }
-  // The offline A/B reads both implementations from the capture snapshots.
-  window.__songClockAB = () => ({
-    impl: SONG_CLOCK_IMPL,
-    rebase: daisyPosRebase(),
-    tuple: daisyPosTuple(),
-    t_page_ms: performance.now(),
-  });
+  // Capture snapshots carry the clock state for the validator's live lane.
+  window.__songClockAB = () => {
+    const c = window.AMBIENT_SONG_CLOCK;
+    return {
+      impl: 'tuple',
+      tuple: c ? c.now(performance.now()) : null,
+      state: c ? c.state() : null,
+      t_page_ms: performance.now(),
+    };
+  };
   function songClock() {
     const p = daisyPos();
     if (SONG_CLOCK_MODE !== 'local' && p != null) return p;

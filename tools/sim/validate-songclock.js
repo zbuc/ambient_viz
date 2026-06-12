@@ -137,23 +137,39 @@ function validateSongClock({ goldenDir, outDir, quiet = false }) {
     }
   }
 
-  // ── snapshot A/B lane (post-deploy captures) ────────────────────────────
+  // ── snapshot live lane (post-deploy captures) ───────────────────────────
+  // Since the phase-7 cleanup the page runs the tuple clock only; snapshots
+  // carry its value. The lane compares each snapshot's page-side tuple value
+  // against the validator's own re-derivation at the snapshot's BRIDGE
+  // timestamp — live module == re-derived module, within the page-receipt /
+  // snapshot-POST latency (generous 50 ms of song time at rate ~1).
+  const LIVE_EPS_S = 0.05;
   const snaps = golden.events
     .filter((e) => e.kind === 'browser_snapshot' && e.snapshot && e.snapshot.song_clock
-      && typeof e.snapshot.song_clock.rebase === 'number' && typeof e.snapshot.song_clock.tuple === 'number')
+      && typeof e.snapshot.song_clock.tuple === 'number')
     .map((e) => ({ t: e.t_mono_ms, ...e.snapshot.song_clock }));
   let live = { present: false, note: 'capture has no song_clock snapshots (recorded before phase 7)' };
   if (snaps.length) {
+    // Replay the reports into a fresh estimator+clock so we can sample the
+    // re-derived value at arbitrary snapshot times, in capture order.
+    const est2 = createRateEstimator();
+    const clock2 = createSongClock({ staleMs: STALE_MS });
+    let ri = 0;
     const mismatches = [];
     let maxAbs = 0;
     for (const s of snaps) {
-      const d = Math.abs(s.rebase - s.tuple);
+      for (; ri < reports.length && reports[ri].t <= s.t; ri++) {
+        const { rate } = est2.onPosition(reports[ri].sec, reports[ri].t);
+        clock2.onRate(rate, reports[ri].t);
+        clock2.onPosition(reports[ri].sec, reports[ri].t);
+      }
+      const rederived = clock2.now(s.t);
+      if (rederived === null) continue; // snapshot before the first POS
+      const d = Math.abs(s.tuple - rederived);
       if (d > maxAbs) maxAbs = d;
-      // a snapshot inside a stall is the declared freeze-vs-rewind class
-      const nearReport = reports.some((r) => Math.abs(r.t - s.t) < STALE_MS);
-      if (d > EPS_S && nearReport && mismatches.length < 10) mismatches.push({ t: s.t, ...s, diff: d });
+      if (d > LIVE_EPS_S && mismatches.length < 10) mismatches.push({ t: s.t, tuple: s.tuple, rederived, diff: d });
     }
-    live = { present: true, snapshots: snaps.length, max_abs_s: maxAbs, mismatches, pass: mismatches.length === 0 };
+    live = { present: true, snapshots: snaps.length, eps_s: LIVE_EPS_S, max_abs_s: maxAbs, mismatches, pass: mismatches.length === 0 };
   }
 
   // Note: wraps and RESET lines are reported separately, not equated — a
