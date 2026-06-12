@@ -169,10 +169,18 @@ added to the bus produces macro-identical output with no code changes.*
 
 ## Open questions (answer before code)
 
-1. **Capture wiring on the kiosk**: which device the `capture` build opens
-   (Daisy UAC capture? a line splitter into a USB interface?) — the
-   PipeWire fault was Chromium-side, but the Rust path needs verifying on
-   the Pi before it's load-bearing.
+1. **Capture wiring on the kiosk — RESOLVED (Chris, 2026-06-12)**: the
+   Daisy's UAC capture node, the one already verified with `pw-record`:
+   `alsa_input.usb-ambient-viz_Daisy_audio_source_0001-00.analog-stereo`.
+   Two implications: (a) `pw-record` working confirms the capture node
+   *clocks fine under PipeWire* — the "rate 0" fault really was
+   Chromium-specific, so the sidecar needs no PipeWire workaround; (b)
+   that string is a **PipeWire node name**, not an ALSA device name —
+   cpal's ALSA host reaches it through the `pipewire-alsa` bridge (or
+   bind `hw:` directly if PipeWire releases the device; `pipewire-rs` is
+   the fallback if neither behaves). Config takes the device as a string
+   and the README documents the PW-node ↔ ALSA-name mapping for this
+   device.
 2. **Band edges + detector tuning** are project data, not platform code:
    they belong in the project manifest eventually (the params live with
    the tap module declaration), hand-tuned against the actual piece first.
