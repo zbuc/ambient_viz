@@ -44,7 +44,9 @@ pub use bass::{BassPatch, RumbleBass};
 pub use fm_stab::{FmPatch, FmStab, Shaper};
 pub use hihat::HiHat;
 pub use midi::{MidiByteParser, MidiMessage};
-pub use midi_map::{MidiMap, Param, install_kiosk_bindings};
+pub use midi_map::{
+    MidiMap, PROC_GENE_CC_BASE, PROC_GENE_PARAMS, Param, install_kiosk_bindings,
+};
 pub use pain_voice::PainMaterialVoice;
 pub use procgen::{GENE_COUNT, Genome, ProcGen, ProducerSel};
 pub use svf::Svf;
@@ -445,6 +447,15 @@ impl Engine {
     }
 
     pub fn apply_param(&mut self, param: Param, value: f32) {
+        // Genome params (CC 70–88) route to the procedural producer as one
+        // family: the canonical `to_array` order keeps the CC table and the
+        // Genome locked, and `set_genome` clamps — the structural envelope.
+        if let Some(i) = param.proc_gene_index() {
+            let mut genes = self.procgen.genome().to_array();
+            genes[i] = value;
+            self.procgen.set_genome(procgen::Genome::from_array(genes));
+            return;
+        }
         match param {
             Param::KickFreq => self.kick.set_freq(value),
             Param::KickAccent => self.kick.set_accent(value),
@@ -487,6 +498,8 @@ impl Engine {
                 .reverb
                 .set_damping(AudioParam::linear(value.clamp(0.0, 1.0))),
             Param::Freeze => self.freeze.set_amount(value),
+            // Proc* genes were handled by the early return above.
+            _ => {}
         }
     }
 
@@ -719,6 +732,44 @@ mod tests {
         }
         assert!(energy > 1.0, "procgen producer must be audible, got {energy}");
         assert_eq!(eng.sequencer().kick_count(), 0, "grid sequencer must stay idle");
+    }
+
+    /// P2 wire contract: every genome gene is reachable end-to-end over its
+    /// CC — MIDI byte in, clamped gene value out — and the CC numbering is
+    /// exactly `PROC_GENE_CC_BASE + to_array index` (the PROCMUSIC.md §4
+    /// table). A gene/CC/array mismatch fails here, not on the kiosk.
+    #[test]
+    fn genome_ccs_reach_every_gene() {
+        let mut eng = Engine::new(48_000.0);
+        install_kiosk_bindings(eng.midi_map_mut());
+
+        for (i, _) in PROC_GENE_PARAMS.iter().enumerate() {
+            let cc = PROC_GENE_CC_BASE + i as u8;
+            // Full-scale CC → gene 1.0 (and only THIS gene moves).
+            let before = eng.procgen().genome().to_array();
+            eng.handle_midi(midi::MidiMessage::ControlChange { channel: 0, cc, value: 127 });
+            let after = eng.procgen().genome().to_array();
+            assert_eq!(after[i], 1.0, "CC {cc} full-scale must pin gene {i} to 1.0");
+            for (j, (&b, &a)) in before.iter().zip(after.iter()).enumerate() {
+                if j != i {
+                    assert_eq!(b, a, "CC {cc} must not move gene {j}");
+                }
+            }
+            // Zero CC → gene 0.0.
+            eng.handle_midi(midi::MidiMessage::ControlChange { channel: 0, cc, value: 0 });
+            assert_eq!(eng.procgen().genome().to_array()[i], 0.0);
+        }
+
+        // The binding table carries all 19, contiguously, 0..1.
+        let bound: alloc::vec::Vec<u8> = eng
+            .midi_map()
+            .iter_bindings()
+            .filter(|(_, b)| b.param.proc_gene_index().is_some())
+            .map(|(cc, _)| cc)
+            .collect();
+        assert_eq!(bound.len(), procgen::GENE_COUNT);
+        assert_eq!(*bound.first().unwrap(), PROC_GENE_CC_BASE);
+        assert_eq!(*bound.last().unwrap(), PROC_GENE_CC_BASE + 18);
     }
 
     /// The per-instrument mix params actually modulate the rendered level:

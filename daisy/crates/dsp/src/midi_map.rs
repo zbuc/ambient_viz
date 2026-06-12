@@ -66,6 +66,66 @@ pub enum Param {
     /// Master freeze wet/dry (0 = passthrough, 1 = held grain). Mirrors the
     /// visualizer's frame-freeze; the transport that drives it is unconnected.
     Freeze,
+
+    // ── procgen genome (PROCMUSIC.md §4, CC 70–88) ──────────────────────────
+    // One CC per gene, all 0..1, in `Genome::to_array()` order. The mood
+    // expander publishes music.genome.* on the Pi; resolved-value CC
+    // bindings carry them here. `PROC_GENE_PARAMS` + `proc_gene_index()`
+    // keep the three orderings (this enum, the CC table, the array) locked.
+    ProcDensity,
+    ProcTension,
+    ProcKickFill,
+    ProcHatFill,
+    ProcMarkovTemp,
+    ProcBrightness,
+    ProcBassActivity,
+    ProcHarmonicRate,
+    ProcRegister,
+    ProcStabColor,
+    ProcNoteLength,
+    ProcBassStyle,
+    ProcRecall,
+    ProcArcDepth,
+    ProcWander,
+    ProcSwing,
+    ProcDropout,
+    ProcColor,
+    ProcFreezePunct,
+}
+
+/// The genome params in `Genome::to_array()` order — index `i` binds to
+/// CC `PROC_GENE_CC_BASE + i`.
+pub const PROC_GENE_PARAMS: [Param; 19] = [
+    Param::ProcDensity,
+    Param::ProcTension,
+    Param::ProcKickFill,
+    Param::ProcHatFill,
+    Param::ProcMarkovTemp,
+    Param::ProcBrightness,
+    Param::ProcBassActivity,
+    Param::ProcHarmonicRate,
+    Param::ProcRegister,
+    Param::ProcStabColor,
+    Param::ProcNoteLength,
+    Param::ProcBassStyle,
+    Param::ProcRecall,
+    Param::ProcArcDepth,
+    Param::ProcWander,
+    Param::ProcSwing,
+    Param::ProcDropout,
+    Param::ProcColor,
+    Param::ProcFreezePunct,
+];
+
+/// First genome CC (PROCMUSIC.md §4 table).
+pub const PROC_GENE_CC_BASE: u8 = 70;
+
+impl Param {
+    /// `Some(i)` when this is a genome param — `i` is the gene's slot in
+    /// `Genome::to_array()` (and its CC offset from [`PROC_GENE_CC_BASE`]).
+    pub fn proc_gene_index(self) -> Option<usize> {
+        PROC_GENE_PARAMS.iter().position(|&p| p == self)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -137,4 +197,12 @@ pub fn install_kiosk_bindings(map: &mut MidiMap) {
     map.bind_cc(22, Param::KickDistDrive, 1.0, 6.0);
     map.bind_cc(23, Param::TapeFailure, 0.0, 1.0); // 0 = pristine, 1 = eaten
     map.bind_cc(24, Param::Freeze, 0.0, 1.0); // 0 = passthrough, 1 = held grain
+
+    // Procgen genome: CC 70–88, one per gene, all 0..1 (the bind range IS
+    // the firmware-side clamp — PROCMUSIC.md §4). Sent by the Pi's
+    // music.genome.* resolved-value bindings; ignored where no procgen
+    // producer runs (the firmware's CC dispatch has a catch-all).
+    for (i, &param) in PROC_GENE_PARAMS.iter().enumerate() {
+        map.bind_cc(PROC_GENE_CC_BASE + i as u8, param, 0.0, 1.0);
+    }
 }

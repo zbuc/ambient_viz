@@ -23,7 +23,7 @@ sensors (bus, exists)
   → derived.room.reward              ← THE PLUGGABLE OBJECTIVE (stub: Const 0)
   → optimizer plugin ((1+1)-ES)      music.mood.*          (2-D, minutes)
   → mood expansion (anchors as data) music.genome.* + fx   (per-project moods.json)
-  → resolved-value CC bindings       CC 70–85 over USB-CDC MIDI
+  → resolved-value CC bindings       CC 70–88 over USB-CDC MIDI
   → dsp::procgen conductor           (bar clock, chord FSM, density/tension)
   → per-instrument generators        (Euclidean drums, Markov melody, bass rules)
   → StepEvent → voices               (kick / hats / FM stab / bass) → audio
@@ -130,7 +130,7 @@ a genome value through normal arbitration.
 
 ## 4. The genome
 
-12 genes, one CC each. **CC 70–85** (current bindings occupy 12–24 only —
+19 genes, one CC each. **CC 70–88** (current bindings occupy 12–24 only —
 `daisy/crates/dsp/src/midi_map.rs`; 70+ stays clear of both the existing knob
 range and the 0–63 14-bit-LSB convention). 7-bit resolution is sufficient:
 genes are slow intentions and the conductor interpolates/smooths internally.
@@ -402,7 +402,7 @@ validator + captured sensor sessions on the Pi side).
   only in the host Engine)*. `procgen` feature instantiating voices +
   producer; aliases; heap + `bench` instrumentation.
   *Verify:* heap high-water under 504 KB with margin; per-stage cycle timings
-  inside the 667 µs SAI block; CC 70–85 reception on hardware; `POS` telemetry
+  inside the 667 µs SAI block; CC 70–88 reception on hardware; `POS` telemetry
   unaffected.
 - **P4 — conductor telemetry back**. `MUS <bar> <chord> <scale> <density>`
   CDC lines (per bar, beside `POS`); parse in `daisy-position.js`; publish
