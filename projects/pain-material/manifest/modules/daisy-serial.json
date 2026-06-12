@@ -13,7 +13,10 @@
     { "path": "clock.daisy.position", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "s",
       "range": { "min": 0, "max": 1200 }, "nominalRateHz": 20, "maxRateHz": 25,
       "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 1000, "onStale": "ON_STALE_HOLD",
-      "cyclic": true }
+      "cyclic": true },
+    { "path": "clock.daisy.rate", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 4 }, "nominalRateHz": 0.1, "maxRateHz": 25,
+      "interpolation": "INTERPOLATION_STEP" }
   ],
   "subscribes": [
     { "path": "fx.tape.failure" }

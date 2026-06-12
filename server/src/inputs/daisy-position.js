@@ -30,6 +30,7 @@
 const { SerialPort, ReadlineParser } = require('serialport');
 const capture = require('../capture'); // phase-0 boundary tap; no-op when off
 const { attachResolvedBinding, attachEventBinding } = require('../cc-binding'); // 4D/6.1 transport-adapter consumers
+const { createRateEstimator, NOMINAL_RATE } = require('../clock-rate'); // phase-7 clock tuple
 
 // macOS has no stable device name (it's /dev/cu.usbmodemXXXX); the Pi is
 // /dev/ttyACM0. Require an explicit DAISY_SERIAL on macOS.
@@ -46,6 +47,19 @@ const MIN_WRITE_MS = 33; // cap each CC to ~30 Hz (complication #13)
 const TAPE_PATH = 'fx.tape.failure';
 const PRESENCE_PATH = 'seq.presence.note_on';
 
+// ── the clock tuple (migration phase 7) ─────────────────────────────────────
+// clock.daisy.position (the legacy-mapped POS float, via the bus adapter)
+// plus clock.daisy.rate, published HERE under the daisy identity — together
+// the (position, rate) tuple of the clock contract (ARCHITECTURE.md:
+// extrapolate, don't sample). Consumers extrapolate pos₀ + rate·Δt between
+// reports; a RESET wrap re-anchors position (backward jump = hard snap) and
+// resets the rate to nominal. Rate is published on meaningful change only
+// (the bus retains it; no keepalive — position staleness governs hold).
+const RATE_PATH = 'clock.daisy.rate';
+const RATE_EPS = 0.005; // publish when the estimate moves this much
+const DAISY_SOURCE = 'spiffe://pain-material.local/daisy/serial';
+const PRI_CLOCK = 400;
+
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 
 let port = null;
@@ -55,6 +69,9 @@ const lastWriteAt = {}; // cc# -> last write time (throttle)
 
 let detachTapeBinding = null; // resolved-value binding teardown (stop())
 let detachPresenceBinding = null; // note_on event-binding teardown (stop())
+let orreryBusRef = null; // for the rate publish (set at module init)
+let rateEstimator = createRateEstimator();
+let lastPublishedRate = -Infinity; // forces the first publish (the nominal seed)
 
 // Tapped serial write: the capture's serial_tx events ARE the Daisy output
 // boundary, in write order, with the write callback surfacing flush/write
@@ -103,6 +120,12 @@ module.exports = ({ publish, bus, orreryBus }) => {
   }
 
   if (orreryBus) {
+    orreryBusRef = orreryBus;
+    // Seed the rate at nominal so the tuple resolves from boot — a consumer
+    // joining before the first POS extrapolates nothing (no anchor), but the
+    // rate half of the contract is never absent.
+    lastPublishedRate = NOMINAL_RATE;
+    orreryBus.publishState(RATE_PATH, NOMINAL_RATE, { sourceId: DAISY_SOURCE, priority: PRI_CLOCK });
     detachTapeBinding = attachResolvedBinding({
       bus: orreryBus,
       path: TAPE_PATH,
@@ -153,7 +176,17 @@ module.exports = ({ publish, bus, orreryBus }) => {
           ? { type: trimmed.startsWith('RESET') ? 'reset' : 'pos', sec: parseFloat(m[1]) }
           : { type: 'unmatched' },
       });
-      if (m) publish('song_position', parseFloat(m[1]));
+      if (m) {
+        const sec = parseFloat(m[1]);
+        publish('song_position', sec);
+        if (orreryBusRef) {
+          const { rate } = rateEstimator.onPosition(sec, Date.now());
+          if (Math.abs(rate - lastPublishedRate) >= RATE_EPS) {
+            lastPublishedRate = rate;
+            orreryBusRef.publishState(RATE_PATH, rate, { sourceId: DAISY_SOURCE, priority: PRI_CLOCK });
+          }
+        }
+      }
     });
     // Hot-plug resilience: reopen on any error/close (unplug, Daisy reboot).
     port.on('error', (err) => {
@@ -176,6 +209,9 @@ module.exports.stop = () => {
   if (reopenTimer) { clearTimeout(reopenTimer); reopenTimer = null; }
   if (detachTapeBinding) { detachTapeBinding(); detachTapeBinding = null; }
   if (detachPresenceBinding) { detachPresenceBinding(); detachPresenceBinding = null; }
+  orreryBusRef = null;
+  rateEstimator = createRateEstimator();
+  lastPublishedRate = -Infinity;
   if (port) {
     try { port.close(); } catch { /* */ }
     port = null;

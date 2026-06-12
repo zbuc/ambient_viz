@@ -143,6 +143,23 @@ occupancy-config mismatch (the graph bakes motion fusion ON). Passed
 76=76 distance-mode entries). Capture MOTION_PRESENCE is auto-detected and
 applied to both sides.
 
+## Phase 7 — song clock gate
+
+```sh
+node tools/sim/validate-songclock.js projects/pain-material/fixtures/<golden>/
+```
+
+The clock contract over the capture's real POS/RESET stream: the PRODUCTION
+rate estimator (`server/src/clock-rate.js`, windowed against USB-CDC delivery
+jitter) and the REAL `static/song-clock.js` consumer module vs the frozen
+legacy reader. Lanes: rate sanity [0.95, 1.05], wrap handling (backward
+anchors hard-snap, monotone between anchors — cyclic by re-anchor, never by
+extrapolation), 50 ms grid |tuple − legacy| <= 10 ms outside stalls
+(stall freeze-vs-rewind is the declared improvement class), and the
+browser-snapshot A/B on post-deploy captures. Passed 2026-06-12 on all five
+goldens incl. the mock's 4 real loop wraps. Unit tests:
+`server/test/song-clock.test.js`.
+
 ## Phase 6.0 — plugin host gate
 
 ```sh

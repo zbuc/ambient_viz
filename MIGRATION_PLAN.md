@@ -821,6 +821,57 @@ formalized as an engine module. **Validates:** extrapolation + cyclic handling
 on the real loop wrap (`RESET`). (Phase 5's boundary guaranteed nothing
 upstream already depends on this.)
 
+> **Status (2026-06-12): IMPLEMENTATION LANDED — tuple in shadow behind
+> `migration_flag: songclock (rebase | tuple)`; kiosk session pending.**
+> Design decisions, stated for the record:
+>
+> - **The tuple.** `clock.daisy.position` stays the position half
+>   (unchanged, cyclic, declared since phase 3); `clock.daisy.rate` is new,
+>   published by daisy-position under the daisy identity (clock_source role
+>   covers `clock.daisy.*`) on meaningful change (±0.005), seeded 1.0 at
+>   boot. The rate is MEASURED — a windowed endpoint estimate
+>   (`server/src/clock-rate.js`): POS lines arrive with heavy USB-CDC
+>   delivery jitter (measured 0.6–99 ms around the 50 ms cadence), so a
+>   per-report EMA chases batching noise into ±50% swings (caught by the
+>   gate's first run); the 6 s baseline amortizes it to ±1%. Wrap → baseline
+>   cleared, nominal 1.0; stalls re-baseline; implausible reports never
+>   enter the window (rule-13 posture).
+> - **The consumer module.** `static/song-clock.js` — one file, three
+>   runtimes (page `<script>`, node tests, the offline gate, which drives
+>   the REAL module over captured POS timelines, not a model). Semantics:
+>   anchor on every position report (the per-packet rebase IS the contract's
+>   re-anchor; extrapolation never steps backward on its own — the wrap is
+>   crossed by re-anchor, exactly the cyclic rule); slope = the published
+>   rate; STALE freezes at the boundary value — the legacy reader instead
+>   REWOUND 2 s to the raw anchor at the stall boundary, the one declared
+>   EXPECTED_DIFFERENCE class. This module is the phase-7 slice of "timeline
+>   player formalized": the CLOCK leaves applyAutomation; lane evaluation
+>   stays for phase 8's typed param surface (the boundary phase 5 promised).
+> - **The flag.** `?songclock=tuple` on the kiosk URL applies the module;
+>   default `rebase` is byte-identical legacy. Both clocks are computed
+>   every session and every capture snapshot carries the pair
+>   (`song_clock: {impl, rebase, tuple}`) — the offline A/B, phase-5 trace
+>   style.
+>
+> **Gate (`tools/sim/validate-songclock.js`), four lanes over the captured
+> POS/RESET stream:** rate sanity (estimator inside [0.95, 1.05] after
+> warmup), wrap handling (every backward anchor hard-snaps both clocks; the
+> tuple clock is monotone between anchors), a 50 ms grid of
+> |tuple − legacy| ≤ 10 ms outside stalls, and the snapshot A/B when a
+> capture carries it. **MATCH on all five goldens** — mock (63 min, all 4
+> real loop wraps): rate 0.998–1.002, grid max 0.1 ms; presence-cutover:
+> rate 0.991–1.009 (the actual Daisy-vs-Pi skew, visible at last), grid max
+> 0.4 ms; the session-start RESET correctly classified as an anchor, not a
+> wrap. 90/90 tests (8 new); all standing gates re-verified; boot seeds
+> `clock.daisy.rate` 1.0 under the daisy identity, policy-clean.
+>
+> **The gate session:** add `&songclock=tuple` to the kiosk URL, run one
+> normal session with capture on (lane sync rides the tuple live), then
+> `node tools/sim/validate-songclock.js <SESSION>` — the live A/B lane
+> lights up from the snapshots — plus the standing gates. On acceptance the
+> cleanup PR deletes the legacy `daisyPosRebase` reader and the flag; the
+> module becomes the sole lane clock.
+
 ## Phase 8 — Host/plugin split of the visualizer (the long arc)
 
 The ~7k-line IIFE becomes host + `pain_material_raster.v1`, incrementally:
