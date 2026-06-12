@@ -1,0 +1,11 @@
+# The analysis workspace — control-plane Rust that is NOT on-Daisy code
+# (daisy/ is audio-plane firmware + its host tools only; ruling 2026-06-11).
+# First member: the audio analysis sidecar (AUDIO_ANALYSIS_SIDECAR.md).
+[workspace]
+resolver = "2"
+members = ["audio-tap"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false

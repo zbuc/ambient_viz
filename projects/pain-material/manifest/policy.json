@@ -76,6 +76,7 @@
     { "stableId": "spiffe://pain-material.local/daisy/serial", "role": "clock_source", "instanceId": "daisy" },
     { "stableId": "spiffe://pain-material.local/browser/ui", "role": "local_ui", "instanceId": "browser" },
     { "stableId": "spiffe://pain-material.local/browser/audio-tap", "role": "audio_tap", "instanceId": "audio-tap" },
+    { "stableId": "spiffe://pain-material.local/analysis/audio-tap", "role": "audio_tap", "instanceId": "analysis" },
     { "stableId": "spiffe://pain-material.local/bridge/router", "role": "router", "instanceId": "main" },
     { "stableId": "spiffe://pain-material.local/bridge/plugin-host", "role": "plugin_host", "instanceId": "plugins" },
     { "stableId": "spiffe://pain-material.local/bridge/router-occupancy", "role": "occupancy_router", "instanceId": "occupancy" },

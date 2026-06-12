@@ -38,6 +38,16 @@ const { loadSession } = require('../replay/capture-io');
 const { PATHS, SOURCE_ID } = require('../../static/audio-tap');
 
 const MANIFEST_FILE = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest', 'modules', 'audio-tap.json');
+// audio.main.* is a multi-writer surface since the sidecar scaffold
+// (AUDIO_ANALYSIS_SIDECAR.md): the gate accepts any allowlisted tap
+// identity and judges each writer's stream independently (order/gap/rate
+// are per-writer properties; one writer's reload must not look like
+// another's seq regression). The two-writer A/B value lane is still
+// future work — this only generalizes identity + keying.
+const TAP_SOURCES = new Set([
+  SOURCE_ID, // browser tap (static/audio-tap.js)
+  'spiffe://pain-material.local/analysis/audio-tap', // Rust sidecar (analysis/)
+]);
 const GAP_MARGIN_MS = 500;  // scheduling slack on top of the declared staleAfterMs
 const QUANT = 1000;         // 3 decimals — the publisher's declared quantization
 
@@ -102,21 +112,23 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
 
   // ── CONTRACT ────────────────────────────────────────────────────────────
   const contract = { values: [], identity: [], order: [], gaps: [], rate: [] };
-  const byPath = new Map();
+  const byPath = new Map(); // keyed `${source}|${path}` — per-writer streams
   for (const p of packets) {
-    if (p.source !== SOURCE_ID) contract.identity.push({ t: p.t, source: p.source });
+    if (!TAP_SOURCES.has(p.source)) contract.identity.push({ t: p.t, source: p.source });
     if (typeof p.value !== 'number' || p.value < 0 || p.value > 1
       || Math.abs(p.value * QUANT - Math.round(p.value * QUANT)) > 1e-6) {
       if (contract.values.length < 10) contract.values.push({ t: p.t, path: p.path, value: p.value });
     }
-    if (!byPath.has(p.path)) byPath.set(p.path, []);
-    byPath.get(p.path).push(p);
+    const pk = `${p.source}|${p.path}`;
+    if (!byPath.has(pk)) byPath.set(pk, []);
+    byPath.get(pk).push(p);
   }
-  // seq strictly increasing per epoch (across all paths — one counter per page load)
+  // seq strictly increasing per (writer, epoch) — one counter per writer boot
   const byEpoch = new Map();
   for (const p of packets) {
-    if (!byEpoch.has(p.epoch)) byEpoch.set(p.epoch, []);
-    byEpoch.get(p.epoch).push(p);
+    const ek = `${p.source}#${p.epoch}`;
+    if (!byEpoch.has(ek)) byEpoch.set(ek, []);
+    byEpoch.get(ek).push(p);
   }
   for (const [epoch, list] of byEpoch) {
     let last = -Infinity;
@@ -125,9 +137,10 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
       last = Math.max(last, p.seq);
     }
   }
-  // keepalive gaps + rate, per path
+  // keepalive gaps + rate, per (writer, path)
   const maxGapStats = {};
-  for (const [p, list] of byPath) {
+  for (const [pk, list] of byPath) {
+    const p = list[0].path;
     const staleMs = declared.get(p).staleAfterMs || 1000;
     const maxRate = declared.get(p).maxRateHz || 30;
     let maxGap = 0;
@@ -142,19 +155,20 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
     const span = (list[list.length - 1].t - list[0].t) / 1000;
     const hz = span > 1 ? (list.length - 1) / span : 0;
     if (hz > maxRate && contract.rate.length < 10) contract.rate.push({ path: p, hz: Math.round(hz * 10) / 10, max: maxRate });
-    maxGapStats[p] = { packets: list.length, max_gap_ms: Math.round(maxGap), rate_hz: Math.round(hz * 10) / 10 };
+    maxGapStats[pk] = { packets: list.length, max_gap_ms: Math.round(maxGap), rate_hz: Math.round(hz * 10) / 10 };
   }
 
   // ── JOIN: snapshots' self-view vs captured packets ──────────────────────
-  const idx = new Map(); // `${epoch}#${seq}` -> packet
-  for (const p of packets) idx.set(`${p.epoch}#${p.seq}`, p);
+  const idx = new Map(); // `${source}#${epoch}#${seq}` -> packet
+  for (const p of packets) idx.set(`${p.source}#${p.epoch}#${p.seq}`, p);
   const snaps = golden.events.filter((e) => e.kind === 'browser_snapshot'
     && e.snapshot && e.snapshot.audio_tap && e.snapshot.audio_tap.last_seq);
   const join = { snapshots: snaps.length, checked: 0, mismatches: [] };
   for (const s of snaps) {
     const at = s.snapshot.audio_tap;
+    const snapSource = at.source_id || SOURCE_ID; // snapshots come from the browser tap
     for (const [p, seq] of Object.entries(at.last_seq)) {
-      const pkt = idx.get(`${at.boot_epoch}#${seq}`);
+      const pkt = idx.get(`${snapSource}#${at.boot_epoch}#${seq}`);
       join.checked += 1;
       if (!pkt || pkt.path !== p || Math.abs(pkt.value - at.last[p]) > 1e-9) {
         if (join.mismatches.length < 10) {
@@ -186,7 +200,7 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
   fs.writeFileSync(path.join(outDir, 'audiotap-validation.json'), JSON.stringify(validation, null, 2));
 
   if (!quiet) {
-    console.log(`audio tap: ${packets.length} packets over ${byEpoch.size} page epoch(s)`);
+    console.log(`audio tap: ${packets.length} packets over ${byEpoch.size} writer epoch segment(s)`);
     console.log(`  ${(drift.length ? 'REGRESSION' : 'MATCH').padEnd(20)} drift     module table == manifest declarations`);
     console.log(`  ${(hygieneOk ? 'MATCH' : 'REGRESSION').padEnd(20)} hygiene   rejected ${rejected}, policy warns ${policyWarns}`);
     console.log(`  ${(contractOk ? 'MATCH' : 'REGRESSION').padEnd(20)} contract  values/identity/order/gaps/rate `

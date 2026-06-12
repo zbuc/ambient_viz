@@ -1,0 +1,38 @@
+{
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://pain-material.local/analysis/audio-tap",
+    "instanceId": "analysis",
+    "humanLabel": "Audio analysis sidecar (Rust, main mixdown)",
+    "type": "analysis-sidecar",
+    "firmwareVersion": "analysis/audio-tap",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "audio_tap",
+  "publishes": [
+    { "path": "audio.main.bass", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 1 }, "nominalRateHz": 20, "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 1000, "onStale": "ON_STALE_HOLD",
+      "semantic": "SEMANTIC_NORMALIZED_RATIO" },
+    { "path": "audio.main.mid", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 1 }, "nominalRateHz": 20, "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 1000, "onStale": "ON_STALE_HOLD",
+      "semantic": "SEMANTIC_NORMALIZED_RATIO" },
+    { "path": "audio.main.treble", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 1 }, "nominalRateHz": 20, "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 1000, "onStale": "ON_STALE_HOLD",
+      "semantic": "SEMANTIC_NORMALIZED_RATIO" },
+    { "path": "audio.main.level", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 1 }, "nominalRateHz": 20, "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 1000, "onStale": "ON_STALE_HOLD",
+      "semantic": "SEMANTIC_NORMALIZED_RATIO" },
+    { "path": "audio.main.bass_fast", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 1 }, "nominalRateHz": 20, "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 1000, "onStale": "ON_STALE_HOLD",
+      "semantic": "SEMANTIC_NORMALIZED_RATIO" }
+  ],
+  "subscribes": [
+    { "path": "clock.daisy.position", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE" },
+    { "path": "clock.daisy.rate", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE" }
+  ]
+}
