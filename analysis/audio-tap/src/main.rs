@@ -1,38 +1,39 @@
 //! orrery-audio-tap — the audio analysis sidecar (AUDIO_ANALYSIS_SIDECAR.md).
 //!
-//! v0 scaffold: source (capture or file, by cargo feature + flag) →
-//! sliding-window RMS → TapPublisher → POST /bus/publish, publishing
-//! `audio.main.level` ONLY, at the SHADOW priority (250 — below the
-//! browser tap's 300, so nothing downstream changes). The band compat
-//! surface (AnalyserNode emulation) and the filterbank detector surface
-//! are stage 1; this binary exists so the writer discipline, identity,
-//! and transport are live and gateable (validate-audiotap.js judges this
-//! writer's captures by the same lanes as the browser's).
+//! Stage 1: source (capture or file, by cargo feature + flag) → the
+//! compat analysers (a numeric AnalyserNode emulation, so
+//! bass/mid/treble/level/bass_fast are the browser tap's NUMBERS) + the
+//! filterbank detector bank (kick/pad/lead envelopes, kick_onset EVENTs)
+//! → TapPublisher → POST /bus/publish, at the SHADOW priority (250 —
+//! below the browser tap's 300 on the shared compat paths; the detector
+//! and onset surfaces have no incumbent and resolve from here). File
+//! mode slaves decode position to clock.daisy.* over /bus/events.
 
-// bands + songclock are stage-1 consumers (compat-band emulation, file
-// clock-slave) — present, tested, not yet wired into the v0 loop.
-#[allow(dead_code)]
+mod analyser;
 mod bands;
 mod bus;
+mod clockfeed;
+mod detector;
 mod publisher;
-mod rms;
-#[allow(dead_code)]
 mod songclock;
 mod source;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use clap::Parser;
 
+use analyser::CompatAnalyser;
 use bus::{BusClient, PostResult};
+use detector::DetectorBank;
 use publisher::{next_boot_epoch, paths, Config, TapPublisher};
 use source::AudioSource;
 
 #[derive(Parser, Debug)]
 #[command(name = "orrery-audio-tap", about, version)]
 struct Args {
-    /// Bridge base URL (the /bus/publish ingress)
+    /// Bridge base URL (the /bus/publish ingress + /bus/events clock feed)
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     bridge: String,
 
@@ -42,10 +43,16 @@ struct Args {
     #[arg(long)]
     device: Option<String>,
 
-    /// Decode this file instead of capturing (paced at real time)
+    /// Decode this file instead of capturing (clock-slaved to
+    /// clock.daisy.position unless --free-run)
     #[cfg(feature = "file")]
     #[arg(long)]
     file: Option<PathBuf>,
+
+    /// File mode: ignore the bus clock, pace against the wall clock
+    #[cfg(feature = "file")]
+    #[arg(long)]
+    free_run: bool,
 
     /// Publish priority: 250 = shadow under the browser tap (default),
     /// 300 = authoritative post-cutover
@@ -64,7 +71,12 @@ struct Args {
 fn open_source(args: &Args) -> Result<Box<dyn AudioSource>, String> {
     #[cfg(feature = "file")]
     if let Some(path) = &args.file {
-        return Ok(Box::new(source::file::FileSource::open(path)?));
+        let clock = if args.free_run || args.dry_run {
+            None
+        } else {
+            Some(Arc::new(clockfeed::ClockFeed::start(&args.bridge)))
+        };
+        return Ok(Box::new(source::file::FileSource::open(path, clock)?));
     }
     #[cfg(feature = "capture")]
     {
@@ -105,10 +117,17 @@ fn main() {
         client.publish(pkts)
     };
 
-    // 2048 samples at the source rate ≈ the browser analyser's
-    // time-domain window; resized to ~43 ms once the rate is known.
-    let mut meter = rms::BlockRms::new(2048);
+    // Browser parity: main analyser (2048, smoothing 0.85) + transient
+    // analyser (1024, 0.3); smoothing stepped at the page's rAF cadence,
+    // sample-counted (sample_rate/60) so file mode is deterministic.
+    let mut main_an = CompatAnalyser::new(2048, 0.85);
+    let mut trans_an = CompatAnalyser::new(1024, 0.3);
+    let mut bank: Option<DetectorBank> = None; // needs the source rate
+    let mut tick_every: u64 = 800;
+    let mut since_tick: u64 = 0;
+    let mut time_bytes: Vec<u8> = Vec::new();
     let mut mono: Vec<f32> = Vec::new();
+    let mut fires: Vec<detector::OnsetFire> = Vec::new();
     let t0 = Instant::now();
 
     eprintln!(
@@ -121,10 +140,50 @@ fn main() {
     );
 
     while let Some(block) = src.next_block() {
+        let sr = block.sample_rate;
+        let bank = bank.get_or_insert_with(|| {
+            tick_every = (sr as u64 / 60).max(1);
+            DetectorBank::new(sr as f64)
+        });
         block.downmix_into(&mut mono);
-        meter.push(&mono);
+
+        main_an.push(&mono);
+        trans_an.push(&mono);
+        since_tick += mono.len() as u64;
+        while since_tick >= tick_every {
+            since_tick -= tick_every;
+            main_an.tick();
+            trans_an.tick();
+        }
+
+        fires.clear();
+        let det = bank.process(&mono, &mut fires);
         let at_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        publisher.frame(&[(paths::LEVEL, meter.value())], at_ms, &mut post);
+        for f in &fires {
+            publisher.event(paths::KICK_ONSET, f.strength, at_ms, &mut post);
+        }
+
+        main_an.time_bytes_into(&mut time_bytes);
+        let b = bands::compute_bands(
+            main_an.freq_bytes(),
+            &time_bytes,
+            Some(trans_an.freq_bytes()),
+            sr as f64,
+        );
+        publisher.frame(
+            &[
+                (paths::BASS, b.bass),
+                (paths::MID, b.mid),
+                (paths::TREBLE, b.treble),
+                (paths::LEVEL, b.level),
+                (paths::BASS_FAST, b.bass_fast),
+                (paths::KICK, det.kick),
+                (paths::PAD, det.pad),
+                (paths::LEAD, det.lead),
+            ],
+            at_ms,
+            &mut post,
+        );
         if publisher.disabled() {
             eprintln!("audio-tap: disabled by the bridge (403) — exiting");
             std::process::exit(3);

@@ -38,6 +38,7 @@ const { loadSession } = require('../replay/capture-io');
 const { PATHS, SOURCE_ID } = require('../../static/audio-tap');
 
 const MANIFEST_FILE = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest', 'modules', 'audio-tap.json');
+const SIDECAR_MANIFEST_FILE = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest', 'modules', 'audio-tap-sidecar.json');
 // audio.main.* is a multi-writer surface since the sidecar scaffold
 // (AUDIO_ANALYSIS_SIDECAR.md): the gate accepts any allowlisted tap
 // identity and judges each writer's stream independently (order/gap/rate
@@ -67,8 +68,20 @@ function parseArgs(argv) {
 function validateAudioTap({ goldenDir, outDir, quiet = false }) {
   const manifest = JSON.parse(fs.readFileSync(MANIFEST_FILE, 'utf8'));
   const declared = new Map(manifest.publishes.map((d) => [d.path, d]));
+  // The sidecar manifest declares a SUPERSET (detector states + onset
+  // EVENTs, stage 1) — its paths join the declared set so sidecar-only
+  // signals are validated, not silently skipped.
+  const sidecar = JSON.parse(fs.readFileSync(SIDECAR_MANIFEST_FILE, 'utf8'));
+  const declaredAll = new Map(declared);
+  for (const d of sidecar.publishes) {
+    if (!declaredAll.has(d.path)) declaredAll.set(d.path, d);
+  }
+  const stateSet = new Set([...declaredAll.entries()]
+    .filter(([, d]) => d.shape !== 'SHAPE_EVENT').map(([p]) => p));
+  const eventSet = new Set([...declaredAll.entries()]
+    .filter(([, d]) => d.shape === 'SHAPE_EVENT').map(([p]) => p));
 
-  // ── DRIFT: module table == manifest declarations ────────────────────────
+  // ── DRIFT: browser module table == browser manifest declarations ────────
   const moduleSet = new Set(Object.values(PATHS));
   const drift = [];
   for (const p of moduleSet) if (!declared.has(p)) drift.push(`module publishes ${p}: not in the manifest`);
@@ -77,6 +90,8 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
   const golden = loadSession(goldenDir);
   const rx = golden.events.filter((e) => e.kind === 'bus_rx');
   const packets = [];
+  const events = [];
+  const eventViolations = [];
   let rejected = 0;
   let policyWarns = 0;
   for (const e of rx) {
@@ -84,7 +99,7 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
     policyWarns += e.policy_warns || 0;
     for (const pkt of e.packets || []) {
       const st = pkt && pkt.state;
-      if (st && moduleSet.has(st.path)) {
+      if (st && stateSet.has(st.path)) {
         packets.push({
           t: e.t_mono_ms,
           path: st.path,
@@ -93,11 +108,24 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
           epoch: pkt.source ? pkt.source.bootEpoch : null,
           source: pkt.source ? pkt.source.sourceId : null,
         });
+        continue;
+      }
+      const ev = pkt && pkt.event;
+      if (ev && ev.path && ev.path.startsWith('audio.main.')) {
+        if (!eventSet.has(ev.path)) {
+          if (eventViolations.length < 10) eventViolations.push({ t: e.t_mono_ms, kind: 'undeclared_event_path', path: ev.path });
+          continue;
+        }
+        const payload = ev.payload && (typeof ev.payload.number === 'number' ? ev.payload.number : ev.payload.integer);
+        if (typeof payload !== 'number' || !isFinite(payload) || payload < 0 || payload > 1) {
+          if (eventViolations.length < 10) eventViolations.push({ t: e.t_mono_ms, kind: 'bad_event_payload', path: ev.path, payload });
+        }
+        events.push({ t: e.t_mono_ms, path: ev.path });
       }
     }
   }
 
-  if (!packets.length) {
+  if (!packets.length && !events.length) {
     const validation = {
       schema: 'audiotap-validation.v1', phase: '8A',
       verdict: 'ABSENT', blocks: false,
@@ -141,8 +169,8 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
   const maxGapStats = {};
   for (const [pk, list] of byPath) {
     const p = list[0].path;
-    const staleMs = declared.get(p).staleAfterMs || 1000;
-    const maxRate = declared.get(p).maxRateHz || 30;
+    const staleMs = declaredAll.get(p).staleAfterMs || 1000;
+    const maxRate = declaredAll.get(p).maxRateHz || 30;
     let maxGap = 0;
     for (let i = 1; i < list.length; i++) {
       const gap = list[i].t - list[i - 1].t;
@@ -181,7 +209,9 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
   const hygieneOk = rejected === 0 && policyWarns === 0;
   const contractOk = !contract.values.length && !contract.identity.length
     && !contract.order.length && !contract.gaps.length && !contract.rate.length;
-  const pass = drift.length === 0 && hygieneOk && contractOk && join.mismatches.length === 0;
+  const eventsOk = eventViolations.length === 0;
+  const pass = drift.length === 0 && hygieneOk && contractOk && eventsOk
+    && join.mismatches.length === 0;
 
   const validation = {
     schema: 'audiotap-validation.v1',
@@ -192,6 +222,7 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
     drift,
     hygiene: { rejected, policy_warns: policyWarns, ok: hygieneOk },
     contract,
+    events: { fired: events.length, violations: eventViolations },
     join,
     verdict: pass ? 'MATCH' : 'REGRESSION',
     blocks: !pass,
@@ -205,6 +236,9 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
     console.log(`  ${(hygieneOk ? 'MATCH' : 'REGRESSION').padEnd(20)} hygiene   rejected ${rejected}, policy warns ${policyWarns}`);
     console.log(`  ${(contractOk ? 'MATCH' : 'REGRESSION').padEnd(20)} contract  values/identity/order/gaps/rate `
       + `(${Object.entries(maxGapStats).map(([p, s]) => `${p.split('.').pop()}@${s.rate_hz}Hz`).join(' ')})`);
+    if (events.length || eventViolations.length) {
+      console.log(`  ${(eventsOk ? 'MATCH' : 'REGRESSION').padEnd(20)} events    ${events.length} fired, ${eventViolations.length} violations`);
+    }
     console.log(`  ${(join.mismatches.length ? 'REGRESSION' : 'MATCH').padEnd(20)} join      ${join.checked} snapshot pairs -> packets`);
     console.log(`\nverdict: ${validation.verdict}  (report: ${path.join(outDir, 'audiotap-validation.json')})`);
   }

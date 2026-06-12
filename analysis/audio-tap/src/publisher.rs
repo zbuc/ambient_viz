@@ -10,20 +10,25 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::bus::{Monotonic, Packet, PostResult, Source, State, Time, Value, SCHEMA};
+use crate::bus::{Event, Monotonic, Packet, PostResult, Source, State, Time, Value, SCHEMA};
 
 pub const SOURCE_ID: &str = "spiffe://pain-material.local/analysis/audio-tap";
 
 /// field paths under the tap instance (manifest of record:
 /// projects/pain-material/manifest/modules/audio-tap-sidecar.json).
-/// v0 publishes LEVEL only; the rest go live with the stage-1 surfaces.
-#[allow(dead_code)]
 pub mod paths {
+    // compat surface (browser-tap continuity, STATE)
     pub const BASS: &str = "audio.main.bass";
     pub const MID: &str = "audio.main.mid";
     pub const TREBLE: &str = "audio.main.treble";
     pub const LEVEL: &str = "audio.main.level";
     pub const BASS_FAST: &str = "audio.main.bass_fast";
+    // detector surface (sole writer, STATE)
+    pub const KICK: &str = "audio.main.kick";
+    pub const PAD: &str = "audio.main.pad";
+    pub const LEAD: &str = "audio.main.lead";
+    // onset surface (EVENT)
+    pub const KICK_ONSET: &str = "audio.main.kick_onset";
 }
 
 /// Boot epoch (BUS_PROTOCOL.md ordering key): a file-persisted counter —
@@ -135,35 +140,76 @@ impl TapPublisher {
                 continue;
             }
             self.seq += 1;
-            packets.push(Packet {
-                schema: SCHEMA.to_string(),
-                source: Source {
-                    source_id: self.cfg.source_id.clone(),
-                    seq: self.seq,
-                    boot_epoch: self.cfg.boot_epoch,
-                },
-                time: Time {
-                    monotonic: Monotonic {
-                        device: self.cfg.device.clone(),
-                        nanos: (at_ms * 1e6).round() as u64,
-                    },
-                },
-                priority: self.cfg.priority,
-                state: State {
-                    path: path.to_string(),
-                    value: Value::Number(v),
-                },
+            let mut pkt = self.packet_shell(at_ms);
+            pkt.state = Some(State {
+                path: path.to_string(),
+                value: Value::Number(v),
             });
+            packets.push(pkt);
             self.last_sent.insert(path, v);
             self.last_sent_at.insert(path, at_ms);
         }
         if packets.is_empty() {
             return;
         }
+        self.send(&packets, at_ms, post);
+    }
 
+    /// One discrete fire (onset EVENT): no decimation, no dedupe — an
+    /// event is news by definition; rate is bounded upstream by the
+    /// detector's cooldown. Shares the per-source seq with the states.
+    pub fn event(
+        &mut self,
+        path: &'static str,
+        strength: f64,
+        at_ms: f64,
+        post: &mut dyn FnMut(&[Packet]) -> PostResult,
+    ) {
+        if self.disabled || !at_ms.is_finite() || at_ms < self.blocked_until {
+            return;
+        }
+        if !strength.is_finite() {
+            return; // rule-13
+        }
+        let v = (strength.clamp(0.0, 1.0) * self.cfg.quant).round() / self.cfg.quant;
+        self.seq += 1;
+        let mut pkt = self.packet_shell(at_ms);
+        pkt.event = Some(Event {
+            path: path.to_string(),
+            payload: Value::Number(v),
+        });
+        self.send(std::slice::from_ref(&pkt), at_ms, post);
+    }
+
+    fn packet_shell(&self, at_ms: f64) -> Packet {
+        Packet {
+            schema: SCHEMA.to_string(),
+            source: Source {
+                source_id: self.cfg.source_id.clone(),
+                seq: self.seq,
+                boot_epoch: self.cfg.boot_epoch,
+            },
+            time: Time {
+                monotonic: Monotonic {
+                    device: self.cfg.device.clone(),
+                    nanos: (at_ms * 1e6).round() as u64,
+                },
+            },
+            priority: self.cfg.priority,
+            state: None,
+            event: None,
+        }
+    }
+
+    fn send(
+        &mut self,
+        packets: &[Packet],
+        at_ms: f64,
+        post: &mut dyn FnMut(&[Packet]) -> PostResult,
+    ) {
         self.counters.posts += 1;
         self.counters.packets += packets.len() as u64;
-        match post(&packets) {
+        match post(packets) {
             PostResult::Ok => {}
             PostResult::Forbidden => {
                 self.disabled = true;
@@ -279,6 +325,28 @@ mod tests {
     }
 
     #[test]
+    fn events_bypass_decimation_and_dedupe_share_the_seq() {
+        let mut p = pub_with(250);
+        let (posts, mut sink) = collect();
+        p.frame(BANDS, 1000.0, &mut sink);
+        // two fires inside one decimation period, identical strength
+        p.event(paths::KICK_ONSET, 0.4, 1010.0, &mut sink);
+        p.event(paths::KICK_ONSET, 0.4, 1020.0, &mut sink);
+        let posts = posts.borrow();
+        assert_eq!(posts.len(), 3);
+        let e1 = &posts[1][0];
+        let e2 = &posts[2][0];
+        assert!(e1.state.is_none());
+        assert_eq!(e1.event.as_ref().unwrap().path, paths::KICK_ONSET);
+        assert_eq!(e1.event.as_ref().unwrap().payload, Value::Number(0.4));
+        assert!(e2.source.seq > e1.source.seq);
+        // and a state frame after the events keeps the shared counter monotonic
+        let (posts2, mut sink2) = collect();
+        p.frame(&[(paths::BASS, 0.9)], 1100.0, &mut sink2);
+        assert!(posts2.borrow()[0][0].source.seq > e2.source.seq);
+    }
+
+    #[test]
     fn non_finite_skipped_out_of_range_clamped() {
         let mut p = pub_with(250);
         let (posts, mut sink) = collect();
@@ -289,8 +357,9 @@ mod tests {
         );
         let posts = posts.borrow();
         assert_eq!(posts[0].len(), 1);
-        assert_eq!(posts[0][0].state.path, paths::LEVEL);
-        assert_eq!(posts[0][0].state.value, Value::Number(1.0));
+        let st = posts[0][0].state.as_ref().unwrap();
+        assert_eq!(st.path, paths::LEVEL);
+        assert_eq!(st.value, Value::Number(1.0));
     }
 
     #[test]

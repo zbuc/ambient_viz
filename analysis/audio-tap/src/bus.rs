@@ -48,13 +48,24 @@ pub struct State {
     pub value: Value,
 }
 
+/// EVENT body — append-only fires (onsets). No dedupe_key: the bus
+/// defaults to source#epoch#seq, which is exactly one-fire-one-packet.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Event {
+    pub path: String,
+    pub payload: Value,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Packet {
     pub schema: String,
     pub source: Source,
     pub time: Time,
     pub priority: i64,
-    pub state: State,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<State>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<Event>,
 }
 
 /// What a post attempt resolved to — the three cases the publisher's
@@ -114,12 +125,37 @@ mod tests {
         let pkt: Packet = serde_json::from_str(BROWSER_PACKET).unwrap();
         assert_eq!(pkt.schema, SCHEMA);
         assert_eq!(pkt.source.boot_epoch, 101);
-        assert_eq!(pkt.state.value, Value::Number(0.5));
+        assert_eq!(pkt.state.as_ref().unwrap().value, Value::Number(0.5));
+        assert!(pkt.event.is_none());
         let reserialized: serde_json::Value =
             serde_json::to_value(&pkt).unwrap();
         let original: serde_json::Value =
             serde_json::from_str(BROWSER_PACKET).unwrap();
         assert_eq!(reserialized, original);
+    }
+
+    #[test]
+    fn event_packet_serializes_with_event_arm_only() {
+        let pkt = Packet {
+            schema: SCHEMA.to_string(),
+            source: Source {
+                source_id: "s".into(),
+                seq: 7,
+                boot_epoch: 1,
+            },
+            time: Time {
+                monotonic: Monotonic { device: "analysis".into(), nanos: 1 },
+            },
+            priority: 250,
+            state: None,
+            event: Some(Event {
+                path: "audio.main.kick_onset".into(),
+                payload: Value::Number(0.4),
+            }),
+        };
+        let j = serde_json::to_value(&pkt).unwrap();
+        assert!(j.get("state").is_none());
+        assert_eq!(j["event"]["payload"]["number"], 0.4);
     }
 
     #[test]
