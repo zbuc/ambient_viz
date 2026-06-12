@@ -109,7 +109,7 @@ function init(extraMeta = {}) {
     const repoRoot = path.resolve(__dirname, '..', '..');
     const root = process.env.CAPTURE_DIR
       ? path.resolve(process.env.CAPTURE_DIR)
-      : path.join(repoRoot, 'projects', 'pain-material', 'fixtures');
+      : path.join(repoRoot, 'projects', extraMeta.project || 'pain-material', 'fixtures');
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace(/-\d{3}Z$/, 'Z');
     const sessionId = `${stamp}-pid${process.pid}`;
     sessionDir = path.join(root, sessionId);

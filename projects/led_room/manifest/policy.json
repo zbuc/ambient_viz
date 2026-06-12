@@ -1,0 +1,51 @@
+{
+  "schema": "policy.v1",
+  "project": "led_room",
+  "authorityLadder": {
+    "safety": 1000,
+    "manual_blackout": 900,
+    "local_ui": 700,
+    "timeline": 500,
+    "clock": 400,
+    "sensor": 300,
+    "idle": 100
+  },
+  "roles": [
+    {
+      "name": "plugin_host",
+      "canPublish": [
+        "seq.*",
+        "music.genome.*"
+      ],
+      "cannotPublish": [
+        "clock.*",
+        "safety.*",
+        "sensor.*",
+        "touch.*",
+        "ui.*",
+        "transport.*",
+        "fx.*"
+      ],
+      "canSubscribe": [
+        "sensor.*",
+        "clock.*",
+        "music.*"
+      ],
+      "maxPriority": 300
+    }
+  ],
+  "allow": [
+    {
+      "stableId": "spiffe://led-room.local/bridge/plugin-host",
+      "role": "plugin_host",
+      "instanceId": "plugins"
+    }
+  ],
+  "groups": [],
+  "runtimeModes": {
+    "auth": "WARN",
+    "signature": "NONE",
+    "priority": "WARN",
+    "timeSync": "OFF"
+  }
+}

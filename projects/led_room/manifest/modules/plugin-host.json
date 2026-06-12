@@ -1,0 +1,186 @@
+{
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://led-room.local/bridge/plugin-host",
+    "instanceId": "plugins",
+    "humanLabel": "Plugin host (bridge-hosted)",
+    "type": "plugin-host",
+    "firmwareVersion": "bridge",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "plugin_host",
+  "publishes": [
+    {
+      "path": "music.genome.density",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.tension",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.kick_fill",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.hat_fill",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.markov_temp",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.brightness",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.bass_activity",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.harmonic_rate",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.register",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.stab_color",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.note_length",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.bass_style",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.recall",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.arc_depth",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.wander",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.swing",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.dropout",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.color",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    },
+    {
+      "path": "music.genome.freeze_punct",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE",
+      "unit": "ratio",
+      "nominalRateHz": 0.05,
+      "maxRateHz": 4,
+      "dedupe": true
+    }
+  ],
+  "subscribes": []
+}

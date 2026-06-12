@@ -6,6 +6,12 @@ const { pathToFileURL } = require('url');
 const { EventEmitter } = require('events');
 
 const STATIC_ROOT = path.resolve(__dirname, '..', '..', 'static');
+// Which project's manifests/graphs/plugins this bridge boots (one project
+// per bridge process; the full multi-project selector is backlog). The
+// default stays the kiosk exhibit; PROJECT=led_room boots the incubating
+// LED-room project instead.
+const PROJECT = process.env.PROJECT || 'pain-material';
+const PROJECT_DIR = path.resolve(__dirname, '..', '..', 'projects', PROJECT);
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const MOCK = process.env.MOCK === '1' || process.env.MOCK === 'true';
@@ -56,6 +62,7 @@ function publish(name, value) {
 
 capture.init({
   config: { port: PORT, host: HOST, mock: MOCK, ingest_token: INGEST_TOKEN ? '<set>' : '' },
+  project: PROJECT, // fixtures land under projects/<project>/fixtures
 });
 
 // Manifest registry + ProjectPolicy, WARN mode (phase 3). Loaded BEFORE the
@@ -65,7 +72,7 @@ capture.init({
 const { loadRegistry, applyRegistry } = require('./registry');
 let registry = null;
 try {
-  registry = loadRegistry(path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest'));
+  registry = loadRegistry(path.join(PROJECT_DIR, 'manifest'));
   applyRegistry(registry, orreryBus);
   console.log(`orrery registry: ${registry.bySourceId.size} modules for "${registry.project}" `
     + `(modes auth:${registry.modes.auth} sig:${registry.modes.signature} `
@@ -100,7 +107,7 @@ const routerEngines = [];
 try {
   const { loadGraphDir } = require('./router-graph');
   const { GraphEngine } = require('./router-engine');
-  const graphsDir = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest', 'graphs');
+  const graphsDir = path.join(PROJECT_DIR, 'manifest', 'graphs');
   const compileOpts = { instanceId: 'main' };
   if (registry) {
     compileOpts.declaredPaths = new Set();
@@ -169,7 +176,7 @@ console.log(`orrery bus: shadow dual-write on (boot_epoch ${orreryBus.bootEpoch}
 let pluginHost = null;
 try {
   const { createPluginHost, loadBindingDir } = require('./plugin-host');
-  const pluginsDir = path.resolve(__dirname, '..', '..', 'projects', 'pain-material', 'manifest', 'plugins');
+  const pluginsDir = path.join(PROJECT_DIR, 'manifest', 'plugins');
   const { bindings, failures: loadFailures } = loadBindingDir(pluginsDir);
   const declared = new Map();
   if (registry) {

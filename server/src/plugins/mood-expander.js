@@ -60,10 +60,14 @@ const GENES = [
   'freeze_punct',
 ];
 
-// Same hardcoded project root as index.js's pluginsDir — multi-project
-// support relocates both together.
+// The anchors are led_room project data (the mood plane belongs to the
+// incubating generative-music project, not Pain Material — ruling
+// 2026-06-12; projects/led_room/PROJECT.md). The plugin CODE stays a
+// platform asset; only the binding + data live with the project. A
+// per-project data path rides the multi-project-bridge backlog item;
+// until then this constant points at the one project that binds it.
 const MOODS_PATH = path.resolve(
-  __dirname, '..', '..', '..', 'projects', 'pain-material', 'manifest', 'moods.json',
+  __dirname, '..', '..', '..', 'projects', 'led_room', 'manifest', 'moods.json',
 );
 
 const EMIT_EPS = 1e-6;
