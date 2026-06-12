@@ -266,7 +266,23 @@ class GraphEngine {
     // bridge already injects virtually in the sim — borrowing it keeps every
     // stateful node deterministic under replay for free.
     this.nodeState = new Map();
-    this._ctx = { now: () => this.bus.nowMono(), state: this.nodeState, fired: new Map() };
+    // The engine clock for timestamp-driven nodes (Smooth, Envelope) is the
+    // TRIGGERING PACKET'S stamp, exactly as ROUTER_IR.md states ("Δt taken
+    // from the engine clock at evaluation == the triggering packet's
+    // arrival; virtual time in the sim"). Live, wall-time-at-evaluation only
+    // approximates that — every engine/plugin handler ahead of this one adds
+    // microseconds, and that skew (absent in the sim, which freezes virtual
+    // time within a stamp) is the whole live-vs-sim filter-memory residue
+    // class the phase-5 comparator tolerates. Clocking off the stamp makes
+    // live dt == the inter-arrival times the capture records — the residue
+    // collapses. Outside a packet evaluation (the seeding pass) the bus
+    // clock stands in.
+    this._evalNow = null;
+    this._ctx = {
+      now: () => (this._evalNow !== null ? this._evalNow : this.bus.nowMono()),
+      state: this.nodeState,
+      fired: new Map(),
+    };
     // Const nodes are value sources with no arrival: seed them up front so
     // they are readable the moment a live dep fires their consumers. Latches
     // likewise seed their idle value (phase 6.1) — a latch that has never
@@ -307,7 +323,13 @@ class GraphEngine {
     // treated as missing, the previous good ZOH value holds.
     if (typeof v === 'number' && !Number.isFinite(v)) { this.nonfiniteDropped += 1; return; }
     for (const id of inputIds) this.values.set(id, v);
-    this._evaluate(new Set(inputIds), true);
+    const nanos = rec.pkt.time && rec.pkt.time.monotonic ? rec.pkt.time.monotonic.nanos : null;
+    this._evalNow = typeof nanos === 'number' ? nanos / 1e6 : null;
+    try {
+      this._evaluate(new Set(inputIds), true);
+    } finally {
+      this._evalNow = null;
+    }
   }
 
   // Recompute everything downstream of the changed inputs, in topo order.

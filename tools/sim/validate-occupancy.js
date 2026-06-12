@@ -186,10 +186,22 @@ function validateOccupancy({ goldenDir, graphFile = DEFAULT_GRAPH, motion = 'aut
   const motionPresence = motion === 'auto' ? (motionModeSeen || hasMotion) : motion === 'on';
 
   // Legacy lane: tapped edges when the capture has them, else the model.
-  const tapped = golden.events.filter((e) => e.kind === 'legacy_occupancy')
+  // The tap's first record is the BOOT BASELINE (occupied=false at the first
+  // trigger evaluation), not a transition — normalize to edges from the
+  // implicit false start, exactly as trajectoryEdges does for the graph lane
+  // (found on the first real gate session: the baseline record misaligned
+  // the whole comparison by one).
+  const tappedRaw = golden.events.filter((e) => e.kind === 'legacy_occupancy')
     .map((e) => ({ t: e.t_mono_ms, to: !!e.occupied }));
-  const legacyLane = tapped.length ? tapped : legacyModel(entries, startT, motionPresence);
-  const legacySource = tapped.length ? 'capture legacy_occupancy tap' : `frozen-spec model (motion ${motionPresence ? 'ON' : 'OFF'})`;
+  const tapped = [];
+  {
+    let prev = false;
+    for (const e of tappedRaw) {
+      if (e.to !== prev) { tapped.push(e); prev = e.to; }
+    }
+  }
+  const legacyLane = tappedRaw.length ? tapped : legacyModel(entries, startT, motionPresence);
+  const legacySource = tappedRaw.length ? 'capture legacy_occupancy tap' : `frozen-spec model (motion ${motionPresence ? 'ON' : 'OFF'})`;
 
   const trajectory = collected[OCC_PATH] || [];
   const graphLane = trajectoryEdges(trajectory);
