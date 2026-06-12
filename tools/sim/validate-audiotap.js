@@ -186,6 +186,97 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
     maxGapStats[pk] = { packets: list.length, max_gap_ms: Math.round(maxGap), rate_hz: Math.round(hz * 10) / 10 };
   }
 
+  // ── A/B: two writers on one compat path (the cutover's evidence lane) ───
+  // When a capture carries BOTH taps (browser + sidecar) on a shared path,
+  // ZOH-resample each writer's stream onto a common grid over their
+  // overlap (minus warmup: analyser smoothing + envelope state + page-load
+  // skew) and demand the values agree — the sidecar's AnalyserNode
+  // emulation is supposed to be the browser's NUMBERS, and this is where
+  // that claim is tested. Single-writer captures skip the lane (ABSENT).
+  const AB_GRID_MS = 100;
+  const AB_WARMUP_MS = 3000;
+  const AB_EPS_P95 = 0.05; // |a-b| at p95 over the overlap, per path
+  // bass_fast is the low-smoothing transient band: comparing two ~60 Hz
+  // tickers' 3-decimal samples on a 100 ms grid smears its attacks, so
+  // its allowance is wider — comparison noise, measured in the first
+  // dual-writer soak (true-lag mean 0.036, p95 0.099, fit ~identity).
+  const AB_EPS_BY_PATH = { 'audio.main.bass_fast': 0.12 };
+  const ab = { paths: {}, compared: 0, violations: [] };
+  {
+    // path -> source -> [{t, value}]
+    const perPath = new Map();
+    for (const [pk, list] of byPath) {
+      const p = list[0].path;
+      if (!perPath.has(p)) perPath.set(p, new Map());
+      perPath.get(p).set(pk.split('|')[0], list);
+    }
+    const zoh = (list, t) => {
+      // list is t-ordered (capture order); last sample at or before t
+      let v = null;
+      for (const s of list) {
+        if (s.t > t) break;
+        v = s.value;
+      }
+      return v;
+    };
+    // The two writers may sit up to their seek thresholds apart in SONG
+    // time (each re-syncs to the clock independently) — sub-second skew
+    // is sync slack, not emulation error. Search a WIDE lag range so a
+    // misaligned writer is diagnosed (the first soak found a 5.2 s
+    // VBR-seek error this way), but alignment is part of the contract:
+    // the verdict requires the best lag itself within AB_LAG_PASS_MS.
+    const AB_LAG_MAX_MS = 3000;
+    const AB_LAG_PASS_MS = 1000;
+    const AB_LAG_STEP_MS = 50;
+    const diffsAtLag = (lists, t0, t1, lag) => {
+      const out = [];
+      for (let t = t0; t <= t1; t += AB_GRID_MS) {
+        const a = zoh(lists[0], t);
+        const b = zoh(lists[1], t + lag);
+        if (typeof a !== 'number' || typeof b !== 'number') continue;
+        out.push(Math.abs(a - b));
+      }
+      return out;
+    };
+    for (const [p, bySource] of perPath) {
+      if (bySource.size < 2) continue;
+      const lists = [...bySource.values()];
+      const t0 = Math.max(...lists.map((l) => l[0].t)) + AB_WARMUP_MS;
+      const t1 = Math.min(...lists.map((l) => l[l.length - 1].t)) - AB_LAG_MAX_MS;
+      if (t1 - t0 < 5000) {
+        ab.paths[p] = { note: `overlap too short (${Math.round(t1 - t0)} ms)` };
+        continue;
+      }
+      let best = null;
+      for (let lag = -AB_LAG_MAX_MS; lag <= AB_LAG_MAX_MS; lag += AB_LAG_STEP_MS) {
+        const diffs = diffsAtLag(lists, t0, t1, lag);
+        if (!diffs.length) continue;
+        const mean = diffs.reduce((s, d) => s + d, 0) / diffs.length;
+        if (!best || mean < best.mean) best = { lag, mean, diffs };
+      }
+      if (!best) {
+        ab.paths[p] = { note: 'no comparable grid points' };
+        continue;
+      }
+      best.diffs.sort((a, b) => a - b);
+      const eps = AB_EPS_BY_PATH[p] || AB_EPS_P95;
+      const p95 = best.diffs[Math.floor(best.diffs.length * 0.95)];
+      const stat = {
+        points: best.diffs.length,
+        lag_ms: best.lag,
+        mean: Math.round(best.mean * 10000) / 10000,
+        p95,
+        max: best.diffs[best.diffs.length - 1],
+        eps_p95: eps,
+        lag_pass_ms: AB_LAG_PASS_MS,
+        pass: p95 <= eps && Math.abs(best.lag) <= AB_LAG_PASS_MS,
+      };
+      ab.paths[p] = stat;
+      ab.compared += 1;
+      if (!stat.pass) ab.violations.push({ path: p, p95: stat.p95, max: stat.max, lag_ms: stat.lag_ms });
+    }
+  }
+
   // ── JOIN: snapshots' self-view vs captured packets ──────────────────────
   const idx = new Map(); // `${source}#${epoch}#${seq}` -> packet
   for (const p of packets) idx.set(`${p.source}#${p.epoch}#${p.seq}`, p);
@@ -210,8 +301,9 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
   const contractOk = !contract.values.length && !contract.identity.length
     && !contract.order.length && !contract.gaps.length && !contract.rate.length;
   const eventsOk = eventViolations.length === 0;
+  const abOk = ab.violations.length === 0;
   const pass = drift.length === 0 && hygieneOk && contractOk && eventsOk
-    && join.mismatches.length === 0;
+    && abOk && join.mismatches.length === 0;
 
   const validation = {
     schema: 'audiotap-validation.v1',
@@ -223,6 +315,7 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
     hygiene: { rejected, policy_warns: policyWarns, ok: hygieneOk },
     contract,
     events: { fired: events.length, violations: eventViolations },
+    ab,
     join,
     verdict: pass ? 'MATCH' : 'REGRESSION',
     blocks: !pass,
@@ -238,6 +331,13 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
       + `(${Object.entries(maxGapStats).map(([p, s]) => `${p.split('.').pop()}@${s.rate_hz}Hz`).join(' ')})`);
     if (events.length || eventViolations.length) {
       console.log(`  ${(eventsOk ? 'MATCH' : 'REGRESSION').padEnd(20)} events    ${events.length} fired, ${eventViolations.length} violations`);
+    }
+    if (ab.compared) {
+      console.log(`  ${(abOk ? 'MATCH' : 'REGRESSION').padEnd(20)} A/B       ${ab.compared} shared path(s): `
+        + Object.entries(ab.paths).filter(([, s]) => s.p95 != null)
+          .map(([p, s]) => `${p.split('.').pop()} p95=${s.p95.toFixed(3)}@${s.lag_ms}ms`).join(' '));
+    } else {
+      console.log(`  ${'ABSENT'.padEnd(20)} A/B       single writer in this capture`);
     }
     console.log(`  ${(join.mismatches.length ? 'REGRESSION' : 'MATCH').padEnd(20)} join      ${join.checked} snapshot pairs -> packets`);
     console.log(`\nverdict: ${validation.verdict}  (report: ${path.join(outDir, 'audiotap-validation.json')})`);

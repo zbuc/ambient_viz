@@ -100,7 +100,12 @@ impl FileSource {
             time: Time::new(target_s as u64, target_s.fract()),
             track_id: Some(self.track_id),
         };
-        match self.format.seek(SeekMode::Coarse, to) {
+        // ACCURATE, not Coarse: the piece is a VBR mp3, and a coarse
+        // (byte-estimate) seek landed ~5 s away from its reported
+        // actual_ts in the first dual-writer soak — a constant content
+        // offset the slave then trusts forever. Accurate seeking scans,
+        // which costs real time only at session start and loop wraps.
+        match self.format.seek(SeekMode::Accurate, to) {
             Ok(seeked) => {
                 self.decoder.reset();
                 let tb = self
