@@ -45,10 +45,13 @@ pub struct FileSource {
     sample_rate: u32,
     channels: u16,
     clock: Option<Arc<ClockFeed>>,
+    /// No pacing at all — decode flat out (the trace harness's offline
+    /// mode; an 18-minute piece renders in seconds).
+    fast: bool,
 }
 
 impl FileSource {
-    pub fn open(path: &Path, clock: Option<Arc<ClockFeed>>) -> Result<Self, String> {
+    pub fn open(path: &Path, clock: Option<Arc<ClockFeed>>, fast: bool) -> Result<Self, String> {
         let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let mut hint = Hint::new();
@@ -87,10 +90,11 @@ impl FileSource {
             sample_rate,
             channels,
             clock,
+            fast,
         })
     }
 
-    fn position_s(&self) -> f64 {
+    pub fn position_s(&self) -> f64 {
         self.samples_emitted as f64 / self.sample_rate as f64
     }
 
@@ -133,6 +137,9 @@ impl FileSource {
     /// Slaved pacing + drift correction; returns after the clock permits
     /// emitting the block that STARTS at the current decode position.
     fn pace(&mut self) {
+        if self.fast {
+            return;
+        }
         let pos = self.position_s();
         if let Some(cf) = self.clock.clone() {
             if let Some(target) = cf.position() {
@@ -190,7 +197,7 @@ impl AudioSource for FileSource {
     }
 
     fn describe(&self) -> String {
-        let mode = if self.clock.is_some() { "clock-slaved" } else { "free-run" };
+        let mode = if self.fast { "fast" } else if self.clock.is_some() { "clock-slaved" } else { "free-run" };
         format!("file:{} ({mode})", self.label)
     }
 }

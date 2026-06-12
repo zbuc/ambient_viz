@@ -172,6 +172,21 @@ test('publisher: sub-quantum wiggle does not defeat the dedupe', () => {
   assert.equal(posts[1][0].state.path, 'audio.main.bass');
 });
 
+test('publisher: aggregate path (peak) publishes slice max, resets at publish', () => {
+  const { pub, posts } = harness();
+  pub.frame({ peak: 0.2 }, 1000); // tick 1
+  pub.frame({ peak: 0.9 }, 1016); // decimated, hottest — must reach the next packet
+  pub.frame({ peak: 0.3 }, 1032); // decimated
+  pub.frame({ peak: 0.1 }, 1060); // tick 2
+  assert.equal(posts.length, 2);
+  assert.equal(posts[0][0].state.value.number, 0.2);
+  assert.equal(posts[1][0].state.value.number, 0.9);
+  // slice restarted at the 0.9 publish: next tick sees only what came after
+  pub.frame({ peak: 0.15 }, 1120);
+  assert.equal(posts.length, 3);
+  assert.equal(posts[2][0].state.value.number, 0.15);
+});
+
 test('publisher: non-finite and out-of-range values never reach a packet (rule 13)', () => {
   const { pub, posts } = harness();
   pub.frame({ ...BANDS, bass: NaN, level: 1.7 }, 1000);

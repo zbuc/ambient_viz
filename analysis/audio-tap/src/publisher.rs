@@ -23,12 +23,23 @@ pub mod paths {
     pub const TREBLE: &str = "audio.main.treble";
     pub const LEVEL: &str = "audio.main.level";
     pub const BASS_FAST: &str = "audio.main.bass_fast";
+    // slice aggregate (STATE; max since last publish — stage 2)
+    pub const PEAK: &str = "audio.main.peak";
     // detector surface (sole writer, STATE)
     pub const KICK: &str = "audio.main.kick";
     pub const PAD: &str = "audio.main.pad";
     pub const LEAD: &str = "audio.main.lead";
     // onset surface (EVENT)
     pub const KICK_ONSET: &str = "audio.main.kick_onset";
+}
+
+/// Slice-aggregated paths (the time-slice lesson): a point sample at the
+/// publish tick is blind to anything that rose and fell inside the gap,
+/// so these publish the MAX seen since their last published packet —
+/// every frame() call feeds the accumulator even when decimation drops
+/// the frame.
+fn is_aggregate_max(path: &str) -> bool {
+    path == paths::PEAK
 }
 
 /// Boot epoch (BUS_PROTOCOL.md ordering key): a file-persisted counter —
@@ -92,6 +103,7 @@ pub struct TapPublisher {
     counters: Counters,
     last_sent: HashMap<&'static str, f64>,
     last_sent_at: HashMap<&'static str, f64>,
+    slice_max: HashMap<&'static str, f64>, // path -> running max since last publish
 }
 
 impl TapPublisher {
@@ -105,6 +117,7 @@ impl TapPublisher {
             counters: Counters::default(),
             last_sent: HashMap::new(),
             last_sent_at: HashMap::new(),
+            slice_max: HashMap::new(),
         }
     }
 
@@ -120,13 +133,32 @@ impl TapPublisher {
         if self.disabled || !at_ms.is_finite() {
             return;
         }
+        // Aggregates accumulate on EVERY frame — before any decimation
+        // gate — so values inside a dropped frame still reach the packet.
+        for &(path, raw) in values {
+            if is_aggregate_max(path) && raw.is_finite() {
+                let c = raw.clamp(0.0, 1.0);
+                let e = self.slice_max.entry(path).or_insert(c);
+                if c > *e {
+                    *e = c;
+                }
+            }
+        }
         if at_ms - self.last_tick_at < self.cfg.period_ms || at_ms < self.blocked_until {
             return;
         }
         self.last_tick_at = at_ms;
 
         let mut packets = Vec::new();
-        for &(path, raw) in values {
+        for &(path, point) in values {
+            let raw = if is_aggregate_max(path) {
+                match self.slice_max.get(path) {
+                    Some(&m) => m,
+                    None => point,
+                }
+            } else {
+                point
+            };
             if !raw.is_finite() {
                 continue; // rule-13: never publish non-finite
             }
@@ -148,6 +180,9 @@ impl TapPublisher {
             packets.push(pkt);
             self.last_sent.insert(path, v);
             self.last_sent_at.insert(path, at_ms);
+            if is_aggregate_max(path) {
+                self.slice_max.remove(path); // the slice restarts at publish
+            }
         }
         if packets.is_empty() {
             return;
@@ -322,6 +357,27 @@ mod tests {
         assert_eq!(posts.borrow().len(), 1);
         p.frame(&[(paths::BASS, 0.502)], 1100.0, &mut sink);
         assert_eq!(posts.borrow().len(), 2);
+    }
+
+    #[test]
+    fn aggregate_path_publishes_slice_max_and_resets_at_publish() {
+        let mut p = pub_with(250);
+        let (posts, mut sink) = collect();
+        // tick 1 at t=1000 publishes; frames at 1016/1032 are DECIMATED but
+        // their peaks must reach the next packet.
+        p.frame(&[(paths::PEAK, 0.2)], 1000.0, &mut sink);
+        p.frame(&[(paths::PEAK, 0.9)], 1016.0, &mut sink); // decimated, hottest
+        p.frame(&[(paths::PEAK, 0.3)], 1032.0, &mut sink); // decimated
+        p.frame(&[(paths::PEAK, 0.1)], 1060.0, &mut sink); // tick 2
+        let posts = posts.borrow();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0][0].state.as_ref().unwrap().value, Value::Number(0.2));
+        assert_eq!(posts[1][0].state.as_ref().unwrap().value, Value::Number(0.9));
+        drop(posts);
+        // slice restarted at the 0.9 publish: next tick sees only what came after
+        let (posts2, mut sink2) = collect();
+        p.frame(&[(paths::PEAK, 0.15)], 1120.0, &mut sink2);
+        assert_eq!(posts2.borrow()[0][0].state.as_ref().unwrap().value, Value::Number(0.15));
     }
 
     #[test]

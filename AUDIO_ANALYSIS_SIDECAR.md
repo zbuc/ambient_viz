@@ -52,13 +52,14 @@ Two stages, shipped in this order:
 **Stage 2 — slice aggregates + spectral flux.**
 
 - *Slice aggregates* (the time-slice lesson from the Analyze CHOP review,
-  below): the STATE stream publishes point samples — at each 50 ms tick,
-  the value where the needle pointed. A transient that rises and falls
-  inside a publish gap is invisible to states (onset EVENTs cover kicks,
-  but it's a general property). Stage 2 adds per-slice reductions —
-  `audio.main.peak` as max-since-last-publish, and slice-RMS semantics
-  documented per signal — so a 20 Hz control stream is faithful to
-  everything that happened in the slice, not just its edge. This is what
+  below) — **SHIPPED 2026-06-12**: the STATE stream publishes point
+  samples — at each 50 ms tick, the value where the needle pointed; a
+  transient that rises and falls inside a publish gap is invisible to
+  states (onset EVENTs cover kicks, but it's a general property).
+  `audio.main.peak` publishes max-since-last-publish, accumulated across
+  decimated frames inside both publishers (browser + sidecar; declared in
+  both manifests, STEP-interpolated). `level` is already slice-faithful
+  by construction (RMS over a ~43 ms window ≈ the slice). This is what
   makes the tap honest for reactive/zero-latency mappings.
 - *Spectral flux* (when the filterbank confuses pad vs lead):
   half-wave-rectified flux over the same `realfft` frames, band-limited
@@ -229,6 +230,12 @@ around it, read against this design:
 2. **Band edges + detector tuning** are project data, not platform code:
    they belong in the project manifest eventually (the params live with
    the tap module declaration), hand-tuned against the actual piece first.
+   *The harness for that exists (2026-06-12)*: `--trace-out` renders the
+   piece to an `audiotap-trace.v1` (bands, envelopes, the onset gate's
+   baseline/deviation, every fire, params in meta; `--onset-*` flags
+   override the gate) and `tools/tuning/detector-viewer.html` plots it
+   against the audio with a synced playhead. Defaults fire ~400 "kick"
+   onsets across the piece — the tuning pass is real, not hypothetical.
 3. **Sidecar placement**: same Pi as the bridge initially (loopback
    `/bus/publish` holds); the third-machine topology rides phase 9
    transports.

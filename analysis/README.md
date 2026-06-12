@@ -30,15 +30,40 @@ Three surfaces (all under the one `main` tap instance):
   deviation over an adaptive baseline, hysteresis re-arm + 150 ms
   refractory. Events bypass the publisher's decimation/dedupe.
 
+- **Slice aggregate** — `audio.main.peak` (STATE): max |sample| since the
+  path's last published packet, accumulated across decimated frames in
+  the publisher (both taps publish it; the time-slice lesson from the
+  Analyze CHOP review — a point sample is blind to anything that rose and
+  fell inside a publish gap).
+
 The writer discipline (decimation / quantized dedupe / keepalive /
 persisted boot epoch / 403 self-disable) is a port of
 `static/audio-tap.js` with matching tests; the wire is pinned against a
 captured browser-tap packet. In `file` mode the decode position is
 **clock-slaved**: a background SSE reader feeds `clock.daisy.*` into the
 SongClock port, pacing waits on the clock, and drift > 0.75 s (loop
-wraps, bridge restarts) triggers a coarse seek — the job the kiosk page's
-`?localaudio` mp3-sync hack does today. `--free-run` reverts to wall
-pacing.
+wraps, bridge restarts) triggers an accurate seek — the job the kiosk
+page's `?localaudio` mp3-sync hack does today. `--free-run` reverts to
+wall pacing.
+
+### Detector tuning (the trace harness)
+
+```sh
+cargo build --release    # ~10x faster traces than debug
+./target/release/orrery-audio-tap \
+  --file ../static/20251006_arrangement_1.mp3 \
+  --trace-out /tmp/trace.json \
+  --onset-threshold 0.06 --onset-cooldown-ms 150 --onset-baseline-tau-s 1.5
+```
+
+writes `audiotap-trace.v1`: one row per 50 ms of song time (bands,
+detector envelopes, the onset gate's baseline + deviation) plus every
+onset fire, with the exact params in the meta. View it against the audio
+in `tools/tuning/detector-viewer.html` (file pickers, or serve the repo
+and pass `?trace=…&audio=…`): the purple `kick_dev` trace against the
+dashed threshold line is what you tune — adjust the `--onset-*` flags
+(band/tau changes still mean editing `detector.rs::defaults`), re-trace,
+reload. Constants graduate to project-data manifest entries once tuned.
 
 ### Build / run
 

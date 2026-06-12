@@ -196,11 +196,16 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
   const AB_GRID_MS = 100;
   const AB_WARMUP_MS = 3000;
   const AB_EPS_P95 = 0.05; // |a-b| at p95 over the overlap, per path
-  // bass_fast is the low-smoothing transient band: comparing two ~60 Hz
-  // tickers' 3-decimal samples on a 100 ms grid smears its attacks, so
-  // its allowance is wider — comparison noise, measured in the first
-  // dual-writer soak (true-lag mean 0.036, p95 0.099, fit ~identity).
-  const AB_EPS_BY_PATH = { 'audio.main.bass_fast': 0.12 };
+  // Transient-flavored paths get wider allowances — comparison noise,
+  // each measured in a dual-writer soak and set at ~1.2x the observed p95:
+  //   bass_fast — low-smoothing transient band; two ~60 Hz tickers'
+  //     3-decimal samples on a 100 ms grid smear its attacks (soak #2:
+  //     mean 0.036, p95 0.099, fit ~identity) -> 0.12.
+  //   peak — slice-max aggregate; a spike near a slice boundary lands in
+  //     ADJACENT packets across writers, so the instantaneous diff is the
+  //     spike height even when both saw it (soak #3: mean 0.028,
+  //     p95 0.125) -> 0.15.
+  const AB_EPS_BY_PATH = { 'audio.main.bass_fast': 0.12, 'audio.main.peak': 0.15 };
   const ab = { paths: {}, compared: 0, violations: [] };
   {
     // path -> source -> [{t, value}]

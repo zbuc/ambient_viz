@@ -29,6 +29,10 @@
     { "path": "audio.main.bass_fast", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
       "range": { "min": 0, "max": 1 }, "nominalRateHz": 20, "maxRateHz": 30,
       "interpolation": "INTERPOLATION_LINEAR", "staleAfterMs": 1000, "onStale": "ON_STALE_HOLD",
+      "semantic": "SEMANTIC_NORMALIZED_RATIO" },
+    { "path": "audio.main.peak", "valueType": "VALUE_TYPE_FLOAT", "shape": "SHAPE_STATE", "unit": "ratio",
+      "range": { "min": 0, "max": 1 }, "nominalRateHz": 20, "maxRateHz": 30,
+      "interpolation": "INTERPOLATION_STEP", "staleAfterMs": 1000, "onStale": "ON_STALE_HOLD",
       "semantic": "SEMANTIC_NORMALIZED_RATIO" }
   ],
   "subscribes": []

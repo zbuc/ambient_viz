@@ -1,0 +1,207 @@
+<!doctype html>
+<!--
+  detector-viewer — the tuning harness's eyes (AUDIO_ANALYSIS_SIDECAR.md,
+  detector tuning). Loads an audiotap-trace.v1 JSON (produced by
+  `orrery-audio-tap - -file <piece> - -trace-out trace.json`, ideally the
+  release build) next to the piece's audio, and plots band values, detector
+  envelopes, the kick onset gate's baseline/deviation against its
+  threshold, and every onset fire — synced to an audio playhead, so tuning
+  is listening, not guessing.
+
+  Use:
+    open tools/tuning/detector-viewer.html        (pick files by hand), or
+    python3 -m http.server -d . 8000              (repo root) then
+    http://localhost:8000/tools/tuning/detector-viewer.html?trace=/tmp-less-path/trace.json&audio=/static/20251006_arrangement_1.mp3
+
+  Interaction: click/drag either strip = seek · space = play/pause ·
+  wheel on the detail strip = zoom · "follow" keeps the window on the
+  playhead.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>detector tuning</title>
+<style>
+  body { background:#101014; color:#cfcfd6; font:13px/1.5 ui-monospace, monospace; margin:14px; }
+  h1 { font-size:14px; font-weight:600; margin:0 0 8px; color:#e8e8ee; }
+  #bar { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
+  #bar label { cursor:pointer; user-select:none; }
+  canvas { display:block; width:100%; background:#16161c; border:1px solid #26262e; margin-bottom:8px; }
+  #params { color:#8a8a94; white-space:pre; margin-top:6px; }
+  .sw { display:inline-block; width:10px; height:10px; margin-right:4px; vertical-align:-1px; }
+  input[type=file] { color:#8a8a94; max-width:220px; }
+  #t { color:#e8e8ee; min-width:90px; display:inline-block; }
+</style>
+</head>
+<body>
+<h1>detector tuning <span id="t">–</span></h1>
+<div id="bar">
+  <input type="file" id="traceFile" accept=".json"> <input type="file" id="audioFile" accept="audio/*">
+  <span id="channels"></span>
+  <label><input type="checkbox" id="follow" checked> follow</label>
+  <audio id="audio" controls style="height:24px"></audio>
+</div>
+<canvas id="overview" height="110"></canvas>
+<canvas id="detail" height="320"></canvas>
+<div id="params">load a trace…</div>
+<script>
+'use strict';
+const CHANNELS = [ // [column name, color, on by default]
+  ['kick', '#ff5050', true], ['pad', '#46c878', true], ['lead', '#5a78ff', true],
+  ['kick_dev', '#c882ff', true], ['kick_baseline', '#8a5ab4', false],
+  ['bass', '#e8a030', false], ['mid', '#b4c83c', false], ['treble', '#3cc8c8', false],
+  ['level', '#9a9aa4', false], ['bass_fast', '#ff78b4', false], ['peak', '#e8e8ee', false],
+];
+let trace = null, col = {}, dur = 1, win = { t0: 0, len: 30 };
+const audio = document.getElementById('audio');
+const overview = document.getElementById('overview');
+const detail = document.getElementById('detail');
+const on = Object.fromEntries(CHANNELS.map(([n,,d]) => [n, d]));
+
+// channel toggles
+const chBar = document.getElementById('channels');
+for (const [name, color] of CHANNELS) {
+  const l = document.createElement('label');
+  const c = document.createElement('input');
+  c.type = 'checkbox'; c.checked = on[name];
+  c.onchange = () => { on[name] = c.checked; draw(); };
+  const sw = document.createElement('span');
+  sw.className = 'sw'; sw.style.background = color;
+  l.append(c, sw, name + ' ');
+  chBar.append(l);
+}
+
+function loadTrace(obj) {
+  trace = obj;
+  col = Object.fromEntries(trace.meta.columns.map((n, i) => [n, i]));
+  dur = trace.rows.length ? trace.rows[trace.rows.length - 1][0] : 1;
+  win = { t0: 0, len: Math.min(30, dur) };
+  const p = trace.meta.params;
+  document.getElementById('params').textContent =
+    `rows ${trace.rows.length}  onsets ${trace.onsets.length}  ${dur.toFixed(1)}s   ` +
+    `kick ${p.kick.band_hz.join('–')}Hz a${p.kick.attack_s}/r${p.kick.release_s}  ` +
+    `pad ${p.pad.band_hz.join('–')}Hz a${p.pad.attack_s}/r${p.pad.release_s}  ` +
+    `lead ${p.lead.band_hz.join('–')}Hz a${p.lead.attack_s}/r${p.lead.release_s}\n` +
+    `onset gate: threshold ${p.onset.threshold}  cooldown ${p.onset.cooldown_s}s  baseline τ ${p.onset.baseline_tau_s}s   ` +
+    `(kick_dev vs the dashed threshold line is what you tune)`;
+  draw();
+}
+
+// loading: URL params when served, file pickers always
+const q = new URLSearchParams(location.search);
+if (q.get('trace')) fetch(q.get('trace')).then(r => r.json()).then(loadTrace)
+  .catch(e => document.getElementById('params').textContent = 'trace fetch failed: ' + e);
+if (q.get('audio')) audio.src = q.get('audio');
+document.getElementById('traceFile').onchange = (e) => {
+  e.target.files[0].text().then((t) => loadTrace(JSON.parse(t)));
+};
+document.getElementById('audioFile').onchange = (e) => {
+  audio.src = URL.createObjectURL(e.target.files[0]);
+};
+
+function rowsIn(t0, t1) {
+  // rows are time-ordered at fixed 50 ms — index directly
+  const step = trace.rows.length / dur;
+  const a = Math.max(0, Math.floor(t0 * step) - 1);
+  const b = Math.min(trace.rows.length, Math.ceil(t1 * step) + 1);
+  return [a, b];
+}
+
+function drawStrip(cv, t0, t1, withThreshold) {
+  const ctx = cv.getContext('2d');
+  const W = cv.width = cv.clientWidth * devicePixelRatio;
+  const H = cv.height = cv.clientHeight * devicePixelRatio;
+  ctx.clearRect(0, 0, W, H);
+  if (!trace) return ctx;
+  const x = (t) => (t - t0) / (t1 - t0) * W;
+  const y = (v) => H - 4 - Math.max(-0.1, Math.min(1, v)) * (H - 18);
+  // onset fires: ticks from the top
+  ctx.strokeStyle = '#ff5050';
+  ctx.globalAlpha = 0.8;
+  for (const [t, s] of trace.onsets) {
+    if (t < t0 || t > t1) continue;
+    ctx.beginPath(); ctx.moveTo(x(t), 0); ctx.lineTo(x(t), 8 + s * 16); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // threshold line (kick_dev's pass bar)
+  if (withThreshold && trace.meta.params) {
+    ctx.strokeStyle = '#c882ff'; ctx.setLineDash([6, 5]);
+    const ty = y(trace.meta.params.onset.threshold);
+    ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(W, ty); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  const [a, b] = rowsIn(t0, t1);
+  for (const [name, color] of CHANNELS) {
+    if (!on[name]) continue;
+    const ci = col[name];
+    ctx.strokeStyle = color; ctx.lineWidth = name.startsWith('kick') ? 1.6 : 1.1;
+    ctx.beginPath();
+    for (let i = a; i < b; i++) {
+      const r = trace.rows[i];
+      const px = x(r[0]), py = y(r[ci]);
+      if (i === a) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+  // playhead
+  const t = audio.currentTime;
+  if (t >= t0 && t <= t1) {
+    ctx.strokeStyle = '#e8e8ee'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x(t), 0); ctx.lineTo(x(t), H); ctx.stroke();
+  }
+  return ctx;
+}
+
+function draw() {
+  if (!trace) return;
+  drawStrip(overview, 0, dur, false);
+  // viewport rectangle on the overview
+  const ctx = overview.getContext('2d');
+  const W = overview.width, H = overview.height;
+  ctx.strokeStyle = '#5a5a66';
+  ctx.strokeRect(win.t0 / dur * W, 0, win.len / dur * W, H);
+  drawStrip(detail, win.t0, win.t0 + win.len, true);
+  document.getElementById('t').textContent = audio.currentTime.toFixed(2) + 's';
+}
+
+// interaction
+const seekFromEvent = (cv, t0, t1) => (e) => {
+  if (!trace) return;
+  const r = cv.getBoundingClientRect();
+  audio.currentTime = t0() + (e.clientX - r.left) / r.width * (t1() - t0());
+  draw();
+};
+const ovSeek = seekFromEvent(overview, () => 0, () => dur);
+const dtSeek = seekFromEvent(detail, () => win.t0, () => win.t0 + win.len);
+let dragging = null;
+overview.onmousedown = (e) => { dragging = ovSeek; ovSeek(e); };
+detail.onmousedown = (e) => { dragging = dtSeek; dtSeek(e); };
+window.onmousemove = (e) => { if (dragging) dragging(e); };
+window.onmouseup = () => { dragging = null; };
+detail.onwheel = (e) => {
+  e.preventDefault();
+  const mid = win.t0 + win.len / 2;
+  win.len = Math.max(5, Math.min(180, win.len * (e.deltaY > 0 ? 1.25 : 0.8)));
+  win.t0 = Math.max(0, Math.min(dur - win.len, mid - win.len / 2));
+  draw();
+};
+window.onkeydown = (e) => {
+  if (e.code === 'Space' && e.target === document.body) {
+    e.preventDefault();
+    audio.paused ? audio.play() : audio.pause();
+  }
+};
+(function tick() {
+  if (trace && document.getElementById('follow').checked && !audio.paused) {
+    const t = audio.currentTime;
+    if (t < win.t0 || t > win.t0 + win.len) {
+      win.t0 = Math.max(0, Math.min(dur - win.len, t - win.len * 0.2));
+    }
+  }
+  draw();
+  requestAnimationFrame(tick);
+})();
+window.onresize = draw;
+</script>
+</body>
+</html>

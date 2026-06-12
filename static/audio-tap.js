@@ -45,7 +45,15 @@
     treble: 'audio.main.treble',
     level: 'audio.main.level',
     bassFast: 'audio.main.bass_fast',
+    peak: 'audio.main.peak',
   };
+
+  // Slice-aggregated paths (stage 2, the time-slice lesson): a point
+  // sample at the publish tick is blind to anything that rose and fell
+  // inside the gap, so these publish the MAX seen since their last
+  // published packet — every frame's value feeds the accumulator even
+  // when decimation drops the frame.
+  const AGGREGATE_MAX = new Set([PATHS.peak]);
 
   // ── the band math (verbatim semantics of the legacy in-page bands()) ──────
   //
@@ -168,19 +176,30 @@
     const lastSent = Object.create(null);   // path -> quantized value
     const lastSentAt = Object.create(null); // path -> atMs
     const lastSeq = Object.create(null);    // path -> seq of last packet
+    const sliceMax = Object.create(null);   // path -> running max since last publish
 
     function frame(bands, atMs) {
       if (disabled || !bands || typeof atMs !== 'number' || !isFinite(atMs)) return;
+      // Aggregates accumulate on EVERY frame — before any decimation gate —
+      // so values inside a dropped frame still reach the next packet.
+      for (const field of Object.keys(PATHS)) {
+        const p = PATHS[field];
+        if (!AGGREGATE_MAX.has(p)) continue;
+        const raw = bands[field];
+        if (typeof raw !== 'number' || !isFinite(raw)) continue;
+        const c = Math.min(1, Math.max(0, raw));
+        if (!(p in sliceMax) || c > sliceMax[p]) sliceMax[p] = c;
+      }
       if (atMs - lastTickAt < periodMs) return;
       if (atMs < blockedUntil) return;
       lastTickAt = atMs;
 
       const packets = [];
       for (const field of Object.keys(PATHS)) {
-        const raw = bands[field];
+        const p = PATHS[field];
+        const raw = AGGREGATE_MAX.has(p) && p in sliceMax ? sliceMax[p] : bands[field];
         if (typeof raw !== 'number' || !isFinite(raw)) continue; // rule-13: never publish non-finite
         const v = Math.round(Math.min(1, Math.max(0, raw)) * quant) / quant;
-        const p = PATHS[field];
         const changed = lastSent[p] !== v;
         const due = !(p in lastSentAt) || atMs - lastSentAt[p] >= keepaliveMs;
         if (!changed && !due) continue;
@@ -195,6 +214,7 @@
         lastSent[p] = v;
         lastSentAt[p] = atMs;
         lastSeq[p] = seq;
+        if (AGGREGATE_MAX.has(p)) delete sliceMax[p]; // the slice restarts at publish
       }
       if (!packets.length) return;
 

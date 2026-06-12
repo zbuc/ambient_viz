@@ -13,6 +13,41 @@
 //! against the piece (design doc, open question 2); the constants below
 //! are the starting points from the research conversation.
 
+/// The research starting points — PROJECT DATA in waiting (hand-tune
+/// against the piece via the trace harness, tools/tuning/, then move to
+/// the project manifest). Public so the trace meta restates exactly what
+/// ran.
+pub mod defaults {
+    pub const KICK_BAND: (f64, f64) = (40.0, 120.0);
+    pub const KICK_AR: (f64, f64) = (0.005, 0.120);
+    pub const PAD_BAND: (f64, f64) = (200.0, 800.0);
+    pub const PAD_AR: (f64, f64) = (0.250, 0.800);
+    pub const LEAD_BAND: (f64, f64) = (2000.0, 6000.0);
+    pub const LEAD_AR: (f64, f64) = (0.030, 0.250);
+    pub const ONSET_BASELINE_TAU_S: f64 = 1.5;
+    pub const ONSET_THRESHOLD: f64 = 0.06;
+    pub const ONSET_COOLDOWN_S: f64 = 0.150;
+}
+
+/// Onset-gate knobs (the most-tuned constants get CLI overrides before
+/// they get manifest entries).
+#[derive(Debug, Clone, Copy)]
+pub struct OnsetParams {
+    pub baseline_tau_s: f64,
+    pub threshold: f64,
+    pub cooldown_s: f64,
+}
+
+impl Default for OnsetParams {
+    fn default() -> Self {
+        OnsetParams {
+            baseline_tau_s: defaults::ONSET_BASELINE_TAU_S,
+            threshold: defaults::ONSET_THRESHOLD,
+            cooldown_s: defaults::ONSET_COOLDOWN_S,
+        }
+    }
+}
+
 /// RBJ cookbook bandpass (constant 0 dB peak gain).
 pub struct Biquad {
     b0: f64,
@@ -186,17 +221,29 @@ pub struct DetectorBank {
 }
 
 impl DetectorBank {
+    #[allow(dead_code)] // default-params constructor: the tests' entry point
     pub fn new(sample_rate: f64) -> Self {
+        Self::with_onset(sample_rate, OnsetParams::default())
+    }
+
+    pub fn with_onset(sample_rate: f64, onset: OnsetParams) -> Self {
+        use defaults::*;
         DetectorBank {
             // kick: low-band transient — fast attack, medium release
-            kick: Chain::new(40.0, 120.0, 0.005, 0.120, sample_rate),
+            kick: Chain::new(KICK_BAND.0, KICK_BAND.1, KICK_AR.0, KICK_AR.1, sample_rate),
             // pad: mid-band swell — slow both ways
-            pad: Chain::new(200.0, 800.0, 0.250, 0.800, sample_rate),
+            pad: Chain::new(PAD_BAND.0, PAD_BAND.1, PAD_AR.0, PAD_AR.1, sample_rate),
             // lead: upper-mid presence — medium both ways
-            lead: Chain::new(2000.0, 6000.0, 0.030, 0.250, sample_rate),
-            onset: OnsetGate::new(1.5, 0.06, 0.150, sample_rate),
+            lead: Chain::new(LEAD_BAND.0, LEAD_BAND.1, LEAD_AR.0, LEAD_AR.1, sample_rate),
+            onset: OnsetGate::new(onset.baseline_tau_s, onset.threshold, onset.cooldown_s, sample_rate),
             t_samples: 0,
         }
+    }
+
+    /// The onset gate's adaptive baseline — the trace harness plots
+    /// kick − baseline against the threshold, which is what tuning is.
+    pub fn kick_baseline(&self) -> f64 {
+        self.onset.baseline
     }
 
     /// Run a mono block through every chain; envelopes update per sample,
