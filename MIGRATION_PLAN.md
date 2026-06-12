@@ -892,15 +892,87 @@ upstream already depends on this.)
 ## Phase 8 — Host/plugin split of the visualizer (the long arc)
 
 The ~7k-line IIFE becomes host + `pain_material_raster.v1`, incrementally:
-analysis tap first (publishes `audio.main.*`), then the param surface
-(PARAMETERS.md as typed inputs), then the render pipeline as the plugin body.
+**8A** the analysis tap (publishes `audio.main.*`), **8B** the param surface
+(PARAMETERS.md as typed inputs), **8C** the render pipeline as the plugin body.
 
-**Validation is deterministic render capture, not just screenshots:** fixed
-viewport + DPR + seed, mocked/fixed `audio.main.*` frames and timeline/clock,
-captures at frames N / N+1 / N+60, **perceptual-diff threshold** (the renderer
-is not promised bit-deterministic). **Plus performance budgets as gates:**
-host frame time p95, plugin render time p95, dropped frames, visible GC
-pauses — a split that preserves pixels but tanks frame time is a REGRESSION.
+**Validation for 8C is deterministic render capture, not just screenshots:**
+fixed viewport + DPR + seed, mocked/fixed `audio.main.*` frames and
+timeline/clock, captures at frames N / N+1 / N+60, **perceptual-diff
+threshold** (the renderer is not promised bit-deterministic). **Plus
+performance budgets as gates:** host frame time p95, plugin render time p95,
+dropped frames, visible GC pauses — a split that preserves pixels but tanks
+frame time is a REGRESSION.
+
+### Phase 8A — the analysis tap (`audio.main.*`)
+
+The host's audio analysis becomes a named module and a control-plane source
+(ARCHITECTURE.md → *Audio analysis: one tap per thing you listen to*), in
+pure SHADOW: nothing consumes `audio.main.*` yet, and the render path keeps
+reading the in-page values directly — same-process paths never round-trip
+the server, so the bus hop exists for graphs, the inspector, and capture.
+
+- **The module** (`static/audio-tap.js`, the song-clock.js pattern — one
+  file, three runtimes): `computeBands()` is the band math extracted from
+  the page's `bands()` (the page keeps only the impure analyser-array
+  fills), and `createTapPublisher()` is the control-plane half — decimation
+  of the rAF loop to the declared control rate, quantized change-dedupe
+  (3 decimals, so analyser noise in near-silence can't defeat it), the
+  keepalive obligation inside the declared stale window, and a
+  localStorage-persisted boot epoch (the page edition of the bridge's
+  epoch file).
+- **The first bus-native ingress** (`POST /bus/publish`): the page publishes
+  REAL `bus.v1` SignalPackets — no legacy-name mapping, nothing added to the
+  phase-9 deletion surface. The handler only moves bytes; ordering, type,
+  range, and policy checks are the bus's own. Loopback-only like `/ingest`;
+  a remote view of the kiosk page gets 403 and the tap self-disables. This
+  endpoint is the shape every future external node (ESP bridge, OSC
+  adapter) ingests through.
+- **Declared like any node**: `manifest/modules/audio-tap.json` publishes
+  `audio.main.{bass,mid,treble,level,bass_fast}` (float `ratio` [0,1],
+  nominal 20 Hz / max 30, `staleAfterMs` 1000, HOLD), role `audio_tap`
+  capped at the sensor rung (300). One wart, recorded: the module's
+  `instanceId` is `audio-tap`, not `main` — the router-graph identity
+  already binds `instanceId: main` and the registry warns on duplicates, so
+  the role grants a literal `audio.main.*` glob (the `defaults` role
+  precedent) instead of `audio.${instance}.*`. Revisit if instance
+  semantics get a second look in phase 9.
+- **Capture + the standing gate**: every `/bus/publish` POST is captured as
+  `bus_rx` (decoded packets + the bus's acceptance verdicts), and the page
+  snapshot carries the publisher's self-view (boot epoch, per-path last
+  seq + value). `tools/sim/validate-audiotap.js` judges a session from the
+  fixture alone — DRIFT (module path table == manifest declarations),
+  HYGIENE (zero rejects, zero policy WARNs), CONTRACT (range/quantization,
+  per-epoch seq order, keepalive gaps, max rate), JOIN (each snapshot's
+  per-path seq resolves to the exact captured packet, value-equal end to
+  end). Pre-8A captures report ABSENT and don't block.
+
+> **Offline evidence (2026-06-12):** 106/106 tests (16 new: band-math pins,
+> writer discipline, epoch persistence, failure posture, and the e2e leg —
+> the publisher's literal packets accepted policy-clean by a real bus under
+> the real registry). All six standing gates re-verified MATCH on the
+> canonical golden; validate-audiotap reports ABSENT (non-blocking) on three
+> pre-8A goldens. Live soak: the real publisher drove a real bridge over
+> HTTP for 35 s (active span + silence span) — ~18–20 Hz while active,
+> ~2.2 Hz keepalives in silence, 2358 packets, 0 rejected, 0 policy/range
+> warns, gate verdict **MATCH** on the soak capture including 20 exact
+> snapshot→packet joins. Registry loads 11 modules, zero warnings.
+>
+> **The gate session:** run one normal kiosk session with capture on (no
+> URL flag — the shadow is additive), then
+> `node tools/sim/validate-audiotap.js <SESSION>` plus the standing gates;
+> `/inspector` should show `audio.main.*` at ~20 Hz, policy-clean, with
+> the browser tap as sole writer. On acceptance there is nothing to delete
+> (8A replaced no legacy path — the extraction left `bands()` semantics
+> byte-identical); the tap simply becomes load-bearing when 8B/8C (or a
+> graph) first binds `audio.main.*`.
+
+### Phase 8B — the param surface (next)
+
+PARAMETERS.md's ~34 tunables become typed plugin params on a declared
+manifest surface; the dev panel and automation lanes keep working through
+it. Then **8C**: the render pipeline itself moves behind
+`init / resize / frame(ctx, signals)` as `pain_material_raster.v1`, gated by
+the deterministic render capture above.
 
 ## Phase 9 — Retirement + hardening
 

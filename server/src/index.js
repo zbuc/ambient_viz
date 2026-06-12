@@ -454,6 +454,64 @@ function handleCaptureSnapshot(req, res) {
   });
 }
 
+// POST /bus/publish — the bus-native ingress (phase 8A): a node that already
+// speaks bus.v1 publishes real SignalPackets, no legacy-name mapping. First
+// (and so far only) client: the kiosk page's audio analysis tap publishing
+// audio.main.* (static/audio-tap.js). Body: one packet or an array. Every
+// packet goes through orreryBus.publish() verbatim — ordering, type, range,
+// and policy checks are the bus's own; this handler only moves bytes.
+// Loopback-only like /ingest (the kiosk page runs on the Pi); a remote view
+// of the page gets a 403 and the tap self-disables.
+function handleBusPublish(req, res) {
+  if (!isLoopback(req)) {
+    res.writeHead(403); res.end('localhost only'); return;
+  }
+  let total = 0;
+  const chunks = [];
+  req.on('data', (chunk) => {
+    total += chunk.length;
+    if (total > INGEST_MAX_BYTES) { res.writeHead(413); res.end('payload too large'); req.destroy(); return; }
+    chunks.push(chunk);
+  });
+  req.on('end', () => {
+    if (res.writableEnded) return;
+    const body = Buffer.concat(chunks);
+    let parsed;
+    try { parsed = JSON.parse(body.toString('utf8')); }
+    catch {
+      capture.event('bus_rx_drop', { reason: 'bad_json', ...capture.rawField(body) });
+      res.writeHead(400); res.end('bad json'); return;
+    }
+    const packets = Array.isArray(parsed) ? parsed : [parsed];
+    let accepted = 0, policyWarns = 0;
+    const rejects = [];
+    for (const pkt of packets) {
+      let rec;
+      try { rec = orreryBus.publish(pkt); }
+      catch (e) { rec = { accepted: false, reasons: [`publish threw: ${e.message}`], enforcement: {} }; }
+      if (rec.accepted) accepted += 1;
+      else if (rejects.length < 10) {
+        rejects.push({ path: pkt && (pkt.state || pkt.event) ? (pkt.state || pkt.event).path : null, reasons: rec.reasons });
+      }
+      if (rec.enforcement && typeof rec.enforcement.policy === 'string'
+        && rec.enforcement.policy.startsWith('WARN')) policyWarns += 1;
+    }
+    // Decoded packets AND acceptance verdicts ride the capture so the offline
+    // gate (tools/sim/validate-audiotap.js) judges the stream from the
+    // fixture alone — same doctrine as `ingest`.
+    capture.event('bus_rx', {
+      ...capture.rawField(body),
+      packets,
+      accepted,
+      rejected: packets.length - accepted,
+      policy_warns: policyWarns,
+      ...(rejects.length ? { rejects } : {}),
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ accepted, rejected: packets.length - accepted }));
+  });
+}
+
 // Lazily import the shared ESM patch schema so server-side validation uses the
 // exact same field/range/enum definitions the editor and Rust DSP do. Cached.
 let schemaModPromise = null;
@@ -648,6 +706,7 @@ const server = http.createServer((req, res) => {
   if (req.url === '/events' && req.method === 'GET') return handleSSE(req, res);
   if (req.url === '/ingest' && req.method === 'POST') return handleIngest(req, res);
   if (req.url === '/capture/snapshot' && req.method === 'POST') return handleCaptureSnapshot(req, res);
+  if (req.url === '/bus/publish' && req.method === 'POST') return handleBusPublish(req, res);
   if (req.url === '/inspector/state' && req.method === 'GET') return handleInspectorState(req, res);
   if (req.url === '/inspector' && req.method === 'GET') { req.url = '/inspector.html'; return serveStatic(req, res); }
   if (req.url === '/plugins/state' && req.method === 'GET') return handlePluginsState(req, res);

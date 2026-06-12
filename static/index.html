@@ -4235,6 +4235,7 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
 </script>
 
 <script src="song-clock.js"></script>
+<script src="audio-tap.js"></script>
 <script>
 // ============================================================================
 // GPIO input client (SSE)
@@ -4314,6 +4315,11 @@ if (typeof DedicatedWorkerGlobalScope !== 'undefined' &&
           // Phase-7 clock A/B: both implementations sampled at snapshot time
           // (the frame loop defines __songClockAB once it boots).
           song_clock: (typeof window.__songClockAB === 'function') ? window.__songClockAB() : null,
+          // Phase-8A audio tap: the publisher's own view (boot_epoch +
+          // per-path last seq/value), so validate-audiotap.js can join each
+          // snapshot to the exact captured packets and assert end-to-end
+          // value equality.
+          audio_tap: (typeof window.__audioTapInspect === 'function') ? window.__audioTapInspect() : null,
         }),
       }).catch(() => { /* capture is best-effort */ });
     } catch { /* never let the tap touch the visualizer */ }
@@ -5272,50 +5278,32 @@ async function init() {
   poke();
 
   // --- audio band extraction ---
-  // returns 0..1 averaged energies over coarse bands
+  // returns 0..1 averaged energies over coarse bands. The math itself lives
+  // in static/audio-tap.js (the host's analysis tap, phase 8A) so the page,
+  // the node tests, and the offline gate share ONE set of formulas; this
+  // function keeps only the impure Web Audio part (filling the byte arrays).
   function bands() {
     if (!analyser) return { bass: 0, mid: 0, treble: 0, level: 0, levelDb: 0, peak: 0, bassFast: 0 };
     analyser.getByteFrequencyData(freqData);
-    const n = freqData.length;
-    // analyser bins map linearly to 0..nyquist; for 48k sample rate that's 0..24k, bin = index/n * nyquist
-    const sr = audioCtx.sampleRate;
-    const nyq = sr / 2;
-    function avgRange(data, dataN, loHz, hiHz) {
-      const lo = Math.max(0, Math.floor(loHz / nyq * dataN));
-      const hi = Math.min(dataN, Math.ceil(hiHz / nyq * dataN));
-      let s = 0, c = 0;
-      for (let i = lo; i < hi; i++) { s += data[i]; c++; }
-      return c ? s / c / 255 : 0;
-    }
-    const bass = avgRange(freqData, n, 20, 200);
-    const mid = avgRange(freqData, n, 200, 2000);
-    const treble = avgRange(freqData, n, 2000, 12000);
-    // Spectral mean of the dB-mapped bytes — kept only as a diagnostic
-    // (window.__levelDb). It's logarithmic and clamped to the analyser's
-    // [minDecibels,maxDecibels] window, so it reads on/off for quiet inputs and
-    // a linear input gain barely moves it.
-    let levelDb = 0;
-    for (let i = 0; i < n; i++) levelDb += freqData[i];
-    levelDb = levelDb / n / 255;
-    // Energy level the visuals gate on: LINEAR time-domain RMS. Scales
-    // proportionally with the signal (so ?micgain actually works) and tracks the
-    // music smoothly instead of snapping between silence and saturation.
-    let level = 0, peak = 0;
     analyser.getByteTimeDomainData(timeData);
-    for (let i = 0; i < timeData.length; i++) {
-      const s = (timeData[i] - 128) / 128;
-      level += s * s;
-      const a = Math.abs(s);
-      if (a > peak) peak = a;
-    }
-    level = Math.sqrt(level / timeData.length);
-    let bassFast = 0;
-    if (transientAnalyser) {
-      transientAnalyser.getByteFrequencyData(transientFreqData);
-      bassFast = avgRange(transientFreqData, transientFreqData.length, 20, 200);
-    }
-    return { bass, mid, treble, level, levelDb, peak, bassFast };
+    if (transientAnalyser) transientAnalyser.getByteFrequencyData(transientFreqData);
+    return window.AudioTap.computeBands({
+      freqData,
+      timeData,
+      transientFreqData: transientAnalyser ? transientFreqData : null,
+      sampleRate: audioCtx.sampleRate,
+    });
   }
+
+  // The tap's control-plane half (phase 8A, SHADOW): publishes audio.main.*
+  // onto the bridge bus at control rate via POST /bus/publish. Nothing
+  // consumes it yet — the render path keeps reading the in-page values
+  // directly (same-process paths don't round-trip the server). Self-disables
+  // on 403 (a non-loopback view of this page may not publish).
+  const audioTapPub = (window.AudioTap && location.protocol !== 'file:')
+    ? window.AudioTap.createTapPublisher()
+    : null;
+  window.__audioTapInspect = audioTapPub ? () => audioTapPub.inspect() : undefined;
 
   // --- silhouette names (for PARAMS.silhouette dropdown) ---
   // The actual silhouette geometry, Path2D cache, and render code now live
@@ -7099,6 +7087,9 @@ async function init() {
         touch_mask: (window.AMBIENT_INPUTS && window.AMBIENT_INPUTS.touch_mask) | 0,
       });
     }
+    // Analysis tap -> bus (phase 8A shadow): decimation/dedupe/keepalive live
+    // inside the publisher; per-frame this is a cheap early return.
+    if (audioTapPub) audioTapPub.frame(b, now);
     updateDebug();
     if (fpsOverlayEl) {
       // worker render → workerDebug.fpsValue; iOS main render → the global fpsValue.
