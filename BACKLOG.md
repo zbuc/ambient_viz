@@ -252,12 +252,12 @@ flip, not a schema migration. The order roughly tracks blast radius. Detail in
   over a class-0xFF bulk IN endpoint, read via `navigator.usb`→`transferIn`→AudioWorklet;
   bypasses the PipeWire/Chromium capture graph and makes SD stalls benign. Measure
   flash delta vs the UAC code. — `daisy/PLAN_USB_CAPTURE.md`, mem `daisy-usb-capture-revival`
-- [ ] **Rust `dasp` DSP/analysis sidecar** — move FFT/envelope/transient analysis out
-  of the browser into a native Rust process feeding the visualizer over the SSE/WebSocket
-  bridge. Decouples from Chromium's audio stack; pairs with the WebUSB path. Start from
-  the daisy `host` crate. *In the platform model this is the external-sidecar form of the
-  `audio.*` bus source — same signal names as the in-host `AnalyserNode`.* —
-  `ARCHITECTURE.md` (Audio analysis sources), conversation 2026-06-06 (new)
+- [ ] **Rust `dasp` DSP/analysis sidecar** — *design accepted 2026-06-12, see
+  `AUDIO_ANALYSIS_SIDECAR.md` (DSP plan, dual-source build flags, bus contract,
+  shadow→A/B→cutover migration, two-projector test planned-not-gated).* Publishes
+  `audio.main.*` through the phase-8A `/bus/publish` ingress under its own identity;
+  new root workspace `analysis/`, not `daisy/`. —
+  `ARCHITECTURE.md` (Audio analysis sources), conversations 2026-06-06 / 2026-06-12
 
 ## Firmware / DSP (Daisy)
 
