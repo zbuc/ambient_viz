@@ -75,8 +75,10 @@ stay default. Two locations:
 
 - **Distance** — `python/ambient_kiosk/config.py` (those marked *env* can instead
   be set on the **sensors** service, e.g. `Environment=DISTANCE_NEAR_CM=80`).
-- **Motion / voice** — environment on the **Node server** service (easiest via the
-  `kiosk_motion_on` drop-in, or `Environment=` lines in `ambient-viz-server.service`).
+- **Motion / voice** — project config since the phase-6 cutover: the occupancy graph
+  (`manifest/graphs/occupancy.json`) and the presence plugin's binding
+  (`manifest/plugins/presence.json`); details in the moved section below. (The old
+  `kiosk_motion_on` env drop-in is inert.)
 
 **Distance (VL53L5CX):**
 
@@ -97,20 +99,23 @@ stay default. Two locations:
   the empty-room baseline; a still reading closer than this is treated as a motionless
   visitor, not the room. Raise if near clutter/wall gets learned as "empty"; lower for a tight install.
 
-**Motion (AM312) — server env:**
+**Motion (AM312) + voice cadence — project config (moved at the phase-6 cutover):**
 
-- **`MOTION_PRESENCE`** (off) — master switch for the AM312s. On → motion adds room-wide
-  presence (entry bell fires on room-entry, occupancy held by motion); off → distance-only.
-  Leave off until the sensors are trusted; toggle with `kiosk_motion_on` / `kiosk_motion_off`.
-- **`MOTION_HOLD_S`** (20) — how long the room stays "occupied" after the last motion.
-  This sets how promptly the **exit voice** fires when people leave and how reliably the
-  room empties; ~5 s gives a prompt parting message, too low fires at a lingering still visitor.
+The old server env knobs (`MOTION_PRESENCE`, `MOTION_HOLD_S`, `VOICE_TOLL*`) are inert.
+The same levers now live in two project files:
 
-**Voice cadence — server env:**
-
-- **`VOICE_TOLL_MIN_S` / `VOICE_TOLL_MAX_S`** (300 / 600) — the random interval for the
-  periodic "active room" murmur (only speaks when there's recent motion). Widen for rarer,
-  narrow for more frequent surveillance whispers; set `VOICE_TOLL=0` to disable entirely.
+- **Occupancy motion fusion + hold** — `projects/pain-material/manifest/graphs/occupancy.json`:
+  the motion envelope's `releaseMs` (20000) is the old `MOTION_HOLD_S` — how long the room
+  stays "occupied" after the last motion (sets how promptly the **exit voice** fires when
+  people leave). Motion always augments occupancy now; to run distance-only, remove the
+  `motion_env`/`occ_motion` branch from the graph.
+- **Trigger knobs** — `projects/pain-material/manifest/plugins/presence.json` (params; defaults
+  in `server/src/plugins/presence-choreography.js`): `motion_presence` selects the bell mode
+  (1 = occupancy-edge bell, 0 = distance approach gate); `voice_toll_min_s`/`voice_toll_max_s`
+  (300/600) the murmur interval — widen for rarer, narrow for more frequent surveillance
+  whispers, `voice_toll: 0` to disable; cooldowns, dwell/confirm windows, skip probabilities
+  all alongside. Edits load at bridge restart; the seed lives in the same file (change it and
+  golden replays no longer reproduce — re-record after intentional changes).
 
 ---
 

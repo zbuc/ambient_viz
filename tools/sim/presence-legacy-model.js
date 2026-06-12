@@ -26,7 +26,6 @@ function createPresenceModel(opts = {}) {
 
   // Knobs — daisy-position env defaults, verbatim.
   const MOTION_PRESENCE = opts.motionPresence !== undefined ? opts.motionPresence : true;
-  const MOTION_HOLD_MS = (opts.motionHoldS ?? 20) * 1000;
   const BELL_NOTE = clamp(Math.round(opts.bellNote ?? 81), 0, 127);
   const BELL_VELOCITY = clamp(Math.round(opts.bellVelocity ?? 100), 1, 127);
   const BELL_INDUSTRIAL_PROB = clamp(opts.industrialProb ?? 0.1, 0, 1);

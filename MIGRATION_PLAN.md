@@ -750,6 +750,43 @@ clock contract in early.
 > `legacy_occupancy` tap, and the `presence_cc` flag (rollback becomes
 > artifact-level, invariant 4), and the session is promoted as the phase-6
 > golden.
+>
+> **Status (2026-06-12): GATE SESSION ACCEPTED + CLEANUP DONE — PHASE 6
+> COMPLETE.** The session (5.2 min on the kiosk, `PRESENCE_CC=bus` — the
+> plugin struck the room live, legacy decided silently as the shadow),
+> accepted by Chris. Its verdicts, after two comparator-side fixes the
+> session itself surfaced (the `legacy_occupancy` tap's boot-baseline record
+> is not an edge; one live-vs-sim Smooth point per viz mapping at
+> 0.021 vs the declared 0.02 — same phase-5 jitter class, eps re-measured
+> to 0.03 and the engine now clocks timestamp-driven nodes off the
+> TRIGGERING PACKET'S stamp per ROUTER_IR, which collapses that class for
+> future captures): occupancy live lanes MATCH (1=1 edges, fraction
+> 0.955=0.955), presence lane A 2=2 draw-for-draw + entry 1=1, tape live
+> exact 1129=1129, viz live 1135=1135 each, plugin gate MATCH, identity
+> MATCH. Promoted as
+> `fixtures/golden-presence-cutover-2026-06-12T02-45-58Z-pid7487/` — the
+> canonical golden for phase 7+ (its trigger decisions are the seeded
+> plugin's).
+>
+> **Cleanup (the deletion):** daisy-position.js is now ONLY serial owner +
+> MIDI adapter + POS reader (584 → ~190 lines): the bell/toll/voice/murmur
+> stack, `computeOccupancy`/`motionPresent`, every trigger env knob, the
+> trigger tick, the `legacy_occupancy` tap, and the `presence_cc` flag are
+> gone — the note_on event binding is unconditional, `sendNoteOn` the one
+> path to the wire. The knobs live on as plugin params
+> (`manifest/plugins/presence.json`) and the occupancy graph's envelope;
+> server/README + INSTALL_DAY updated (old env vars inert). The bridge
+> re-emits the plugin's `fire` debug events as capture `trigger` events, so
+> the capture vocabulary survives the cutover and validate-presence lane B
+> becomes a live-vs-sim decision lane on post-cutover captures. Dead
+> `motionPresent` removed from plugin + model (occupancy fusion is the
+> graph's). Re-proof post-deletion: replay of the promoted golden through
+> the trigger-less bridge — all lanes MATCH/EXPECTED (CC 23 726/722, CC 24
+> 110/110 exact, entry strike 1=1, toll declared); all seven sim gates
+> MATCH; 82/82 tests. Rollback is artifact-level from here (invariant 4).
+> **Phase 6 standing exit criteria: all six met. Next: phase 7** (clock as
+> a contract — `clock.daisy.position` as (position, rate), local
+> extrapolation behind a flag, retiring the 20 Hz rebase hack).
 
 The riskiest phase; it gets a de-risking precursor:
 

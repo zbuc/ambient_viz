@@ -72,7 +72,6 @@ const manifest = {
     { name: 'voice_toll_skip_prob', valueType: 'VALUE_TYPE_FLOAT', default: { number: 0.25 }, range: { min: 0, max: 1 } },
     { name: 'voice_toll_active_s', valueType: 'VALUE_TYPE_FLOAT', default: { number: 30 }, range: { min: 0, max: 3600 } },
     { name: 'voice_min_gap_s', valueType: 'VALUE_TYPE_FLOAT', default: { number: 20 }, range: { min: 0, max: 3600 } },
-    { name: 'motion_hold_s', valueType: 'VALUE_TYPE_FLOAT', default: { number: 20 }, range: { min: 0, max: 600 } },
     { name: 'phrase_count', valueType: 'VALUE_TYPE_FLOAT', default: { number: 15 }, range: { min: 1, max: 128 } },
   ],
   outputs: [
@@ -90,7 +89,6 @@ const manifest = {
 
 function create({ params: p }) {
   const MOTION_PRESENCE = p.motion_presence >= 0.5;
-  const MOTION_HOLD_MS = p.motion_hold_s * 1000;
   const VOICE_TOLL = p.voice_toll >= 0.5;
   const TOLL_MAX_S = Math.max(p.toll_min_s, p.toll_max_s);
   const VOICE_TOLL_MAX_S = Math.max(p.voice_toll_min_s, p.voice_toll_max_s);
@@ -146,11 +144,6 @@ function create({ params: p }) {
   function scheduleNextMurmur(ctx) {
     nextMurmurMs = ctx.now + (p.voice_toll_min_s + ctx.rand() * (VOICE_TOLL_MAX_S - p.voice_toll_min_s)) * 1000;
     dbg(ctx, 'scheduled', { what: 'murmur', at_ms: nextMurmurMs });
-  }
-
-  function motionPresent(nowMs) {
-    if (!MOTION_PRESENCE) return false;
-    return motionActive || nowMs - lastMotionMs <= MOTION_HOLD_MS;
   }
 
   function updateBellTriggerMotion(ctx) {

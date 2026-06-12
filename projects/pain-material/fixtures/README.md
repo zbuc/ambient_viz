@@ -109,3 +109,18 @@ re-injects. Capture real or scripted sessions (`tools/replay/smoke-session.js`).
   CC 23 750/747 + CC 24 freeze 44/44 exact; tape validation MATCH with the
   live lane exact (1344 = 1344 value changes, capture `bus_tx` vs sim). The
   canonical golden for phase 5+.
+- **`golden-viz-cutover-2026-06-11T17-41-44Z-pid3792/`** — ~60 s kiosk smoke,
+  the **accepted phase-5 gate session** (ran `twist=bus&bitmapx=bus&feed=bus`):
+  the first capture carrying `fx.viz.*` bus_tx and the browser A/B traces.
+  All phase-5 gates verified against the promoted gzip.
+- **`golden-presence-cutover-2026-06-12T02-45-58Z-pid7487/`** — 5.2 min on the
+  kiosk, the **accepted phase-6 gate session** (ran `PRESENCE_CC=bus`: the
+  presence plugin struck the Daisy live; the legacy stack decided silently as
+  the shadow). First capture carrying `derived.room.occupied` + `seq.presence.*`
+  bus_tx, the `legacy_occupancy` tap, and plugin emissions (`plugin_tx`).
+  Verified 2026-06-12: occupancy live lanes MATCH (1=1 edges, fraction
+  0.955=0.955); presence lane A 2=2 draw-for-draw + entry 1=1; tape live exact
+  1129=1129; viz live 1135=1135 each; plugin replay/resume byte-identical;
+  replay through the trigger-less post-cleanup bridge all MATCH/EXPECTED
+  (CC 23 726/722, CC 24 110/110 exact, entry strike 1=1). **The canonical
+  golden for phase 7+** — the trigger decisions in it are the seeded plugin's.

@@ -182,7 +182,22 @@ try {
     bindings,
     declared: registry ? declared : null,
     roles: registry ? new Map(registry.policy.roles.map((r) => [r.name, r])) : null,
-    tap: (instance, sigPath, payload) => capture.event('plugin_tx', { instance, path: sigPath, payload }),
+    tap: (instance, sigPath, payload) => {
+      capture.event('plugin_tx', { instance, path: sigPath, payload });
+      // Keep the capture's `trigger` vocabulary alive across the phase-6
+      // cutover: the legacy stack recorded every strike/speak decision as a
+      // `trigger` event (what + reason), and the comparators classify note
+      // lanes through them. The plugin's `fire` debug events carry the same
+      // fields — re-emit them in the same shape so post-cutover captures
+      // stay comparable (and validate-presence lane B becomes a live-vs-sim
+      // decision lane on its own captures).
+      if (sigPath === 'seq.presence.debug' && typeof payload === 'string') {
+        try {
+          const d = JSON.parse(payload);
+          if (d.kind === 'fire') capture.event('trigger', { what: d.what, reason: d.reason, ...(d.phrase !== undefined ? { phrase: d.phrase } : {}) });
+        } catch { /* malformed debug payload: plugin_tx still has the raw */ }
+      }
+    },
   });
   for (const f of [...loadFailures, ...pluginHost.failures]) {
     console.error(`orrery plugin-host: ${f.file} NOT RUNNING (${f.errors.join('; ')}) — its outputs stay silent.`);

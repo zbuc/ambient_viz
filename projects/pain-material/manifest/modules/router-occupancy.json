@@ -3,7 +3,7 @@
   "identity": {
     "stableId": "spiffe://pain-material.local/bridge/router-occupancy",
     "instanceId": "occupancy",
-    "humanLabel": "Occupancy conditioning graph (phase 6.1 shadow — legacy computeOccupancy still authoritative)",
+    "humanLabel": "Occupancy conditioning graph (sole occupancy authority since the phase-6 cutover)",
     "type": "router-graph-host",
     "firmwareVersion": "bridge",
     "schemaVersion": "manifest.v1"
