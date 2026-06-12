@@ -983,7 +983,9 @@ adapters, Rust codegen mirror — each pulled by a concrete need.
 
 ## What this plan deliberately does not build
 
-`Delay`, `Select`, wildcards/`Replicated`, distributed groups, ESP-NOW
+`Delay`, `Select`, `Reduce` (windowed min/max/RMS/peak-count — the Analyze
+CHOP as one generic op; AUDIO_ANALYSIS_SIDECAR.md *Prior art*),
+wildcards/`Replicated`, distributed groups, ESP-NOW
 transport, OSC/MIDI-external adapters, the abstract scene/field, real crypto —
 until a phase above *needs* one or a second installation pulls it.
 

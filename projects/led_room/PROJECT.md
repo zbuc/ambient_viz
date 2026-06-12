@@ -48,3 +48,11 @@ choreography on the Pi side (procmusic P2's open half); the LED node
 hardware/protocol (the ESP32 render-node arc, BACKLOG.md); whether the
 audio analysis sidecar (`AUDIO_ANALYSIS_SIDECAR.md`) gets a tap instance
 here. Decisions land in this file as they're made.
+
+## Idea parking lot
+
+- **`dominant` signal** (from the Analyze CHOP review, 2026-06-12):
+  index-of-maximum across `audio.main.{kick,pad,lead}` (or per-stem
+  taps) — a one-liner "which instrument leads right now" classifier;
+  exactly the low-rate symbolic input a fitness function or an LED
+  render group wants before anything fancier exists.

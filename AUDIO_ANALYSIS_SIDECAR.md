@@ -49,11 +49,22 @@ Two stages, shipped in this order:
   samples of latency. Trivial CPU on a Pi (the Pi is GPU-bound, not
   CPU-bound).
 
-**Stage 2 — spectral flux (when the filterbank confuses pad vs lead).**
-Half-wave-rectified spectral flux over the same `realfft` frames, band-
-limited per target. More discriminating onsets at the cost of block
-latency (~21 ms at 1024/48k). Added only where stage 1 produces false
-positives — the historical arc of the field, on purpose.
+**Stage 2 — slice aggregates + spectral flux.**
+
+- *Slice aggregates* (the time-slice lesson from the Analyze CHOP review,
+  below): the STATE stream publishes point samples — at each 50 ms tick,
+  the value where the needle pointed. A transient that rises and falls
+  inside a publish gap is invisible to states (onset EVENTs cover kicks,
+  but it's a general property). Stage 2 adds per-slice reductions —
+  `audio.main.peak` as max-since-last-publish, and slice-RMS semantics
+  documented per signal — so a 20 Hz control stream is faithful to
+  everything that happened in the slice, not just its edge. This is what
+  makes the tap honest for reactive/zero-latency mappings.
+- *Spectral flux* (when the filterbank confuses pad vs lead):
+  half-wave-rectified flux over the same `realfft` frames, band-limited
+  per target. More discriminating onsets at the cost of block latency
+  (~21 ms at 1024/48k). Added only where stage 1 produces false
+  positives — the historical arc of the field, on purpose.
 
 `dasp`'s role is the time-domain back half (peak/rms/envelope/window +
 signal plumbing); it deliberately has no FFT — `realfft`/`rustfft`
@@ -166,6 +177,40 @@ added to the bus produces macro-identical output with no code changes.*
   add the two-writer A/B lane.
 - **Latency**: measured, not estimated — timestamp at capture, timestamp
   at bridge accept (already in the capture), report the distribution.
+
+## Prior art — TouchDesigner's Analyze CHOP (reviewed 2026-06-12)
+
+The Analyze CHOP (per-channel reduction: avg/min/max/sum/RMS, peak picking
+with explicit boundary rules, one value per channel) and the CHOP paradigm
+around it, read against this design:
+
+- **Adopted into stage 2**: time-slicing — an operator processes every
+  sample since its last cook, so nothing between cooks is invisible. Our
+  point-sample states fail that test; the slice aggregates above are the
+  fix.
+- **Direction, not built**: TD composes analysis as a network of tiny
+  generic operators (band filter → envelope → slope → trigger). We already
+  believe this — it's the router graph IR — but our detector chains
+  hardcode the topology in `detector.rs`. The endpoint is the tap hosting
+  the graph IR at audio rate, compiled at load, so detector chains ship as
+  project data. Waits for a second customer (led_room's sensor-fitness
+  chains are the plausible first).
+- **One-op lesson for the IR**: the Analyze CHOP is `Reduce(window, fn)`.
+  When a graph needs windowed stats ("peak velocity over 2 s"), that's one
+  generic op, not bespoke code — the Smooth-op lesson again. Recorded in
+  MIGRATION_PLAN's deliberately-not-built list.
+- **Cheap classifier idea**: index-of-maximum across channels = "which
+  band/instrument dominates" — a `dominant` signal over
+  `audio.main.{kick,pad,lead}` is a one-liner and exactly the low-rate
+  symbolic input genome steering or a render group wants (noted in
+  led_room's PROJECT.md).
+- **Confirmations**: scope-by-pattern ≈ our deferred `audio.*.bass`
+  wildcards; the explicit No-Peak sentinel maps to our stricter answer
+  (no-emit EVENTs — absence is never a magic number); per-input
+  sample-rate-match ≈ the manifest's interpolation/stale declarations.
+- **Not copied**: CHOPs recompute whole windows per cook — right for a
+  60 fps creative tool, wrong for an always-on Pi process. The streaming
+  one-pole/ring implementations stay.
 
 ## Open questions (answer before code)
 
