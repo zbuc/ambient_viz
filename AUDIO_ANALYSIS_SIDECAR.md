@@ -75,13 +75,21 @@ Two stages, shipped in this order:
   literature) lifts weak-but-present onsets toward the strong ones so one
   threshold works across hits — trading floor contrast, hence adjustable
   and viewed. The gate still fires on `kick_dev` (energy deviation);
-  folding flux into the onset decision is the next step, and the bigger
-  lever there is the **combination** (a kick = low-band onset present AND
-  click elevated; a tom has no click — so max/weighted-score, not either
-  channel alone), *after* the lanes on real material decide whether it
-  earns it (and whether it closes the gap enough to skip ML — see *Prior
-  art* + the ML note). `CompatAnalyser::band_flux(lo,hi,sr)` (raw
-  measurement); `FluxChannelParams::shape()` (compression).
+  folding flux into the onset decision is the next step. The combination
+  is **shipped as the `kick_score` lane** (observe-only): a weighted
+  geometric mean of the two *compressed* flux channels, computed PER TICK
+  so it credits body+click only when *simultaneous* — zero if either is
+  zero, which is the kick/tom discriminator (a tom has body flux but no
+  beater click → score ~0). `flux.score.{kick_weight,click_weight}` tilt
+  it; weight 0 drops a channel (e.g. click-only). Synthetic check: a
+  kick (body+click) scores 0.75 while a tom with *identical* body flux but
+  no click scores 0.01. Turning the per-channel `compress` knobs moves
+  the score live in the viewer — the tuning loop for the kick/tom call,
+  and the evidence for whether classical closes the gap enough to skip ML
+  (see *Prior art* + the ML note). Once the score reliably separates the
+  kit on real material, the onset gate fires on it instead of `kick_dev`.
+  `CompatAnalyser::band_flux` (raw); `FluxChannelParams::shape`
+  (compress); `FluxScore::combine` (the score).
 
 `dasp`'s role is the time-domain back half (peak/rms/envelope/window +
 signal plumbing); it deliberately has no FFT — `realfft`/`rustfft`

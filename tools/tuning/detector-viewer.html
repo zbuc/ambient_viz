@@ -69,7 +69,9 @@ const CHANNELS = [ // [column, color, on-by-default]
   ['kick', '#ff5050', true], ['pad', '#46c878', true], ['lead', '#5a78ff', true],
   ['kick_dev', '#c882ff', true], ['kick_baseline', '#8a5ab4', false],
   // stage-2 spectral flux (observe-only): a kick spikes BOTH coincidentally,
-  // a tom mostly kick_flux. The kick/tom-separation evidence.
+  // a tom mostly kick_flux. kick_score = their coincidence combiner — the
+  // headline lane; watch it move as you turn the compress/weight knobs.
+  ['kick_score', '#ffe83c', true],
   ['kick_flux', '#00e0c0', true], ['click_flux', '#ff9030', true],
   ['bass', '#e8a030', false], ['mid', '#b4c83c', false], ['treble', '#3cc8c8', false],
   ['level', '#9a9aa4', false], ['bass_fast', '#ff78b4', false], ['peak', '#e8e8ee', false],
@@ -281,6 +283,15 @@ function buildEditor() {
       );
       ed.append(fg);
     }
+    if (params.flux.score) {
+      const sg = document.createElement('div'); sg.className = 'grp';
+      sg.innerHTML = '<h2>kick score</h2>';
+      sg.append(
+        num('flux.score', () => params.flux.score.kick_weight, (v) => params.flux.score.kick_weight = v, 'kick_weight', 0.1),
+        num('flux.score', () => params.flux.score.click_weight, (v) => params.flux.score.click_weight = v, 'click_weight', 0.1),
+      );
+      ed.append(sg);
+    }
   }
 }
 
@@ -341,7 +352,7 @@ function drawStrip(cv, t0, t1, withThreshold) {
   for (const [name, color] of CHANNELS) {
     if (!on[name] || !(name in td.col)) continue;
     const ci = td.col[name];
-    ctx.strokeStyle = color; ctx.lineWidth = name.startsWith('kick') ? 1.6 : 1.1;
+    ctx.strokeStyle = color; ctx.lineWidth = name === 'kick_score' ? 2.4 : name.startsWith('kick') ? 1.6 : 1.1;
     ctx.beginPath();
     for (let i = a; i < b; i++) {
       const r = td.rows[i], px = x(r[0]), py = y(r[ci]);

@@ -19,15 +19,16 @@ use crate::detector::{DetectorBank, DetectorParams, OnsetFire};
 /// fixed 2-5 kHz beater-click band — observe-only onset functions: a kick
 /// shows flux in BOTH coincidentally, a tom mostly in the low band. Tune
 /// the gate against them later; for now they're for the eye.
-pub const COLUMNS: [&str; 14] = [
+pub const COLUMNS: [&str; 15] = [
     "t", "bass", "mid", "treble", "level", "bass_fast", "peak",
-    "kick", "pad", "lead", "kick_baseline", "kick_dev", "kick_flux", "click_flux",
+    "kick", "pad", "lead", "kick_baseline", "kick_dev",
+    "kick_flux", "click_flux", "kick_score",
 ];
 pub const ROW_MS: u32 = 50;
 
 pub struct Trace {
     pub sample_rate: u32,
-    pub rows: Vec<[f64; 14]>,
+    pub rows: Vec<[f64; 15]>,
     pub onsets: Vec<(f64, f64)>, // (t_seconds, strength)
 }
 
@@ -55,12 +56,14 @@ pub fn analyze_mono(mono: &[f32], sample_rate: u32, params: &DetectorParams) -> 
     let mut time_bytes: Vec<u8> = Vec::new();
     let mut fires: Vec<OnsetFire> = Vec::new();
     let mut slice_peak = 0.0f64;
-    let mut kick_flux = 0.0f64; // slice-max of band flux (sampled per tick)
+    let mut kick_flux = 0.0f64; // slice-max of SHAPED band flux (per tick)
     let mut click_flux = 0.0f64;
+    let mut kick_score = 0.0f64; // slice-max of the per-tick coincidence score
     let mut rows = Vec::new();
     let mut onsets = Vec::new();
     let fk = params.flux.kick;
     let fc = params.flux.click;
+    let fs = params.flux.score;
 
     for chunk in mono.chunks(CHUNK) {
         main_an.push(chunk);
@@ -70,11 +73,15 @@ pub fn analyze_mono(mono: &[f32], sample_rate: u32, params: &DetectorParams) -> 
             since_tick -= tick_every;
             main_an.tick();
             trans_an.tick();
-            // spectral flux is a per-tick (60 Hz) quantity; keep the
-            // strongest in the 50 ms row (the onset spike). Compression is
-            // monotonic, so shaping the slice-max == max of shaped.
-            kick_flux = kick_flux.max(main_an.band_flux(fk.band_hz[0], fk.band_hz[1], sr as f64));
-            click_flux = click_flux.max(main_an.band_flux(fc.band_hz[0], fc.band_hz[1], sr as f64));
+            // Flux is per-tick (60 Hz). Shape (compress) each channel THIS
+            // tick, then the score combines the shaped values at the SAME
+            // tick (true body+click coincidence) — keep the slice-max of
+            // each over the 50 ms row.
+            let kf = fk.shape(main_an.band_flux(fk.band_hz[0], fk.band_hz[1], sr as f64));
+            let cf = fc.shape(main_an.band_flux(fc.band_hz[0], fc.band_hz[1], sr as f64));
+            kick_flux = kick_flux.max(kf);
+            click_flux = click_flux.max(cf);
+            kick_score = kick_score.max(fs.combine(kf, cf));
         }
         fires.clear();
         let det = bank.process(chunk, &mut fires);
@@ -93,11 +100,12 @@ pub fn analyze_mono(mono: &[f32], sample_rate: u32, params: &DetectorParams) -> 
             rows.push([
                 t, b.bass, b.mid, b.treble, b.level, b.bass_fast, slice_peak,
                 det.kick, det.pad, det.lead, baseline, det.kick - baseline,
-                fk.shape(kick_flux), fc.shape(click_flux),
+                kick_flux, click_flux, kick_score,
             ]);
             slice_peak = 0.0;
             kick_flux = 0.0;
             click_flux = 0.0;
+            kick_score = 0.0;
         }
     }
     Trace { sample_rate: sr, rows, onsets }

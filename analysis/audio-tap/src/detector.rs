@@ -106,14 +106,48 @@ impl FluxChannelParams {
     }
 }
 
-/// The two flux channels — `kick` (body) + `click` (beater). A kick spikes
-/// both coincidentally; a tom mostly `kick`. Their own bands (independent
-/// of the envelope detectors' bands).
+/// The kick SCORE combiner: a weighted geometric mean of the two
+/// (compressed) flux channels. Geometric mean = hard coincidence (zero if
+/// EITHER channel is zero), which is the kick/tom discriminator — a tom
+/// has body flux but no beater click, so it scores ~0. Weights tilt the
+/// emphasis; a weight of 0 drops that channel (e.g. click-only). The score
+/// is computed PER TICK (then slice-maxed) so it credits body+click only
+/// when they're simultaneous, not merely both-somewhere-in-the-row.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FluxScore {
+    pub kick_weight: f64,
+    pub click_weight: f64,
+}
+
+impl Default for FluxScore {
+    fn default() -> Self {
+        FluxScore { kick_weight: 1.0, click_weight: 1.0 }
+    }
+}
+
+impl FluxScore {
+    /// Combine two shaped (compressed) flux values, each in [0,1].
+    pub fn combine(&self, kick_flux: f64, click_flux: f64) -> f64 {
+        let (wk, wc) = (self.kick_weight.max(0.0), self.click_weight.max(0.0));
+        let sum = wk + wc;
+        if sum <= 0.0 {
+            return 0.0; // degenerate weights -> no signal
+        }
+        (kick_flux.clamp(0.0, 1.0).powf(wk) * click_flux.clamp(0.0, 1.0).powf(wc)).powf(1.0 / sum)
+    }
+}
+
+/// The two flux channels — `kick` (body) + `click` (beater) — plus the
+/// `score` combiner. A kick spikes both coincidentally; a tom mostly
+/// `kick`. Each channel has its own band (independent of the envelope
+/// detectors' bands).
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FluxParams {
     pub kick: FluxChannelParams,
     pub click: FluxChannelParams,
+    pub score: FluxScore,
 }
 
 impl Default for FluxParams {
@@ -121,6 +155,7 @@ impl Default for FluxParams {
         FluxParams {
             kick: FluxChannelParams::new(20.0, 120.0),
             click: FluxChannelParams::new(2000.0, 5000.0),
+            score: FluxScore::default(),
         }
     }
 }
@@ -424,6 +459,22 @@ mod tests {
         assert!((strong.shape(0.0)).abs() < 1e-9); // silence stays at 0
         // monotonic: bigger in -> bigger out (so slice-max commutes with shape)
         assert!(strong.shape(0.6) > strong.shape(0.3));
+    }
+
+    #[test]
+    fn flux_score_is_coincidence_sensitive() {
+        let s = FluxScore { kick_weight: 1.0, click_weight: 1.0 };
+        assert_eq!(s.combine(0.8, 0.0), 0.0); // body but no click (a tom) -> 0
+        assert_eq!(s.combine(0.0, 0.8), 0.0); // click but no body -> 0
+        assert!((s.combine(0.8, 0.8) - 0.8).abs() < 1e-9); // both equal -> that value
+        let both = s.combine(0.3, 0.9); // weak body + strong click (a kick)
+        assert!(both > 0.3 && both < 0.9, "geomean lands between: {both}");
+        assert!(both > 0.0, "a real kick scores well above a tom's 0");
+        // a 0 weight drops that channel: click-only -> score == click_flux
+        let click_only = FluxScore { kick_weight: 0.0, click_weight: 1.0 };
+        assert!((click_only.combine(0.2, 0.7) - 0.7).abs() < 1e-9);
+        // degenerate weights -> no signal, not a panic
+        assert_eq!(FluxScore { kick_weight: 0.0, click_weight: 0.0 }.combine(0.5, 0.5), 0.0);
     }
 
     #[test]

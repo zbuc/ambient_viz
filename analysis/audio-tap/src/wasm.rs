@@ -73,7 +73,10 @@ pub fn default_params() -> String {
         "pad": ch(&p.pad),
         "lead": ch(&p.lead),
         "onset": { "threshold": p.onset.threshold, "cooldown_s": p.onset.cooldown_s, "baseline_tau_s": p.onset.baseline_tau_s },
-        "flux": { "kick": fx(&p.flux.kick), "click": fx(&p.flux.click) },
+        "flux": {
+            "kick": fx(&p.flux.kick), "click": fx(&p.flux.click),
+            "score": { "kick_weight": p.flux.score.kick_weight, "click_weight": p.flux.score.click_weight },
+        },
     })
     .to_string()
 }

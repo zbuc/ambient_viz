@@ -177,8 +177,8 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
         }
         let _ = write!(
             rows,
-            "[{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}]",
-            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13],
+            "[{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}]",
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14],
         );
     }
     let mut onsets = String::new();
@@ -208,7 +208,10 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
             "pad": ch(&dp.pad),
             "lead": ch(&dp.lead),
             "onset": { "threshold": dp.onset.threshold, "cooldown_s": dp.onset.cooldown_s, "baseline_tau_s": dp.onset.baseline_tau_s },
-            "flux": { "kick": fx(&dp.flux.kick), "click": fx(&dp.flux.click) },
+            "flux": {
+                "kick": fx(&dp.flux.kick), "click": fx(&dp.flux.click),
+                "score": { "kick_weight": dp.flux.score.kick_weight, "click_weight": dp.flux.score.click_weight },
+            },
         },
     });
     let body = format!(
