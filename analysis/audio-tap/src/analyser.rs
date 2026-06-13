@@ -34,8 +34,15 @@ pub struct CompatAnalyser {
     spectrum: Vec<Complex<f64>>,
     scratch: Vec<Complex<f64>>,
     window: Vec<f64>,
-    smoothed: Vec<f64>, // X̂[k], linear magnitude
+    smoothed: Vec<f64>, // X̂[k], linear magnitude (the byte/band path)
     freq_bytes: Vec<u8>,
+    // Spectral flux (stage 2) — computed from the RAW magnitude (not the
+    // 0.85-smoothed one, which would mute it): per-bin positive frame-to-
+    // frame increase, the onset-detection function (Bello 2005). Observe-
+    // only for now; `band_flux` reads it band-limited + level-normalized.
+    cur_raw: Vec<f64>,  // |X[k]| this tick
+    prev_raw: Vec<f64>, // |X[k]| last tick
+    flux: Vec<f64>,     // max(0, cur - prev) this tick
 }
 
 pub fn blackman(n: usize) -> Vec<f64> {
@@ -64,6 +71,9 @@ impl CompatAnalyser {
             window: blackman(fft_size),
             smoothed: vec![0.0; fft_size / 2],
             freq_bytes: vec![0; fft_size / 2],
+            cur_raw: vec![0.0; fft_size / 2],
+            prev_raw: vec![0.0; fft_size / 2],
+            flux: vec![0.0; fft_size / 2],
         }
     }
 
@@ -87,12 +97,39 @@ impl CompatAnalyser {
         let tau = self.smoothing;
         for k in 0..self.fft_size / 2 {
             let mag = self.spectrum[k].norm() / self.fft_size as f64;
+            // spectral flux off the RAW magnitude (independent of `tau`)
+            self.flux[k] = (mag - self.prev_raw[k]).max(0.0);
+            self.prev_raw[k] = mag;
+            self.cur_raw[k] = mag;
+            // byte/band path: time-smoothed magnitude -> dB -> byte (compat)
             let sm = tau * self.smoothed[k] + (1.0 - tau) * mag;
             self.smoothed[k] = sm;
             let db = if sm > 0.0 { 20.0 * sm.log10() } else { f64::NEG_INFINITY };
             let b = (255.0 / (MAX_DB - MIN_DB) * (db - MIN_DB)).floor();
             self.freq_bytes[k] = b.clamp(0.0, 255.0) as u8;
         }
+    }
+
+    /// Level-normalized positive spectral flux in a band: the fraction of
+    /// the band's current energy that is NEW since the last tick. ~0 in
+    /// steady state, spikes toward 1 at an onset; level-invariant (a quiet
+    /// kick and a loud kick read alike). The onset-function the kick gate
+    /// will eventually fold in — for now, observe-only.
+    pub fn band_flux(&self, lo_hz: f64, hi_hz: f64, sample_rate: f64) -> f64 {
+        let n = self.fft_size / 2;
+        let nyq = sample_rate / 2.0;
+        let lo = ((lo_hz / nyq * n as f64).floor() as usize).min(n);
+        let hi = ((hi_hz / nyq * n as f64).ceil() as usize).min(n);
+        if hi <= lo {
+            return 0.0;
+        }
+        let mut fsum = 0.0;
+        let mut msum = 0.0;
+        for k in lo..hi {
+            fsum += self.flux[k];
+            msum += self.cur_raw[k];
+        }
+        fsum / (msum + 1e-9)
     }
 
     /// getByteFrequencyData equivalent (frequencyBinCount = fftSize/2).
@@ -135,6 +172,27 @@ mod tests {
             im += x * ph.sin();
         }
         (re * re + im * im).sqrt() / n as f64
+    }
+
+    #[test]
+    fn band_flux_spikes_at_onset_settles_in_steady_state() {
+        let n = 2048;
+        let mut a = CompatAnalyser::new(n, 0.85);
+        // silence -> tick: no energy, no flux
+        a.push(&vec![0.0; n]);
+        a.tick();
+        let f_silence = a.band_flux(60.0, 200.0, SR);
+        // a 100 Hz tone appears -> the window fills with new energy
+        a.push(&sine(100.0, n));
+        a.tick();
+        let f_onset = a.band_flux(60.0, 200.0, SR);
+        // tone sustained -> raw magnitude stops rising -> flux decays
+        a.push(&sine(100.0, n));
+        a.tick();
+        let f_steady = a.band_flux(60.0, 200.0, SR);
+        assert!(f_silence < 1e-6, "silence flux {f_silence}");
+        assert!(f_onset > 0.2, "onset flux {f_onset}");
+        assert!(f_steady < f_onset * 0.5, "steady {f_steady} should fall vs onset {f_onset}");
     }
 
     #[test]

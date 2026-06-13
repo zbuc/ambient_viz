@@ -61,11 +61,19 @@ Two stages, shipped in this order:
   both manifests, STEP-interpolated). `level` is already slice-faithful
   by construction (RMS over a ~43 ms window ≈ the slice). This is what
   makes the tap honest for reactive/zero-latency mappings.
-- *Spectral flux* (when the filterbank confuses pad vs lead):
-  half-wave-rectified flux over the same `realfft` frames, band-limited
-  per target. More discriminating onsets at the cost of block latency
-  (~21 ms at 1024/48k). Added only where stage 1 produces false
-  positives — the historical arc of the field, on purpose.
+- *Spectral flux* (when the filterbank confuses kick vs tom / pad vs lead):
+  half-wave-rectified, level-normalized positive flux over the analyser's
+  raw `realfft` magnitudes, band-limited per target. More discriminating
+  onsets than band energy because it catches the broadband spectral
+  *change* of a transient. **Shipped as OBSERVE-ONLY (2026-06-13):**
+  `kick_flux` (kick body band) + `click_flux` (fixed 2-5 kHz beater band)
+  are trace columns + viewer lanes — a kick spikes BOTH coincidentally, a
+  tom mostly the low band, so the eye (and later a gate) can separate
+  them. The gate still fires on `kick_dev` (energy deviation); folding
+  flux into the onset decision is the next step, *after* looking at the
+  flux lanes against real kicks/toms decides whether it earns it (and
+  whether it closes the gap enough to skip ML — see *Prior art* and the
+  ML-evaluation note). `CompatAnalyser::band_flux(lo,hi,sr)`.
 
 `dasp`'s role is the time-domain back half (peak/rms/envelope/window +
 signal plumbing); it deliberately has no FFT — `realfft`/`rustfft`

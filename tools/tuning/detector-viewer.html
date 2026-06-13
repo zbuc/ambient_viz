@@ -68,6 +68,9 @@ import init, * as WASM from './wasm/detector.js';
 const CHANNELS = [ // [column, color, on-by-default]
   ['kick', '#ff5050', true], ['pad', '#46c878', true], ['lead', '#5a78ff', true],
   ['kick_dev', '#c882ff', true], ['kick_baseline', '#8a5ab4', false],
+  // stage-2 spectral flux (observe-only): a kick spikes BOTH coincidentally,
+  // a tom mostly kick_flux. The kick/tom-separation evidence.
+  ['kick_flux', '#00e0c0', true], ['click_flux', '#ff9030', true],
   ['bass', '#e8a030', false], ['mid', '#b4c83c', false], ['treble', '#3cc8c8', false],
   ['level', '#9a9aa4', false], ['bass_fast', '#ff78b4', false], ['peak', '#e8e8ee', false],
 ];

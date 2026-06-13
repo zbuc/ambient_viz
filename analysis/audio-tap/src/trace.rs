@@ -14,16 +14,21 @@ use crate::bands;
 use crate::detector::{DetectorBank, DetectorParams, OnsetFire};
 
 /// Trace row layout — the viewer's column order, the binary's meta echoes
-/// it, the WASM export reports it.
-pub const COLUMNS: [&str; 12] = [
+/// it, the WASM export reports it. `kick_flux`/`click_flux` (stage 2) are
+/// level-normalized positive spectral flux in the kick body band and a
+/// fixed 2-5 kHz beater-click band — observe-only onset functions: a kick
+/// shows flux in BOTH coincidentally, a tom mostly in the low band. Tune
+/// the gate against them later; for now they're for the eye.
+pub const COLUMNS: [&str; 14] = [
     "t", "bass", "mid", "treble", "level", "bass_fast", "peak",
-    "kick", "pad", "lead", "kick_baseline", "kick_dev",
+    "kick", "pad", "lead", "kick_baseline", "kick_dev", "kick_flux", "click_flux",
 ];
 pub const ROW_MS: u32 = 50;
+const CLICK_BAND_HZ: (f64, f64) = (2000.0, 5000.0); // kick-beater click (fixed; observe-only)
 
 pub struct Trace {
     pub sample_rate: u32,
-    pub rows: Vec<[f64; 12]>,
+    pub rows: Vec<[f64; 14]>,
     pub onsets: Vec<(f64, f64)>, // (t_seconds, strength)
 }
 
@@ -51,8 +56,11 @@ pub fn analyze_mono(mono: &[f32], sample_rate: u32, params: &DetectorParams) -> 
     let mut time_bytes: Vec<u8> = Vec::new();
     let mut fires: Vec<OnsetFire> = Vec::new();
     let mut slice_peak = 0.0f64;
+    let mut kick_flux = 0.0f64; // slice-max of band flux (sampled per tick)
+    let mut click_flux = 0.0f64;
     let mut rows = Vec::new();
     let mut onsets = Vec::new();
+    let (klo, khi) = (params.kick.band_hz[0], params.kick.band_hz[1]);
 
     for chunk in mono.chunks(CHUNK) {
         main_an.push(chunk);
@@ -62,6 +70,10 @@ pub fn analyze_mono(mono: &[f32], sample_rate: u32, params: &DetectorParams) -> 
             since_tick -= tick_every;
             main_an.tick();
             trans_an.tick();
+            // spectral flux is a per-tick (60 Hz) quantity; keep the
+            // strongest in the 50 ms row (the onset spike)
+            kick_flux = kick_flux.max(main_an.band_flux(klo, khi, sr as f64));
+            click_flux = click_flux.max(main_an.band_flux(CLICK_BAND_HZ.0, CLICK_BAND_HZ.1, sr as f64));
         }
         fires.clear();
         let det = bank.process(chunk, &mut fires);
@@ -80,8 +92,11 @@ pub fn analyze_mono(mono: &[f32], sample_rate: u32, params: &DetectorParams) -> 
             rows.push([
                 t, b.bass, b.mid, b.treble, b.level, b.bass_fast, slice_peak,
                 det.kick, det.pad, det.lead, baseline, det.kick - baseline,
+                kick_flux.min(1.0), click_flux.min(1.0),
             ]);
             slice_peak = 0.0;
+            kick_flux = 0.0;
+            click_flux = 0.0;
         }
     }
     Trace { sample_rate: sr, rows, onsets }
@@ -108,8 +123,11 @@ mod tests {
         let t = analyze_mono(&mono, sr as u32, &DetectorParams::default());
         // ~2 s / 50 ms ≈ 40 rows (±1 for chunk granularity)
         assert!((t.rows.len() as i64 - 40).abs() <= 1, "rows {}", t.rows.len());
+        assert_eq!(t.rows[0].len(), COLUMNS.len());
         // late row: bass column (idx 1) >> treble (idx 3)
         let r = t.rows[t.rows.len() - 2];
         assert!(r[1] > 0.3 && r[1] > r[3] * 2.0, "row {r:?}");
+        // a steady sine: kick_flux (idx 12) has settled near zero by the end
+        assert!(r[12] < 0.1, "steady-state kick_flux {} should be low", r[12]);
     }
 }

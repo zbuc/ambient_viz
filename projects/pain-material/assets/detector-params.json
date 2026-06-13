@@ -1,0 +1,32 @@
+{
+  "schema": "detector-params.v1",
+  "kick": {
+    "attack_s": 0.005,
+    "band_hz": [
+      20,
+      80
+    ],
+    "release_s": 1
+  },
+  "pad": {
+    "attack_s": 0.25,
+    "band_hz": [
+      200,
+      800
+    ],
+    "release_s": 0.8
+  },
+  "lead": {
+    "attack_s": 0.03,
+    "band_hz": [
+      1500,
+      6000
+    ],
+    "release_s": 5
+  },
+  "onset": {
+    "threshold": 0.03,
+    "cooldown_s": 0.08,
+    "baseline_tau_s": 1
+  }
+}
