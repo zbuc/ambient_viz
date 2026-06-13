@@ -253,28 +253,52 @@ function validateAudioTap({ goldenDir, outDir, quiet = false }) {
         continue;
       }
       let best = null;
+      const meanByLag = new Map();
       for (let lag = -AB_LAG_MAX_MS; lag <= AB_LAG_MAX_MS; lag += AB_LAG_STEP_MS) {
         const diffs = diffsAtLag(lists, t0, t1, lag);
         if (!diffs.length) continue;
         const mean = diffs.reduce((s, d) => s + d, 0) / diffs.length;
+        meanByLag.set(lag, mean);
         if (!best || mean < best.mean) best = { lag, mean, diffs };
       }
       if (!best) {
         ab.paths[p] = { note: 'no comparable grid points' };
         continue;
       }
+      // Sub-grid lag refinement by parabolic interpolation. The discrete
+      // scan is multimodal-safe — for quasi-periodic music D(lag) dips
+      // again at the beat/bar, so the EXHAUSTIVE scan is what picks the
+      // right well; bisection would slide into a wrong one. Within that
+      // well D is locally convex, so a parabola through the argmin and its
+      // two neighbors refines the 50 ms grid estimate to ~ms. Guarded:
+      // both neighbors present, convex (a real minimum), vertex inside the
+      // bracket (|delta| <= half a step). p95/max stay at the discrete
+      // best — the residual a sub-grid shift away differs by far less than
+      // eps; only the lag ESTIMATE refines. Refined lag drives the
+      // alignment pass check.
+      let refinedLag = best.lag;
+      const ym = meanByLag.get(best.lag - AB_LAG_STEP_MS);
+      const yp = meanByLag.get(best.lag + AB_LAG_STEP_MS);
+      if (typeof ym === 'number' && typeof yp === 'number') {
+        const denom = ym - 2 * best.mean + yp;
+        if (denom > 0) {
+          const delta = (0.5 * (ym - yp)) / denom; // step units, |delta| <= 0.5 at a min
+          if (Math.abs(delta) <= 0.5) refinedLag = best.lag + delta * AB_LAG_STEP_MS;
+        }
+      }
       best.diffs.sort((a, b) => a - b);
       const eps = AB_EPS_BY_PATH[p] || AB_EPS_P95;
       const p95 = best.diffs[Math.floor(best.diffs.length * 0.95)];
       const stat = {
         points: best.diffs.length,
-        lag_ms: best.lag,
+        lag_ms: Math.round(refinedLag * 10) / 10,
+        lag_grid_ms: best.lag,
         mean: Math.round(best.mean * 10000) / 10000,
         p95,
         max: best.diffs[best.diffs.length - 1],
         eps_p95: eps,
         lag_pass_ms: AB_LAG_PASS_MS,
-        pass: p95 <= eps && Math.abs(best.lag) <= AB_LAG_PASS_MS,
+        pass: p95 <= eps && Math.abs(refinedLag) <= AB_LAG_PASS_MS,
       };
       ab.paths[p] = stat;
       ab.compared += 1;
