@@ -122,6 +122,69 @@ house style), runtime config choosing device/path within what's compiled:
   only; ruling 2026-06-11). Borrow cpal experience from `daisy/host`, don't
   live there. Bus types via `prost` over the shared `proto/`.
 
+## Analysis is pluggable at the bus, not inside this sidecar
+
+**The unit of pluggability is a provider NODE at the bus boundary — not an
+analyzer plugin loaded into this process.** An analysis provider is a peer
+*source*, the same kind of thing as a sensor node or the Daisy: it owns
+its own DSP, runs as its own process (any language), declares an identity,
+and publishes `audio.<instance>.*`. This sidecar is the **default /
+reference** analysis node, exactly as the Pi sidecar is the default sensor
+node — **not infrastructure other analyzers plug into, and never a
+requirement of using the platform.** A project may run zero of our DSP and
+get all its `audio.*` from a third-party provider.
+
+This is the correction to an earlier wrong instinct (mirror `plugin-host.js`
+and make this sidecar an in-process analyzer *host*). The bus is *already*
+the decentralized integration point; re-centralizing analysis into a host
+would throw that away. The right analogy is the signal-source model
+(ARCHITECTURE.md → audio analysis is a routable **source**), not the
+plugin host.
+
+**Phase 8A already built this boundary correctly** — the test "could a
+separate process run its own DSP and submit analysis to the bus?" passes
+today:
+
+- `POST /bus/publish` accepts real `bus.v1` packets from any loopback
+  client under its own identity; this sidecar is just one such client.
+- A new provider declares its own module manifest + allowlist entry and
+  publishes its `audio.<instance>.*` — process-neutral.
+- The `audio.<instance>.*` namespace doesn't care who computes; two
+  providers of "kick" live on two instances (`audio.dsp.kick` vs
+  `audio.ml.kick`) and the project routes/`Select`s between them.
+- Capture (`bus_rx`) and the gate (`validate-audiotap`) are already
+  writer-agnostic.
+
+**The "don't make it hard" invariants (protect these; build nothing yet):**
+
+1. **The contract is the `bus.v1` packet + the manifest declaration + a
+   language-neutral signal-semantics spec — never this crate's API.** A
+   provider must be buildable from `proto/` + a signal-contract doc, in any
+   language, with no dependency on `orrery-audio-tap`. (The one missing
+   artifact: write that signal-semantics doc — what `audio.<tap>.{kick,
+   onset,…}` *mean*, their types/ranges/rates — so it's a contract, not
+   "whatever our sidecar happens to emit.")
+2. **The integration point is the bus ingress** (loopback HTTP now,
+   transports generalize in phase 9) — providers speak `bus.v1`, never a
+   sidecar-private API. **Do not build a sidecar-internal analyzer host
+   others must plug into.**
+3. **Project config selects provider INSTANCES by identity + expected
+   signals, not "our analyzer kinds."** Our filterbank is one optional
+   provider among peers; the config says "this project expects
+   `audio.main.kick` from provider X," opaque to whether X is us or a
+   third party.
+4. **Our DSP stays a library + a thin binary** (the 8A lib refactor) so
+   it's usable but never mandatory.
+
+**In-process composition is an optional convenience, NOT the pluggability
+story.** If we ever want to extend *our* node specifically — multiple
+analyzer instances inside one process, an ONNX model as a data asset, a
+WASM analyzer module — that's fine as a feature of this provider, but it
+is explicitly *not* how the system achieves modularity. The ONNX detector,
+when it lands, may live inside our node *or* as its own process, and **the
+bus contract must be byte-identical either way** — that equivalence is the
+standing test that we haven't re-privileged the sidecar.
+
 ## Migration: shadow → A/B → cutover (the bus already knows how)
 
 1. **Shadow**: sidecar publishes the continuity set at priority **250** —
@@ -239,3 +302,12 @@ around it, read against this design:
 3. **Sidecar placement**: same Pi as the bridge initially (loopback
    `/bus/publish` holds); the third-machine topology rides phase 9
    transports.
+4. **The language-neutral signal contract** (the one missing artifact for
+   *Analysis is pluggable at the bus*): document what `audio.<tap>.*`
+   fields a provider must publish to be a valid analysis source — names,
+   types, ranges, rates, and the *semantics* (`kick` = band-energy
+   envelope; `kick_onset` = transient fire above adaptive baseline; etc.)
+   — referencing `proto/` + the manifest, with NO dependency on this
+   crate. Write it when the second provider (ONNX, or led_room's) makes
+   the contract real; until then the manifest declarations are the de
+   facto spec.
