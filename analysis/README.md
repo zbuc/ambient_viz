@@ -46,24 +46,40 @@ wraps, bridge restarts) triggers an accurate seek — the job the kiosk
 page's `?localaudio` mp3-sync hack does today. `--free-run` reverts to
 wall pacing.
 
-### Detector tuning (the trace harness)
+### Detector tuning
+
+**Live (WASM) — the way to tune.** `tools/tuning/detector-viewer.html`
+runs the SAME detector compiled to WebAssembly (the pure-DSP `lib`:
+`analyser`/`detector`/`bands`/`trace`), so there's no JS reimplementation
+to drift. Build once, then re-run after editing any DSP source:
 
 ```sh
-cargo build --release    # ~10x faster traces than debug
-./target/release/orrery-audio-tap \
-  --file ../static/20251006_arrangement_1.mp3 \
-  --trace-out /tmp/trace.json \
-  --onset-threshold 0.06 --onset-cooldown-ms 150 --onset-baseline-tau-s 1.5
+sh tools/tuning/build.sh         # -> tools/tuning/wasm/ (gitignored artifact)
+python3 -m http.server           # from the repo root, then open:
+# http://localhost:8000/tools/tuning/detector-viewer.html?audio=/static/20251006_arrangement_1.mp3
 ```
 
-writes `audiotap-trace.v1`: one row per 50 ms of song time (bands,
-detector envelopes, the onset gate's baseline + deviation) plus every
-onset fire, with the exact params in the meta. View it against the audio
-in `tools/tuning/detector-viewer.html` (file pickers, or serve the repo
-and pass `?trace=…&audio=…`): the purple `kick_dev` trace against the
-dashed threshold line is what you tune — adjust the `--onset-*` flags
-(band/tau changes still mean editing `detector.rs::defaults`), re-trace,
-reload. Constants graduate to project-data manifest entries once tuned.
+Pick the piece's audio (or use `?audio=`); the browser decodes it and
+re-analyzes the whole thing on every param change — band edges,
+attack/release, baseline tau, onset threshold/cooldown all live
+(~1-2 s, debounced). Tune by ear: the purple `kick_dev` trace against the
+dashed threshold line. When it's right, **download detector-params.json**
+and feed the sidecar with `--params`. Tuned constants graduate to
+project-data manifest entries.
+
+**Headless trace** (CI, or a static no-audio view): `--trace-out` writes
+an `audiotap-trace.v1` JSON (one row per 50 ms — bands, envelopes, the
+onset gate's baseline + deviation — plus every fire, params in meta).
+
+```sh
+cargo build --release            # ~10x faster than debug
+./target/release/orrery-audio-tap --file ../static/20251006_arrangement_1.mp3 \
+  --params my-params.json --trace-out /tmp/trace.json
+```
+
+Loading that JSON in the viewer gives a static view (threshold/cooldown
+preview only — no audio to re-filter). `--params` / the `--onset-*` quick
+overrides apply to the live-publish run too.
 
 ### Build / run
 

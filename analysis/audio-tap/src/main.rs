@@ -9,11 +9,11 @@
 //! and onset surfaces have no incumbent and resolve from here). File
 //! mode slaves decode position to clock.daisy.* over /bus/events.
 
-mod analyser;
-mod bands;
+// Pure DSP (analyser/bands/detector/trace) lives in the lib so the binary
+// and the WASM tuning preview share ONE implementation. I/O modules stay
+// bin-local.
 mod bus;
 mod clockfeed;
-mod detector;
 mod publisher;
 mod songclock;
 mod source;
@@ -24,9 +24,12 @@ use std::time::Instant;
 
 use clap::Parser;
 
-use analyser::CompatAnalyser;
+use orrery_audio_tap::analyser::CompatAnalyser;
+use orrery_audio_tap::bands;
+use orrery_audio_tap::detector::{self, DetectorBank};
+use orrery_audio_tap::trace::analyze_mono;
+
 use bus::{BusClient, PostResult};
-use detector::DetectorBank;
 use publisher::{next_boot_epoch, paths, Config, TapPublisher};
 use source::AudioSource;
 
@@ -146,73 +149,44 @@ fn detector_params(args: &Args) -> detector::DetectorParams {
 fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Result<(), String> {
     use std::fmt::Write as _;
 
-    let mut src = source::file::FileSource::open(file, None, true)?;
-    let mut main_an = CompatAnalyser::new(2048, 0.85);
-    let mut trans_an = CompatAnalyser::new(1024, 0.3);
     let dp = detector_params(args);
-    let mut bank: Option<DetectorBank> = None;
-    let mut sr: u32 = 0;
-    let mut tick_every: u64 = 800; // analyser smoothing cadence (sr/60)
-    let mut since_tick: u64 = 0;
-    let mut row_every: u64 = 2400; // 50 ms of samples
-    let mut since_row: u64 = 0;
-    let mut samples_done: u64 = 0;
-    let mut time_bytes: Vec<u8> = Vec::new();
-    let mut mono: Vec<f32> = Vec::new();
-    let mut fires: Vec<detector::OnsetFire> = Vec::new();
-    let mut slice_peak: f64 = 0.0;
-    let mut rows = String::new();
-    let mut onsets = String::new();
-    let mut n_rows = 0u64;
-    let mut n_onsets = 0u64;
 
+    // Decode the whole file to mono, then run the SHARED batch analyzer —
+    // the same analyze_mono the WASM preview calls, so the offline trace
+    // and the browser preview can't diverge.
+    let mut src = source::file::FileSource::open(file, None, true)?;
+    let mut mono: Vec<f32> = Vec::new();
+    let mut chunk: Vec<f32> = Vec::new();
+    let mut sr: u32 = 0;
     while let Some(block) = src.next_block() {
-        if bank.is_none() {
+        if sr == 0 {
             sr = block.sample_rate;
-            tick_every = (sr as u64 / 60).max(1);
-            row_every = (sr as u64 / 20).max(1);
-            bank = Some(DetectorBank::from_params(sr as f64, &dp));
         }
-        let bank = bank.as_mut().unwrap();
-        block.downmix_into(&mut mono);
-        main_an.push(&mono);
-        trans_an.push(&mono);
-        since_tick += mono.len() as u64;
-        while since_tick >= tick_every {
-            since_tick -= tick_every;
-            main_an.tick();
-            trans_an.tick();
+        block.downmix_into(&mut chunk);
+        mono.extend_from_slice(&chunk);
+    }
+    if sr == 0 {
+        return Err("decoded no audio".into());
+    }
+    let tr = analyze_mono(&mono, sr, &dp);
+
+    let mut rows = String::new();
+    for (i, r) in tr.rows.iter().enumerate() {
+        if i > 0 {
+            rows.push(',');
         }
-        fires.clear();
-        let det = bank.process(&mono, &mut fires);
-        samples_done += mono.len() as u64;
-        let t = samples_done as f64 / sr as f64;
-        for f in &fires {
-            if n_onsets > 0 {
-                onsets.push(',');
-            }
-            let _ = write!(onsets, "[{:.3},{:.3}]", t, f.strength);
-            n_onsets += 1;
+        let _ = write!(
+            rows,
+            "[{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}]",
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11],
+        );
+    }
+    let mut onsets = String::new();
+    for (i, (t, s)) in tr.onsets.iter().enumerate() {
+        if i > 0 {
+            onsets.push(',');
         }
-        main_an.time_bytes_into(&mut time_bytes);
-        let b = bands::compute_bands(main_an.freq_bytes(), &time_bytes, Some(trans_an.freq_bytes()), sr as f64);
-        slice_peak = slice_peak.max(b.peak);
-        since_row += mono.len() as u64;
-        if since_row >= row_every {
-            since_row -= row_every;
-            let baseline = bank.kick_baseline();
-            if n_rows > 0 {
-                rows.push(',');
-            }
-            let _ = write!(
-                rows,
-                "[{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}]",
-                t, b.bass, b.mid, b.treble, b.level, b.bass_fast, slice_peak,
-                det.kick, det.pad, det.lead, baseline, det.kick - baseline,
-            );
-            n_rows += 1;
-            slice_peak = 0.0;
-        }
+        let _ = write!(onsets, "[{:.3},{:.3}]", t, s);
     }
 
     // Echo the EFFECTIVE params (the viewer seeds its editor from these,
@@ -223,10 +197,9 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
     let meta = serde_json::json!({
         "schema": "audiotap-trace.v1",
         "file": file.display().to_string(),
-        "sample_rate": sr,
-        "row_ms": 50,
-        "columns": ["t", "bass", "mid", "treble", "level", "bass_fast", "peak",
-                    "kick", "pad", "lead", "kick_baseline", "kick_dev"],
+        "sample_rate": tr.sample_rate,
+        "row_ms": orrery_audio_tap::trace::ROW_MS,
+        "columns": orrery_audio_tap::trace::COLUMNS,
         "params": {
             "schema": "detector-params.v1",
             "kick": ch(&dp.kick),
@@ -242,7 +215,7 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
     std::fs::write(out, body).map_err(|e| format!("{}: {e}", out.display()))?;
     eprintln!(
         "audio-tap: trace -> {} ({} rows, {} onsets, onset {:?})",
-        out.display(), n_rows, n_onsets, dp.onset
+        out.display(), tr.rows.len(), tr.onsets.len(), dp.onset
     );
     Ok(())
 }

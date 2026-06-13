@@ -6,19 +6,38 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# lib (pure DSP, also the wasm cdylib) + the native binary share src/.
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "orrery-audio-tap"
+path = "src/main.rs"
+
 [features]
 # Audio sources are cargo features (daisy alias discipline): prod builds
-# compile only the source they need; default carries both for dev.
+# compile only the source they need; default carries both for dev. These
+# gate the NATIVE binary's I/O only — the wasm build (cdylib lib) takes
+# none of them.
 default = ["capture", "file"]
 capture = ["dep:cpal"]
 file = ["dep:symphonia"]
 
+# The DSP core — present on every target, compiles to wasm32.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+realfft = "3"
+
+# The native binary's I/O deps: target-gated OUT of the wasm build so
+# `wasm-pack build` (cdylib lib only) never tries to compile cpal/etc for
+# wasm32. cpal/symphonia stay feature-optional within the native target.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { version = "2", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
-
 cpal = { version = "0.15", optional = true }
 symphonia = { version = "0.5", optional = true, default-features = false, features = ["mp3"] }
-realfft = "3"
+
+# The wasm tuning-preview glue (src/wasm.rs, cfg(target_arch=wasm32)).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"

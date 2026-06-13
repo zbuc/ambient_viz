@@ -850,6 +850,7 @@ dependencies = [
  "serde_json",
  "symphonia",
  "ureq",
+ "wasm-bindgen",
 ]
 
 [[package]]
