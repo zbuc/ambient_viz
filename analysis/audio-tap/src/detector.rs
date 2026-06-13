@@ -29,9 +29,12 @@ pub mod defaults {
     pub const ONSET_COOLDOWN_S: f64 = 0.150;
 }
 
-/// Onset-gate knobs (the most-tuned constants get CLI overrides before
-/// they get manifest entries).
-#[derive(Debug, Clone, Copy)]
+use serde::Deserialize;
+
+/// Onset-gate knobs (the most-tuned constants; CLI flags override them on
+/// top of any params file).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)] // a typo'd knob is a loud error, not a silent no-op
 pub struct OnsetParams {
     pub baseline_tau_s: f64,
     pub threshold: f64,
@@ -45,6 +48,70 @@ impl Default for OnsetParams {
             threshold: defaults::ONSET_THRESHOLD,
             cooldown_s: defaults::ONSET_COOLDOWN_S,
         }
+    }
+}
+
+/// One detector chain's tunables (band + envelope follower).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)] // a typo'd knob is a loud error, not a silent no-op
+pub struct ChainParams {
+    pub band_hz: [f64; 2],
+    pub attack_s: f64,
+    pub release_s: f64,
+}
+
+impl ChainParams {
+    const fn from_consts(band: (f64, f64), ar: (f64, f64)) -> Self {
+        ChainParams { band_hz: [band.0, band.1], attack_s: ar.0, release_s: ar.1 }
+    }
+}
+
+impl Default for ChainParams {
+    fn default() -> Self {
+        // never used directly (DetectorParams::default seeds each chain),
+        // but serde(default) needs it for partial chain objects
+        ChainParams::from_consts(defaults::KICK_BAND, defaults::KICK_AR)
+    }
+}
+
+/// The full detector tunable set — the `detector-params.v1` artifact
+/// (tools/tuning/), which is also the shape these graduate to as project
+/// data in the manifest. serde(default) so a partial file falls back to
+/// the research defaults field by field.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct DetectorParams {
+    pub kick: ChainParams,
+    pub pad: ChainParams,
+    pub lead: ChainParams,
+    pub onset: OnsetParams,
+}
+
+impl Default for DetectorParams {
+    fn default() -> Self {
+        use defaults::*;
+        DetectorParams {
+            kick: ChainParams::from_consts(KICK_BAND, KICK_AR),
+            pad: ChainParams::from_consts(PAD_BAND, PAD_AR),
+            lead: ChainParams::from_consts(LEAD_BAND, LEAD_AR),
+            onset: OnsetParams::default(),
+        }
+    }
+}
+
+impl DetectorParams {
+    /// Load a `detector-params.v1` file. Missing fields fall back to the
+    /// research defaults; a wrong/absent schema tag is a loud error (catches
+    /// "pointed at the wrong JSON").
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let txt = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&txt).map_err(|e| format!("{}: {e}", path.display()))?;
+        match v.get("schema").and_then(|s| s.as_str()) {
+            Some("detector-params.v1") => {}
+            other => return Err(format!("{}: schema {:?} != \"detector-params.v1\"", path.display(), other)),
+        }
+        serde_json::from_value(v).map_err(|e| format!("{}: {e}", path.display()))
     }
 }
 
@@ -223,19 +290,16 @@ pub struct DetectorBank {
 impl DetectorBank {
     #[allow(dead_code)] // default-params constructor: the tests' entry point
     pub fn new(sample_rate: f64) -> Self {
-        Self::with_onset(sample_rate, OnsetParams::default())
+        Self::from_params(sample_rate, &DetectorParams::default())
     }
 
-    pub fn with_onset(sample_rate: f64, onset: OnsetParams) -> Self {
-        use defaults::*;
+    pub fn from_params(sample_rate: f64, p: &DetectorParams) -> Self {
+        let chain = |c: &ChainParams| Chain::new(c.band_hz[0], c.band_hz[1], c.attack_s, c.release_s, sample_rate);
         DetectorBank {
-            // kick: low-band transient — fast attack, medium release
-            kick: Chain::new(KICK_BAND.0, KICK_BAND.1, KICK_AR.0, KICK_AR.1, sample_rate),
-            // pad: mid-band swell — slow both ways
-            pad: Chain::new(PAD_BAND.0, PAD_BAND.1, PAD_AR.0, PAD_AR.1, sample_rate),
-            // lead: upper-mid presence — medium both ways
-            lead: Chain::new(LEAD_BAND.0, LEAD_BAND.1, LEAD_AR.0, LEAD_AR.1, sample_rate),
-            onset: OnsetGate::new(onset.baseline_tau_s, onset.threshold, onset.cooldown_s, sample_rate),
+            kick: chain(&p.kick),  // low-band transient — fast attack, medium release
+            pad: chain(&p.pad),    // mid-band swell — slow both ways
+            lead: chain(&p.lead),  // upper-mid presence — medium both ways
+            onset: OnsetGate::new(p.onset.baseline_tau_s, p.onset.threshold, p.onset.cooldown_s, sample_rate),
             t_samples: 0,
         }
     }
@@ -282,6 +346,40 @@ mod tests {
 
     fn rms(v: &[f64]) -> f64 {
         (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn params_partial_file_falls_back_field_by_field() {
+        // only kick band + threshold set; everything else must be defaults
+        let p: DetectorParams = serde_json::from_str(
+            r#"{ "kick": { "band_hz": [30, 90] }, "onset": { "threshold": 0.1 } }"#,
+        ).unwrap();
+        assert_eq!(p.kick.band_hz, [30.0, 90.0]);
+        assert_eq!(p.kick.attack_s, defaults::KICK_AR.0); // untouched chain field
+        assert_eq!(p.onset.threshold, 0.1);
+        assert_eq!(p.onset.cooldown_s, defaults::ONSET_COOLDOWN_S);
+        assert_eq!(p.pad.band_hz, [defaults::PAD_BAND.0, defaults::PAD_BAND.1]);
+    }
+
+    #[test]
+    fn params_reject_typoed_knob() {
+        // cooldown_ms (should be cooldown_s) must error, not silently no-op
+        let r: Result<DetectorParams, _> =
+            serde_json::from_str(r#"{ "onset": { "cooldown_ms": 200 } }"#);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn params_load_checks_schema() {
+        let dir = std::env::temp_dir().join(format!("detparams-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.json");
+        std::fs::write(&good, r#"{"schema":"detector-params.v1","onset":{"threshold":0.2}}"#).unwrap();
+        assert_eq!(DetectorParams::load(&good).unwrap().onset.threshold, 0.2);
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, r#"{"onset":{"threshold":0.2}}"#).unwrap();
+        assert!(DetectorParams::load(&bad).is_err()); // missing schema tag
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

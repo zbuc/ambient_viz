@@ -61,8 +61,15 @@ struct Args {
     #[arg(long)]
     trace_out: Option<PathBuf>,
 
-    /// Onset-gate overrides (the most-tuned knobs; defaults in
-    /// detector.rs::defaults until they graduate to project data)
+    /// detector-params.v1 file (band edges + attack/release + onset gate);
+    /// missing fields fall back to the research defaults. Used by BOTH
+    /// trace and live-publish runs — the tuning artifact is the production
+    /// artifact (tools/tuning/).
+    #[arg(long)]
+    params: Option<PathBuf>,
+
+    /// Onset-gate quick overrides (applied ON TOP of --params / defaults;
+    /// the single-knob nudge without editing the file)
     #[arg(long)]
     onset_threshold: Option<f64>,
     #[arg(long)]
@@ -103,16 +110,28 @@ fn open_source(args: &Args) -> Result<Box<dyn AudioSource>, String> {
     Err("no audio source: build with `capture` and/or `file` features and pass --device/--file".into())
 }
 
-fn onset_params(args: &Args) -> detector::OnsetParams {
-    let mut p = detector::OnsetParams::default();
+/// Effective detector params: research defaults < --params file < the
+/// individual --onset-* flags (the single-knob nudge wins). Exits on a
+/// bad params file rather than silently running defaults.
+fn detector_params(args: &Args) -> detector::DetectorParams {
+    let mut p = match &args.params {
+        Some(path) => match detector::DetectorParams::load(path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("audio-tap: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => detector::DetectorParams::default(),
+    };
     if let Some(t) = args.onset_threshold {
-        p.threshold = t;
+        p.onset.threshold = t;
     }
     if let Some(ms) = args.onset_cooldown_ms {
-        p.cooldown_s = ms / 1000.0;
+        p.onset.cooldown_s = ms / 1000.0;
     }
     if let Some(tau) = args.onset_baseline_tau_s {
-        p.baseline_tau_s = tau;
+        p.onset.baseline_tau_s = tau;
     }
     p
 }
@@ -130,7 +149,7 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
     let mut src = source::file::FileSource::open(file, None, true)?;
     let mut main_an = CompatAnalyser::new(2048, 0.85);
     let mut trans_an = CompatAnalyser::new(1024, 0.3);
-    let onset = onset_params(args);
+    let dp = detector_params(args);
     let mut bank: Option<DetectorBank> = None;
     let mut sr: u32 = 0;
     let mut tick_every: u64 = 800; // analyser smoothing cadence (sr/60)
@@ -152,7 +171,7 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
             sr = block.sample_rate;
             tick_every = (sr as u64 / 60).max(1);
             row_every = (sr as u64 / 20).max(1);
-            bank = Some(DetectorBank::with_onset(sr as f64, onset));
+            bank = Some(DetectorBank::from_params(sr as f64, &dp));
         }
         let bank = bank.as_mut().unwrap();
         block.downmix_into(&mut mono);
@@ -196,7 +215,11 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
         }
     }
 
-    use detector::defaults as d;
+    // Echo the EFFECTIVE params (the viewer seeds its editor from these,
+    // and they're a detector-params.v1 verbatim — round-trips straight
+    // back in as --params).
+    let ch = |c: &detector::ChainParams| serde_json::json!({
+        "band_hz": c.band_hz, "attack_s": c.attack_s, "release_s": c.release_s });
     let meta = serde_json::json!({
         "schema": "audiotap-trace.v1",
         "file": file.display().to_string(),
@@ -205,10 +228,11 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
         "columns": ["t", "bass", "mid", "treble", "level", "bass_fast", "peak",
                     "kick", "pad", "lead", "kick_baseline", "kick_dev"],
         "params": {
-            "kick": { "band_hz": [d::KICK_BAND.0, d::KICK_BAND.1], "attack_s": d::KICK_AR.0, "release_s": d::KICK_AR.1 },
-            "pad": { "band_hz": [d::PAD_BAND.0, d::PAD_BAND.1], "attack_s": d::PAD_AR.0, "release_s": d::PAD_AR.1 },
-            "lead": { "band_hz": [d::LEAD_BAND.0, d::LEAD_BAND.1], "attack_s": d::LEAD_AR.0, "release_s": d::LEAD_AR.1 },
-            "onset": { "threshold": onset.threshold, "cooldown_s": onset.cooldown_s, "baseline_tau_s": onset.baseline_tau_s },
+            "schema": "detector-params.v1",
+            "kick": ch(&dp.kick),
+            "pad": ch(&dp.pad),
+            "lead": ch(&dp.lead),
+            "onset": { "threshold": dp.onset.threshold, "cooldown_s": dp.onset.cooldown_s, "baseline_tau_s": dp.onset.baseline_tau_s },
         },
     });
     let body = format!(
@@ -217,8 +241,8 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
     );
     std::fs::write(out, body).map_err(|e| format!("{}: {e}", out.display()))?;
     eprintln!(
-        "audio-tap: trace -> {} ({} rows, {} onsets, onset params {:?})",
-        out.display(), n_rows, n_onsets, onset
+        "audio-tap: trace -> {} ({} rows, {} onsets, onset {:?})",
+        out.display(), n_rows, n_onsets, dp.onset
     );
     Ok(())
 }
@@ -273,6 +297,7 @@ fn main() {
     // sample-counted (sample_rate/60) so file mode is deterministic.
     let mut main_an = CompatAnalyser::new(2048, 0.85);
     let mut trans_an = CompatAnalyser::new(1024, 0.3);
+    let dp = detector_params(&args);
     let mut bank: Option<DetectorBank> = None; // needs the source rate
     let mut tick_every: u64 = 800;
     let mut since_tick: u64 = 0;
@@ -294,7 +319,7 @@ fn main() {
         let sr = block.sample_rate;
         let bank = bank.get_or_insert_with(|| {
             tick_every = (sr as u64 / 60).max(1);
-            DetectorBank::with_onset(sr as f64, onset_params(&args))
+            DetectorBank::from_params(sr as f64, &dp)
         });
         block.downmix_into(&mut mono);
 

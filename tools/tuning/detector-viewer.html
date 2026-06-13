@@ -27,10 +27,21 @@
   #bar { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
   #bar label { cursor:pointer; user-select:none; }
   canvas { display:block; width:100%; background:#16161c; border:1px solid #26262e; margin-bottom:8px; }
-  #params { color:#8a8a94; white-space:pre; margin-top:6px; }
   .sw { display:inline-block; width:10px; height:10px; margin-right:4px; vertical-align:-1px; }
   input[type=file] { color:#8a8a94; max-width:220px; }
   #t { color:#e8e8ee; min-width:90px; display:inline-block; }
+  #editor { display:flex; gap:18px; flex-wrap:wrap; margin-top:8px; align-items:flex-start; }
+  .grp { border:1px solid #26262e; padding:6px 9px; border-radius:4px; }
+  .grp h2 { font-size:12px; font-weight:600; margin:0 0 4px; color:#b8b8c0; }
+  .grp.live h2::after { content:' ·live'; color:#46c878; font-weight:400; }
+  .row { display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  .row label { color:#8a8a94; }
+  .row input { width:64px; background:#0d0d11; color:#e8e8ee; border:1px solid #33333c; border-radius:3px; padding:1px 4px; font:inherit; text-align:right; }
+  .row input.retrace.dirty { border-color:#e8a030; color:#e8a030; }
+  #status { margin-top:8px; color:#8a8a94; }
+  #status.dirty { color:#e8a030; }
+  #download { background:#2a2a34; color:#e8e8ee; border:1px solid #44444e; border-radius:3px; padding:3px 9px; cursor:pointer; font:inherit; margin-left:10px; }
+  #download:disabled { opacity:0.4; cursor:default; }
 </style>
 </head>
 <body>
@@ -39,11 +50,13 @@
   <input type="file" id="traceFile" accept=".json"> <input type="file" id="audioFile" accept="audio/*">
   <span id="channels"></span>
   <label><input type="checkbox" id="follow" checked> follow</label>
+  <button id="download" disabled>download detector-params.json</button>
   <audio id="audio" controls style="height:24px"></audio>
 </div>
 <canvas id="overview" height="110"></canvas>
 <canvas id="detail" height="320"></canvas>
-<div id="params">load a trace…</div>
+<div id="editor">load a trace…</div>
+<div id="status"></div>
 <script>
 'use strict';
 const CHANNELS = [ // [column name, color, on by default]
@@ -53,6 +66,13 @@ const CHANNELS = [ // [column name, color, on by default]
   ['level', '#9a9aa4', false], ['bass_fast', '#ff78b4', false], ['peak', '#e8e8ee', false],
 ];
 let trace = null, col = {}, dur = 1, win = { t0: 0, len: 30 };
+// `params` is the LIVE editor state (seeded from the trace); `traced` is
+// what the loaded trace was computed with. onset.{threshold,cooldown_s}
+// are live (gate replayed in JS over kick_dev); band/AR/baseline_tau need
+// a re-trace, so editing them goes "dirty" and the download emits a
+// detector-params.json to re-run the binary with.
+let params = null, traced = null, dirty = false, preview = [];
+const RETRACE_KEYS = new Set(['band_lo', 'band_hi', 'attack_s', 'release_s', 'baseline_tau_s']);
 const audio = document.getElementById('audio');
 const overview = document.getElementById('overview');
 const detail = document.getElementById('detail');
@@ -76,21 +96,131 @@ function loadTrace(obj) {
   col = Object.fromEntries(trace.meta.columns.map((n, i) => [n, i]));
   dur = trace.rows.length ? trace.rows[trace.rows.length - 1][0] : 1;
   win = { t0: 0, len: Math.min(30, dur) };
-  const p = trace.meta.params;
-  document.getElementById('params').textContent =
-    `rows ${trace.rows.length}  onsets ${trace.onsets.length}  ${dur.toFixed(1)}s   ` +
-    `kick ${p.kick.band_hz.join('–')}Hz a${p.kick.attack_s}/r${p.kick.release_s}  ` +
-    `pad ${p.pad.band_hz.join('–')}Hz a${p.pad.attack_s}/r${p.pad.release_s}  ` +
-    `lead ${p.lead.band_hz.join('–')}Hz a${p.lead.attack_s}/r${p.lead.release_s}\n` +
-    `onset gate: threshold ${p.onset.threshold}  cooldown ${p.onset.cooldown_s}s  baseline τ ${p.onset.baseline_tau_s}s   ` +
-    `(kick_dev vs the dashed threshold line is what you tune)`;
+  traced = JSON.parse(JSON.stringify(trace.meta.params));
+  params = JSON.parse(JSON.stringify(trace.meta.params));
+  dirty = false;
+  buildEditor();
+  recomputePreview();
+  updateStatus();
   draw();
+}
+
+// ── the param editor ────────────────────────────────────────────────────────
+// One number input per knob. Onset threshold/cooldown are LIVE; everything
+// else is a re-trace knob (orange when changed from the trace).
+function buildEditor() {
+  const ed = document.getElementById('editor');
+  ed.innerHTML = '';
+  const num = (group, get, set, key, step) => {
+    const wrap = document.createElement('div'); wrap.className = 'row';
+    const lab = document.createElement('label'); lab.textContent = key;
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.step = step; inp.value = get();
+    if (RETRACE_KEYS.has(key)) inp.className = 'retrace';
+    inp.onchange = () => {
+      const v = parseFloat(inp.value);
+      if (!isFinite(v)) return;
+      set(v);
+      if (RETRACE_KEYS.has(key)) {
+        inp.classList.toggle('dirty', v !== tracedVal(group, key));
+        dirty = anyDirty();
+      }
+      recomputePreview();
+      updateStatus();
+      draw();
+    };
+    wrap.append(lab, inp);
+    return wrap;
+  };
+  for (const det of ['kick', 'pad', 'lead']) {
+    const g = document.createElement('div'); g.className = 'grp';
+    g.innerHTML = `<h2>${det}</h2>`;
+    g.append(
+      num(det, () => params[det].band_hz[0], (v) => params[det].band_hz[0] = v, 'band_lo', 1),
+      num(det, () => params[det].band_hz[1], (v) => params[det].band_hz[1] = v, 'band_hi', 1),
+      num(det, () => params[det].attack_s, (v) => params[det].attack_s = v, 'attack_s', 0.001),
+      num(det, () => params[det].release_s, (v) => params[det].release_s = v, 'release_s', 0.01),
+    );
+    ed.append(g);
+  }
+  const g = document.createElement('div'); g.className = 'grp live';
+  g.innerHTML = '<h2>kick onset</h2>';
+  g.append(
+    num('onset', () => params.onset.threshold, (v) => params.onset.threshold = v, 'threshold', 0.005),
+    num('onset', () => params.onset.cooldown_s, (v) => params.onset.cooldown_s = v, 'cooldown_s', 0.01),
+    num('onset', () => params.onset.baseline_tau_s, (v) => params.onset.baseline_tau_s = v, 'baseline_tau_s', 0.1),
+  );
+  ed.append(g);
+}
+function tracedVal(group, key) {
+  if (key === 'band_lo') return traced[group].band_hz[0];
+  if (key === 'band_hi') return traced[group].band_hz[1];
+  if (key === 'baseline_tau_s') return traced.onset.baseline_tau_s;
+  return traced[group][key];
+}
+function anyDirty() {
+  for (const det of ['kick', 'pad', 'lead']) {
+    const a = params[det], b = traced[det];
+    if (a.band_hz[0] !== b.band_hz[0] || a.band_hz[1] !== b.band_hz[1]
+      || a.attack_s !== b.attack_s || a.release_s !== b.release_s) return true;
+  }
+  return params.onset.baseline_tau_s !== traced.onset.baseline_tau_s;
+}
+
+// JS replay of the Rust OnsetGate over the traced kick_dev column —
+// EXACT for the threshold line, APPROXIMATE for fire timing (kick_dev is
+// point-sampled at 50 ms; the Rust gate runs per-sample, so re-trace for
+// authoritative fires). Mirrors detector.rs: fire when dev>threshold and
+// armed and past cooldown; re-arm when dev<0.5*threshold.
+function recomputePreview() {
+  preview = [];
+  if (!trace) return;
+  const ci = col.kick_dev;
+  const { threshold, cooldown_s } = params.onset;
+  let armed = true, until = -Infinity;
+  for (const r of trace.rows) {
+    const t = r[0], dev = r[ci];
+    if (!armed) { if (dev < threshold * 0.5) armed = true; continue; }
+    if (dev > threshold && t >= until) { until = t + cooldown_s; armed = false; preview.push(t); }
+  }
+}
+
+function updateStatus() {
+  const s = document.getElementById('status');
+  const p = params;
+  const onsetMatch = !dirty && p.onset.threshold === traced.onset.threshold
+    && p.onset.cooldown_s === traced.onset.cooldown_s;
+  // self-check: at the traced params the JS preview should be CLOSE to the
+  // Rust authoritative fires (not exact — 50 ms vs per-sample granularity).
+  const check = onsetMatch
+    ? `self-check: preview ${preview.length} ≈ trace ${trace.onsets.length} (Δ ${preview.length - trace.onsets.length})`
+    : `preview ${preview.length} fires  ·  trace ${trace.onsets.length} @ traced params`;
+  s.textContent = (dirty ? 'NEEDS RE-TRACE (band/attack/release/baseline changed) — download & re-run, then reload.  ' : '')
+    + check + '  ·  threshold line is exact; fire markers are approximate (re-trace for authoritative).';
+  s.classList.toggle('dirty', dirty);
+  document.getElementById('download').disabled = !dirty;
+}
+
+function downloadParams() {
+  const out = {
+    schema: 'detector-params.v1',
+    kick: params.kick, pad: params.pad, lead: params.lead,
+    onset: {
+      threshold: params.onset.threshold,
+      cooldown_s: params.onset.cooldown_s,
+      baseline_tau_s: params.onset.baseline_tau_s,
+    },
+  };
+  const blob = new Blob([JSON.stringify(out, null, 2) + '\n'], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'detector-params.json'; a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 // loading: URL params when served, file pickers always
 const q = new URLSearchParams(location.search);
 if (q.get('trace')) fetch(q.get('trace')).then(r => r.json()).then(loadTrace)
-  .catch(e => document.getElementById('params').textContent = 'trace fetch failed: ' + e);
+  .catch(e => document.getElementById('editor').textContent = 'trace fetch failed: ' + e);
 if (q.get('audio')) audio.src = q.get('audio');
 document.getElementById('traceFile').onchange = (e) => {
   e.target.files[0].text().then((t) => loadTrace(JSON.parse(t)));
@@ -98,6 +228,7 @@ document.getElementById('traceFile').onchange = (e) => {
 document.getElementById('audioFile').onchange = (e) => {
   audio.src = URL.createObjectURL(e.target.files[0]);
 };
+document.getElementById('download').onclick = downloadParams;
 
 function rowsIn(t0, t1) {
   // rows are time-ordered at fixed 50 ms — index directly
@@ -115,7 +246,7 @@ function drawStrip(cv, t0, t1, withThreshold) {
   if (!trace) return ctx;
   const x = (t) => (t - t0) / (t1 - t0) * W;
   const y = (v) => H - 4 - Math.max(-0.1, Math.min(1, v)) * (H - 18);
-  // onset fires: ticks from the top
+  // authoritative fires (Rust, at traced params): ticks down from the top
   ctx.strokeStyle = '#ff5050';
   ctx.globalAlpha = 0.8;
   for (const [t, s] of trace.onsets) {
@@ -123,10 +254,17 @@ function drawStrip(cv, t0, t1, withThreshold) {
     ctx.beginPath(); ctx.moveTo(x(t), 0); ctx.lineTo(x(t), 8 + s * 16); ctx.stroke();
   }
   ctx.globalAlpha = 1;
-  // threshold line (kick_dev's pass bar)
-  if (withThreshold && trace.meta.params) {
+  // preview fires (JS gate replay at the LIVE threshold/cooldown): dots
+  // along the threshold line, so dragging the slider shows the effect.
+  if (withThreshold && params) {
+    const ty = y(params.onset.threshold);
+    ctx.fillStyle = '#ffd24a';
+    for (const t of preview) {
+      if (t < t0 || t > t1) continue;
+      ctx.beginPath(); ctx.arc(x(t), ty, 2.4, 0, 7); ctx.fill();
+    }
+    // threshold line at the LIVE value (exact)
     ctx.strokeStyle = '#c882ff'; ctx.setLineDash([6, 5]);
-    const ty = y(trace.meta.params.onset.threshold);
     ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(W, ty); ctx.stroke();
     ctx.setLineDash([]);
   }
