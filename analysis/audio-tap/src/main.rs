@@ -194,6 +194,8 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
     // back in as --params).
     let ch = |c: &detector::ChainParams| serde_json::json!({
         "band_hz": c.band_hz, "attack_s": c.attack_s, "release_s": c.release_s });
+    let fx = |c: &detector::FluxChannelParams| serde_json::json!({
+        "band_hz": c.band_hz, "compress": c.compress });
     let meta = serde_json::json!({
         "schema": "audiotap-trace.v1",
         "file": file.display().to_string(),
@@ -206,6 +208,7 @@ fn trace_run(args: &Args, file: &std::path::Path, out: &std::path::Path) -> Resu
             "pad": ch(&dp.pad),
             "lead": ch(&dp.lead),
             "onset": { "threshold": dp.onset.threshold, "cooldown_s": dp.onset.cooldown_s, "baseline_tau_s": dp.onset.baseline_tau_s },
+            "flux": { "kick": fx(&dp.flux.kick), "click": fx(&dp.flux.click) },
         },
     });
     let body = format!(

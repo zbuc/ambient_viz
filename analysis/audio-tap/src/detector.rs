@@ -74,6 +74,57 @@ impl Default for ChainParams {
     }
 }
 
+/// One spectral-flux channel (stage 2, observe-only): a measurement band
+/// plus a `compress` knob. Flux peaks vary hit-to-hit; compression (a
+/// power-law that lifts weak-but-present onsets toward the strong ones,
+/// the log/mu-law flux normalization of the onset-detection literature)
+/// tames that so a single threshold works across hits — at the cost of
+/// floor contrast, so it's adjustable and viewed.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FluxChannelParams {
+    pub band_hz: [f64; 2],
+    /// 0 = linear (off); 1 = strong. gamma = 1 − 0.8·compress, applied as
+    /// `out = in^gamma` on the level-normalized flux (monotonic, [0,1]).
+    pub compress: f64,
+}
+
+impl Default for FluxChannelParams {
+    fn default() -> Self {
+        FluxChannelParams { band_hz: [20.0, 120.0], compress: 0.0 }
+    }
+}
+
+impl FluxChannelParams {
+    const fn new(lo: f64, hi: f64) -> Self {
+        FluxChannelParams { band_hz: [lo, hi], compress: 0.0 }
+    }
+    /// Shape a level-normalized flux value (≥0) by this channel's compress.
+    pub fn shape(&self, x: f64) -> f64 {
+        let gamma = 1.0 - 0.8 * self.compress.clamp(0.0, 1.0);
+        x.clamp(0.0, 1.0).powf(gamma)
+    }
+}
+
+/// The two flux channels — `kick` (body) + `click` (beater). A kick spikes
+/// both coincidentally; a tom mostly `kick`. Their own bands (independent
+/// of the envelope detectors' bands).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FluxParams {
+    pub kick: FluxChannelParams,
+    pub click: FluxChannelParams,
+}
+
+impl Default for FluxParams {
+    fn default() -> Self {
+        FluxParams {
+            kick: FluxChannelParams::new(20.0, 120.0),
+            click: FluxChannelParams::new(2000.0, 5000.0),
+        }
+    }
+}
+
 /// The full detector tunable set — the `detector-params.v1` artifact
 /// (tools/tuning/), which is also the shape these graduate to as project
 /// data in the manifest. serde(default) so a partial file falls back to
@@ -85,6 +136,7 @@ pub struct DetectorParams {
     pub pad: ChainParams,
     pub lead: ChainParams,
     pub onset: OnsetParams,
+    pub flux: FluxParams,
 }
 
 impl Default for DetectorParams {
@@ -95,6 +147,7 @@ impl Default for DetectorParams {
             pad: ChainParams::from_consts(PAD_BAND, PAD_AR),
             lead: ChainParams::from_consts(LEAD_BAND, LEAD_AR),
             onset: OnsetParams::default(),
+            flux: FluxParams::default(),
         }
     }
 }
@@ -359,6 +412,29 @@ mod tests {
         assert_eq!(p.onset.threshold, 0.1);
         assert_eq!(p.onset.cooldown_s, defaults::ONSET_COOLDOWN_S);
         assert_eq!(p.pad.band_hz, [defaults::PAD_BAND.0, defaults::PAD_BAND.1]);
+    }
+
+    #[test]
+    fn flux_compress_lifts_lows_and_is_off_at_zero() {
+        let linear = FluxChannelParams { band_hz: [20.0, 120.0], compress: 0.0 };
+        assert!((linear.shape(0.25) - 0.25).abs() < 1e-12); // compress 0 = identity
+        let strong = FluxChannelParams { band_hz: [20.0, 120.0], compress: 1.0 };
+        assert!(strong.shape(0.25) > 0.25); // a weak onset is lifted
+        assert!((strong.shape(1.0) - 1.0).abs() < 1e-9); // a full onset stays at 1
+        assert!((strong.shape(0.0)).abs() < 1e-9); // silence stays at 0
+        // monotonic: bigger in -> bigger out (so slice-max commutes with shape)
+        assert!(strong.shape(0.6) > strong.shape(0.3));
+    }
+
+    #[test]
+    fn params_flux_partial_falls_back() {
+        let p: DetectorParams = serde_json::from_str(
+            r#"{ "flux": { "click": { "compress": 0.5 } } }"#,
+        ).unwrap();
+        assert_eq!(p.flux.click.compress, 0.5);
+        assert_eq!(p.flux.click.band_hz, [20.0, 120.0]); // FluxChannelParams default band
+        assert_eq!(p.flux.kick.band_hz, [20.0, 120.0]);
+        assert_eq!(p.flux.kick.compress, 0.0);
     }
 
     #[test]

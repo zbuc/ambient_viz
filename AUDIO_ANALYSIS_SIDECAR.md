@@ -69,11 +69,19 @@ Two stages, shipped in this order:
   `kick_flux` (kick body band) + `click_flux` (fixed 2-5 kHz beater band)
   are trace columns + viewer lanes — a kick spikes BOTH coincidentally, a
   tom mostly the low band, so the eye (and later a gate) can separate
-  them. The gate still fires on `kick_dev` (energy deviation); folding
-  flux into the onset decision is the next step, *after* looking at the
-  flux lanes against real kicks/toms decides whether it earns it (and
-  whether it closes the gap enough to skip ML — see *Prior art* and the
-  ML-evaluation note). `CompatAnalyser::band_flux(lo,hi,sr)`.
+  them. Each channel has its own **band + `compress`** (`detector-params.v1`
+  `flux.{kick,click}`): flux peaks vary hit-to-hit, so a power-law
+  (`gamma = 1 − 0.8·compress`, the log/mu-law flux normalization of the
+  literature) lifts weak-but-present onsets toward the strong ones so one
+  threshold works across hits — trading floor contrast, hence adjustable
+  and viewed. The gate still fires on `kick_dev` (energy deviation);
+  folding flux into the onset decision is the next step, and the bigger
+  lever there is the **combination** (a kick = low-band onset present AND
+  click elevated; a tom has no click — so max/weighted-score, not either
+  channel alone), *after* the lanes on real material decide whether it
+  earns it (and whether it closes the gap enough to skip ML — see *Prior
+  art* + the ML note). `CompatAnalyser::band_flux(lo,hi,sr)` (raw
+  measurement); `FluxChannelParams::shape()` (compression).
 
 `dasp`'s role is the time-domain back half (peak/rms/envelope/window +
 signal plumbing); it deliberately has no FFT — `realfft`/`rustfft`

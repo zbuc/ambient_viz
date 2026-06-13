@@ -24,7 +24,6 @@ pub const COLUMNS: [&str; 14] = [
     "kick", "pad", "lead", "kick_baseline", "kick_dev", "kick_flux", "click_flux",
 ];
 pub const ROW_MS: u32 = 50;
-const CLICK_BAND_HZ: (f64, f64) = (2000.0, 5000.0); // kick-beater click (fixed; observe-only)
 
 pub struct Trace {
     pub sample_rate: u32,
@@ -60,7 +59,8 @@ pub fn analyze_mono(mono: &[f32], sample_rate: u32, params: &DetectorParams) -> 
     let mut click_flux = 0.0f64;
     let mut rows = Vec::new();
     let mut onsets = Vec::new();
-    let (klo, khi) = (params.kick.band_hz[0], params.kick.band_hz[1]);
+    let fk = params.flux.kick;
+    let fc = params.flux.click;
 
     for chunk in mono.chunks(CHUNK) {
         main_an.push(chunk);
@@ -71,9 +71,10 @@ pub fn analyze_mono(mono: &[f32], sample_rate: u32, params: &DetectorParams) -> 
             main_an.tick();
             trans_an.tick();
             // spectral flux is a per-tick (60 Hz) quantity; keep the
-            // strongest in the 50 ms row (the onset spike)
-            kick_flux = kick_flux.max(main_an.band_flux(klo, khi, sr as f64));
-            click_flux = click_flux.max(main_an.band_flux(CLICK_BAND_HZ.0, CLICK_BAND_HZ.1, sr as f64));
+            // strongest in the 50 ms row (the onset spike). Compression is
+            // monotonic, so shaping the slice-max == max of shaped.
+            kick_flux = kick_flux.max(main_an.band_flux(fk.band_hz[0], fk.band_hz[1], sr as f64));
+            click_flux = click_flux.max(main_an.band_flux(fc.band_hz[0], fc.band_hz[1], sr as f64));
         }
         fires.clear();
         let det = bank.process(chunk, &mut fires);
@@ -92,7 +93,7 @@ pub fn analyze_mono(mono: &[f32], sample_rate: u32, params: &DetectorParams) -> 
             rows.push([
                 t, b.bass, b.mid, b.treble, b.level, b.bass_fast, slice_peak,
                 det.kick, det.pad, det.lead, baseline, det.kick - baseline,
-                kick_flux.min(1.0), click_flux.min(1.0),
+                fk.shape(kick_flux), fc.shape(click_flux),
             ]);
             slice_peak = 0.0;
             kick_flux = 0.0;

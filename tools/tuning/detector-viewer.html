@@ -269,6 +269,19 @@ function buildEditor() {
     num('onset', () => params.onset.baseline_tau_s, (v) => params.onset.baseline_tau_s = v, 'baseline_tau_s', 0.1),
   );
   ed.append(g);
+  // flux channels (stage 2): band + compress, live in wasm mode
+  if (params.flux) {
+    for (const fk of ['kick', 'click']) {
+      const fg = document.createElement('div'); fg.className = 'grp';
+      fg.innerHTML = `<h2>flux ${fk}</h2>`;
+      fg.append(
+        num('flux.' + fk, () => params.flux[fk].band_hz[0], (v) => params.flux[fk].band_hz[0] = v, 'band_lo', 1),
+        num('flux.' + fk, () => params.flux[fk].band_hz[1], (v) => params.flux[fk].band_hz[1] = v, 'band_hi', 1),
+        num('flux.' + fk, () => params.flux[fk].compress, (v) => params.flux[fk].compress = v, 'compress', 0.05),
+      );
+      ed.append(fg);
+    }
+  }
 }
 
 function setStatus(msg, cls) {

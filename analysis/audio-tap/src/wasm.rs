@@ -64,12 +64,16 @@ pub fn default_params() -> String {
     let ch = |c: &crate::detector::ChainParams| {
         serde_json::json!({ "band_hz": c.band_hz, "attack_s": c.attack_s, "release_s": c.release_s })
     };
+    let fx = |c: &crate::detector::FluxChannelParams| {
+        serde_json::json!({ "band_hz": c.band_hz, "compress": c.compress })
+    };
     serde_json::json!({
         "schema": "detector-params.v1",
         "kick": ch(&p.kick),
         "pad": ch(&p.pad),
         "lead": ch(&p.lead),
         "onset": { "threshold": p.onset.threshold, "cooldown_s": p.onset.cooldown_s, "baseline_tau_s": p.onset.baseline_tau_s },
+        "flux": { "kick": fx(&p.flux.kick), "click": fx(&p.flux.click) },
     })
     .to_string()
 }
