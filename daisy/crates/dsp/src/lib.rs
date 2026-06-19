@@ -37,6 +37,7 @@ pub mod sequencer;
 pub mod svf;
 pub mod tape;
 pub mod timeline;
+pub mod transporter;
 pub mod wavetable;
 pub mod wavetable_bank;
 
