@@ -1,12 +1,14 @@
 //! Transporter — a reverse-grain **pad** generator built on the
 //! [`buffer_player`](crate::buffer_player) substrate.
 //!
-//! The end goal is a smooth, polyphonic pad: a cloud of grains read
-//! **backward** (negative rate) from positions **offset behind the primary
-//! playhead**, each Hann-windowed and overlapping so they sum into a
-//! continuous, sustained wash that trails and harmonizes with the source.
-//! "Polyphonic" = the overlapping grain cloud; "pad" = the smooth reversed
-//! texture; smoothness comes from the window overlap.
+//! The end goal is a smooth, polyphonic pad: a cloud of grains that **start
+//! their read at the current playhead and play backward into the audio
+//! prior to it** (negative rate) — each grain is sourced from points before
+//! the playhead but plays in reverse *at* the playhead. Hann-windowed and
+//! overlapping, they sum into a continuous, sustained wash — a reversed
+//! ghost of the recent material. "Polyphonic" = the overlapping grain
+//! cloud; "pad" = the smooth reversed texture; smoothness comes from the
+//! window overlap.
 //!
 //! Increment 1 (this file): the **live-capture effect** form — input is
 //! captured into the ring (the write head is the primary playhead), the
@@ -43,14 +45,17 @@ pub struct Transporter {
     grain_len: f32,
     /// Grains spawned per second (drives overlap / polyphony).
     density: f32,
-    /// Frames behind the playhead each grain spawns at.
+    /// Optional pre-delay: frames behind the playhead to *start* the reverse
+    /// read. 0 = start at the playhead (the default — "play in reverse at the
+    /// current playhead"); >0 delays the reversed ghost.
     offset: f32,
     /// Grain playback-rate magnitude (pitch; 1.0 = unity, 2.0 = +octave).
     pitch: f32,
     /// Reverse playback (the showcased pad behaviour). False = forward.
     reverse: bool,
-    /// Spawn-offset jitter, 0..1 (fraction of `offset`) — scatters the
-    /// cloud for a wider, smoother pad.
+    /// Spawn-start jitter, 0..1 (fraction of grain length) — scatters the
+    /// cloud so overlapping grains decorrelate into a smooth pad rather than
+    /// a comb.
     spread: f32,
     /// Pad output level.
     level: f32,
@@ -81,7 +86,7 @@ impl Transporter {
             sample_rate,
             grain_len: 0.1 * sample_rate, // 100 ms
             density: 40.0,
-            offset: 0.25 * sample_rate, // 250 ms behind
+            offset: 0.0, // start the reverse read at the playhead
             pitch: 1.0,
             reverse: true,
             spread: 0.3,
@@ -98,6 +103,8 @@ impl Transporter {
     pub fn set_density(&mut self, grains_per_s: f32) {
         self.density = grains_per_s.clamp(0.0, 400.0);
     }
+    /// Optional pre-delay before the reverse read starts (0 = at the
+    /// playhead, the default).
     pub fn set_offset_ms(&mut self, ms: f32) {
         self.offset = (ms * 0.001 * self.sample_rate).max(0.0);
     }
@@ -130,12 +137,15 @@ impl Transporter {
         (x >> 8) as f32 / (1u32 << 24) as f32
     }
 
-    /// Spawn one grain at `playhead − offset(±jitter)`, reading backward
-    /// (or forward) at `pitch`. Reuses a finished slot; if the pool is full,
-    /// steals the grain nearest the end of its life (smoothest to drop).
+    /// Spawn one grain starting at the playhead (`write_head − 1`, the just-
+    /// written sample), minus the optional pre-delay and a length-scaled
+    /// jitter, reading backward (reverse) or forward at `pitch`. Reuses a
+    /// finished slot; if the pool is full, steals the grain nearest the end
+    /// of its life (smoothest to drop).
     fn spawn(&mut self) {
-        let jitter = self.offset * self.spread * (self.next_rand() - 0.5);
-        let start = self.buf.write_head() as f32 - self.offset + jitter;
+        let jitter = self.spread * self.grain_len * (self.next_rand() - 0.5);
+        let playhead = self.buf.write_head() as f32 - 1.0;
+        let start = playhead - self.offset + jitter;
         let rate = if self.reverse { -self.pitch } else { self.pitch };
         let grain = Grain::start(start, rate, self.grain_len);
 
@@ -243,47 +253,44 @@ mod tests {
     }
 
     #[test]
-    fn reverse_grain_reads_backward_from_behind_the_playhead() {
-        // Capture a ramp so a read position is identifiable from its value,
-        // then confirm a spawned reverse grain starts behind the playhead
-        // and steps backward.
+    fn reverse_grain_starts_at_playhead_and_reads_backward() {
+        // A reverse grain (default offset 0) starts at the playhead — the
+        // just-written sample — and reads backward into the prior audio.
         let mut t = Transporter::new(SR);
-        t.set_offset_ms(100.0);
-        t.set_spread(0.0); // deterministic start
+        t.set_density(0.0); // no auto-spawn: spawn one by hand, deterministically
+        t.set_offset_ms(0.0);
+        t.set_spread(0.0);
         t.set_reverse(true);
-        // write a known ramp directly into the ring via process (silent pad)
-        let n = (SR as usize) / 2;
+        // advance the playhead with a ramp (value == frame index)
+        let n = 1000;
         let mut input = vec![0.0; n * 2];
         for i in 0..n {
-            let v = i as f32;
-            input[2 * i] = v;
-            input[2 * i + 1] = v;
+            input[2 * i] = i as f32;
+            input[2 * i + 1] = i as f32;
         }
         let mut pad = vec![0.0; n * 2];
         t.process(&input, &mut pad);
+        assert_eq!(t.active_grains(), 0, "density 0 spawns nothing");
 
-        let playhead = t.buf.write_head() as f32;
-        let offset = 0.1 * SR; // 100 ms
-        let expected = (playhead - offset).rem_euclid(t.buf.frames() as f32);
-        // a freshly spawned grain (reverse, no jitter) should sit ~offset
-        // behind the playhead and have a negative rate
+        let playhead = t.buf.write_head() as f32 - 1.0; // last written = 999
         t.spawn();
-        let g = t.grains.iter().rev().find(|g| g.active()).unwrap();
-        assert!((g.pos() - expected).abs() < 2.0, "spawns ~offset behind playhead");
+        let g = *t.grains.iter().find(|g| g.active()).unwrap();
+        assert!((g.pos() - playhead).abs() < 1.0, "starts at the playhead, got {}", g.pos());
         let p0 = g.pos();
-        let mut g2 = *g;
+        let mut g2 = g;
         g2.advance();
-        assert!(g2.pos() < p0, "reverse grain steps backward");
+        assert!(g2.pos() < p0, "reverse grain reads backward into prior audio");
     }
 
     #[test]
     fn forward_mode_steps_forward() {
         let mut t = Transporter::new(SR);
+        t.set_density(0.0);
         t.set_reverse(false);
         t.set_spread(0.0);
         run_constant(&mut t, 0.5, 1000);
         t.spawn();
-        let g = *t.grains.iter().rev().find(|g| g.active()).unwrap();
+        let g = *t.grains.iter().find(|g| g.active()).unwrap();
         let mut g2 = g;
         g2.advance();
         assert!(g2.pos() > g.pos(), "forward grain steps forward");
