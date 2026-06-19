@@ -32,9 +32,11 @@
 //!   GET  /fx/presets             -> ["name", ..]
 //!   POST /fx/preset/save         <- {"name":"plate verb"}   (saves the live chain)
 //!   POST /fx/preset/load         <- {"name":"plate verb"}
+//!   POST /fx/preset/delete       <- {"name":"plate verb"}
 //!   GET  /instrument/presets     -> ["name", ..]
 //!   POST /instrument/save        <- {"name":"glass pad"}    (patches + chain)
 //!   POST /instrument/load        <- {"name":"glass pad"}
+//!   POST /instrument/delete      <- {"name":"glass pad"}
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -197,6 +199,10 @@ fn route(method: Method, path: &str, body: &[u8], rig: &Arc<Mutex<PreviewRig>>) 
             },
             Err(e) => (400, e),
         },
+        (Method::Post, "/fx/preset/delete") => match parse::<NameReq>(body) {
+            Ok(r) => respond(delete_json(&fx_dir(), &r.name)),
+            Err(e) => (400, e),
+        },
 
         // ── instrument presets (patches + chain) ─────────────────────────
         (Method::Get, "/instrument/presets") => json_ok(&list_presets(&instrument_dir())),
@@ -208,10 +214,15 @@ fn route(method: Method, path: &str, body: &[u8], rig: &Arc<Mutex<PreviewRig>>) 
             Err(e) => (400, e),
         },
         (Method::Post, "/instrument/load") => match parse::<NameReq>(body) {
+            // returns the loaded instrument so the editor can sync its UI
             Ok(r) => match load_json::<Instrument>(&instrument_dir(), &r.name) {
-                Ok(inst) => { rig.lock().unwrap().load_instrument(&inst); (200, "ok".into()) }
+                Ok(inst) => { rig.lock().unwrap().load_instrument(&inst); json_ok(&inst) }
                 Err(e) => (400, e),
             },
+            Err(e) => (400, e),
+        },
+        (Method::Post, "/instrument/delete") => match parse::<NameReq>(body) {
+            Ok(r) => respond(delete_json(&instrument_dir(), &r.name)),
             Err(e) => (400, e),
         },
 
@@ -322,6 +333,14 @@ fn load_json<T: DeserializeOwned>(dir: &Path, name: &str) -> Result<T, String> {
     let path = dir.join(format!("{name}.json"));
     let txt = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     serde_json::from_str(&txt).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+fn delete_json(dir: &Path, name: &str) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err(format!("bad preset name {name:?}"));
+    }
+    let path = dir.join(format!("{name}.json"));
+    std::fs::remove_file(&path).map_err(|e| format!("delete {}: {e}", path.display()))
 }
 
 /// Pull an optional MIDI `note` out of a `{"note":N}` body (absent → None).

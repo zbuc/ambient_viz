@@ -50,6 +50,34 @@ export function createPreview({ onStatus = () => {} } = {}) {
     }
   }
 
+  /** GET + parse JSON (null on failure). */
+  async function get(path) {
+    try {
+      const r = await fetch(`${server}${path}`, { cache: 'no-store' });
+      setOnline(true);
+      return r.ok ? await r.json() : null;
+    } catch {
+      setOnline(false);
+      return null;
+    }
+  }
+
+  /** POST + parse the JSON response (null on failure). */
+  async function postJson(path, body) {
+    try {
+      const r = await fetch(`${server}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      });
+      setOnline(true);
+      return r.ok ? await r.json() : null;
+    } catch {
+      setOnline(false);
+      return null;
+    }
+  }
+
   /** Stream a patch edit, coalescing rapid slider moves (~40 ms). */
   function sendPatch(kind, patch) {
     pending = { kind, patch: { ...patch } };
@@ -71,12 +99,51 @@ export function createPreview({ onStatus = () => {} } = {}) {
     return post('/panic', {});
   }
 
+  // --- FX chain (composite instrument) -------------------------------------
+  const fxParamDebounce = new Map(); // `${index}:${name}` -> timer
+
+  const fx = {
+    catalog: () => get('/fx/catalog'),                  // [{kind, params:[{name,default,min,max}]}]
+    chain: () => get('/fx/chain'),                      // [{kind, params:{..}}]
+    setChain: (nodes) => post('/fx/chain', nodes),
+    add: (kind, index) => post('/fx/add', index == null ? { kind } : { kind, index }),
+    remove: (index) => post('/fx/remove', { index }),
+    move: (from, to) => post('/fx/move', { from, to }),
+    /** Tweak one effect param, coalescing rapid slider moves per (index,name). */
+    setParam(index, name, value) {
+      const key = `${index}:${name}`;
+      const prev = fxParamDebounce.get(key);
+      if (prev) clearTimeout(prev);
+      fxParamDebounce.set(key, setTimeout(() => {
+        fxParamDebounce.delete(key);
+        post('/fx/param', { index, name, value });
+      }, 40));
+    },
+  };
+
+  // --- presets (fx + instrument live on patch_server) ----------------------
+  const fxPresets = {
+    list: () => get('/fx/presets'),
+    save: (name) => post('/fx/preset/save', { name }),
+    load: (name) => post('/fx/preset/load', { name }),
+    remove: (name) => post('/fx/preset/delete', { name }),
+  };
+  const instruments = {
+    list: () => get('/instrument/presets'),
+    save: (name) => post('/instrument/save', { name }),
+    load: (name) => postJson('/instrument/load', { name }), // returns the loaded Instrument
+    remove: (name) => post('/instrument/delete', { name }),
+  };
+
   return {
     server,
     probe,
     sendPatch,
     trigger,
     panic,
+    fx,
+    fxPresets,
+    instruments,
     get online() { return online; },
   };
 }
