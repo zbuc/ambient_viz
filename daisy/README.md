@@ -101,7 +101,13 @@ cargo run -p host --bin sound_test -- [bell|industrial|voice|transporter] [flags
   are echoed to the console (knob discovery) and CC **20–27** map to dry mix /
   pad level / grain / density / offset / pitch / spread / reverse
   (`TransporterRig::CC_HELP`). Saved finds become named presets on the rig
-  (e.g. `preset_sub_reverse_wash`).
+  (e.g. `preset_breathing_subwash`, the boot default).
+- **CC LFOs** (`src/lfo.rs`, `CcLfo`) — general control-rate modulation of any
+  effect CC: an LFO sweeps a CC's *value* (0..127, same units you dial)
+  between two endpoints at a rate, ticked once per render block and fed back
+  through `handle_cc` (so it inherits the CC→param scaling). A preset
+  registers a `Vec<CcLfo>` (e.g. `preset_breathing_subwash` breathes grain +
+  density on slow sines). Reusable by any rig.
 - `src/mood.rs` — the mood-plane sweep (genome/FX blend over anchor points);
   `main.rs` can drive it. See `../PROCMUSIC.md` / mem `procmusic-design`.
 

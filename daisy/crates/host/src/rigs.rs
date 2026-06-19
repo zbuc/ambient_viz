@@ -4,6 +4,7 @@
 //! before the master limiter — see firmware/src/main.rs), so a voice auditioned
 //! here sounds like it does on the Daisy.
 
+use crate::lfo::CcLfo;
 use dsp::limiter::Limiter;
 use dsp::transporter::Transporter;
 use dsp::{
@@ -137,6 +138,10 @@ pub struct TransporterRig {
     /// the floaty modal feel.
     progression: [[u8; 4]; 4],
     next: usize,
+    /// CC LFOs (a preset registers them) — ticked once per render block and
+    /// fed back through `handle_cc`, so any CC-mapped knob can breathe.
+    lfos: Vec<CcLfo>,
+    sample_rate: f32,
 }
 
 impl TransporterRig {
@@ -157,8 +162,10 @@ impl TransporterRig {
                 [62, 64, 67, 71], // Em7  (ii)  D E G B
             ],
             next: 0,
+            lfos: Vec::new(),
+            sample_rate,
         };
-        rig.preset_sub_reverse_wash(); // the saved boot sound
+        rig.preset_breathing_subwash(); // the boot sound
         rig
     }
 
@@ -167,6 +174,7 @@ impl TransporterRig {
     /// second back, pitched down two octaves, wide spread. The CC values it
     /// came from are noted per line.
     pub fn preset_sub_reverse_wash(&mut self) {
+        self.lfos.clear();
         self.set_dry_mix(0.0); //              CC20=0    pad only
         self.trans.set_level(1.5); //          CC21=95
         self.trans.set_grain_ms(535.0); //     CC22=112
@@ -175,6 +183,22 @@ impl TransporterRig {
         self.trans.set_pitch(0.25); //         CC25=0    -2 octaves
         self.trans.set_spread(1.45); //        CC26=92
         self.trans.set_reverse(true); //       CC27=127
+    }
+
+    /// **Saved preset** (2026-06-19): the sub-reverse wash, *breathing* — the
+    /// grain length and density sweep on slow sines so the texture is never
+    /// static. Static CCs: 20=0 (pad only), 25=0 (−2 oct), 26=40 (spread),
+    /// 27=127 (reverse). LFO'd CCs: 22 sin 77↔92 (grain), 23 sin 9↔12
+    /// (density), on slightly different periods so they drift apart.
+    pub fn preset_breathing_subwash(&mut self) {
+        self.handle_cc(20, 0); // dry mix: pad only
+        self.handle_cc(25, 0); // pitch: -2 oct
+        self.handle_cc(26, 40); // spread
+        self.handle_cc(27, 127); // reverse on
+        self.lfos = vec![
+            CcLfo::sine(22, 77.0, 92.0, 0.13), // grain breathes (~7.7 s)
+            CcLfo::sine(23, 9.0, 12.0, 0.087), // density breathes (~11.5 s)
+        ];
     }
 
     /// Swap the wavetable source patch — e.g. one of the browser editor's
@@ -209,6 +233,13 @@ impl Rig for TransporterRig {
 
     fn render(&mut self, out: &mut [f32]) {
         let frames = out.len() / 2;
+        // 0. advance the CC LFOs once per block, applying each through the
+        //    normal CC path (each tick's borrow ends before handle_cc).
+        let dt = frames as f32 / self.sample_rate;
+        for i in 0..self.lfos.len() {
+            let (cc, value) = self.lfos[i].tick(dt);
+            self.handle_cc(cc, value);
+        }
         self.dry.resize(frames * 2, 0.0);
         self.pad.resize(frames * 2, 0.0);
         // 1. render the polyphonic held chord (mono sum) into a stereo dry buffer
