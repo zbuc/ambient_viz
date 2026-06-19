@@ -28,6 +28,9 @@ pub trait Rig: Send {
     fn render(&mut self, out: &mut [f32]);
     /// Grow internal scratch up front so the callback never allocates.
     fn prime(&mut self) {}
+    /// Apply a MIDI control change (live tuning from a knob box). Default:
+    /// ignore. Rigs that map CCs override this.
+    fn handle_cc(&mut self, _cc: u8, _value: u8) {}
 }
 
 /// Build the firmware-realistic stab ping-pong delay. The first ctor arg is the
@@ -172,6 +175,13 @@ impl TransporterRig {
     pub fn set_dry_mix(&mut self, m: f32) {
         self.dry_mix = m.max(0.0);
     }
+
+    /// The CC → knob map, printed at startup so you can match your controller.
+    pub const CC_HELP: &'static str = "\
+  CC20 dry mix (primary playhead)   CC24 offset 0..1000 ms\n\
+  CC21 pad level 0..2               CC25 pitch 0.25..4 (±2 oct)\n\
+  CC22 grain 5..1000 ms (log)       CC26 spread 0..2\n\
+  CC23 density 0..100 /s            CC27 reverse (>=64 = on)";
 }
 
 impl Rig for TransporterRig {
@@ -202,6 +212,21 @@ impl Rig for TransporterRig {
             out[i] = self.dry[i] * self.dry_mix + self.pad[i];
         }
         self.limiter.process(out);
+    }
+
+    fn handle_cc(&mut self, cc: u8, value: u8) {
+        let v = value as f32 / 127.0; // 0..1
+        match cc {
+            20 => self.set_dry_mix(v),                              // primary playhead 0..1
+            21 => self.trans.set_level(v * 2.0),                    // pad level 0..2
+            22 => self.trans.set_grain_ms(5.0 * 200.0_f32.powf(v)), // 5..1000 ms (log)
+            23 => self.trans.set_density(v * 100.0),                // 0..100 grains/s
+            24 => self.trans.set_offset_ms(v * 1000.0),             // 0..1000 ms
+            25 => self.trans.set_pitch(0.25 * 16.0_f32.powf(v)),    // 0.25..4, ±2 oct (log)
+            26 => self.trans.set_spread(v * 2.0),                   // 0..2
+            27 => self.trans.set_reverse(value >= 64),              // toggle
+            _ => {}
+        }
     }
 }
 

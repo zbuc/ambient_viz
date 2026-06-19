@@ -115,10 +115,54 @@ fn main() -> Result<()> {
     let stream = run_output(&out, rig.clone())?;
     stream.play()?;
 
+    // Live CC tuning (transporter maps CC20-27; other rigs ignore). Keep the
+    // connection alive for the program's lifetime.
+    if matches!(mode, Mode::Transporter) {
+        println!("CC map:\n{}", host::rigs::TransporterRig::CC_HELP);
+    }
+    let _midi = connect_midi_rig(rig.clone());
+
     println!("auditioning '{}' every {every} s — Ctrl-C to stop", mode.label());
     loop {
         let what = rig.lock().unwrap().trigger();
         println!("{what}");
         std::thread::sleep(Duration::from_secs(every));
     }
+}
+
+/// Open a MIDI input and route control-changes to the rig's `handle_cc`
+/// (live tuning). Returns the connection to keep alive; `None` if no port /
+/// midir error. `MIDI_PORT=N` picks the port (default 0).
+fn connect_midi_rig(
+    rig: Arc<Mutex<dyn Rig + Send>>,
+) -> Option<midir::MidiInputConnection<()>> {
+    use midir::{Ignore, MidiInput};
+    let mut midi_in = MidiInput::new("ambient-viz sound_test").ok()?;
+    midi_in.ignore(Ignore::None);
+    let ports = midi_in.ports();
+    if ports.is_empty() {
+        eprintln!("no MIDI input ports — CC tuning disabled");
+        return None;
+    }
+    let idx = std::env::var("MIDI_PORT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(ports.len() - 1);
+    let port = &ports[idx];
+    println!("MIDI in: [{idx}] {}", midi_in.port_name(port).unwrap_or_default());
+    midi_in
+        .connect(
+            port,
+            "midi-in",
+            move |_t, bytes, _| {
+                if let Some(dsp::MidiMessage::ControlChange { cc, value, .. }) =
+                    dsp::midi::decode(bytes)
+                {
+                    rig.lock().unwrap().handle_cc(cc, value);
+                }
+            },
+            (),
+        )
+        .ok()
 }
