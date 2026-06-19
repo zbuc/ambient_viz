@@ -124,6 +124,10 @@ pub struct TransporterRig {
     limiter: Limiter,
     dry: Vec<f32>,
     pad: Vec<f32>,
+    /// Level of the **primary playhead** (the dry source at the write head)
+    /// in the output. The pad's level is the transporter's own `set_level`.
+    /// 0 = pad only (pure reversed ghost); raise to blend the direct chord in.
+    dry_mix: f32,
     /// A slow modal wash in **D Dorian** — the modal color is the raised 6th
     /// (B natural, not B♭): a major IV and a minor v, no leading tone, a D/A
     /// common-tone pedal so it hovers instead of resolving. 7th voicings for
@@ -137,29 +141,36 @@ impl TransporterRig {
         let mut wt = WtSynth::new(sample_rate);
         wt.load_patch(WtPatch::default()); // sustaining wavetable pad with filter movement
         let mut trans = Transporter::new(sample_rate);
-        trans.set_grain_ms(1000.0);
-        trans.set_density(45.0);
+        trans.set_grain_ms(20.0);
+        // trans.set_density(45.0);
+        trans.set_density(5.0);
         trans.set_offset_ms(150.0); // start the reverse read offset-back from the playhead
         trans.set_reverse(true);
-        trans.set_spread(0.4);
+        trans.set_spread(0.5);
         trans.set_pitch(0.5); // octave down
         // ~density·grain_s ≈ 9 grains overlap, each ~the source amplitude, so
         // scale the pad sum down to keep it near unity (rough 1/overlap).
-        trans.set_level(0.12);
+        trans.set_level(0.62);
         TransporterRig {
             wt,
             trans,
             limiter: Limiter::new(sample_rate),
             dry: Vec::new(),
             pad: Vec::new(),
+            dry_mix: 0.4, // primary-playhead level; 0 = pad only
             progression: [
-                [62, 65, 69, 72], // Dm7  (i)   D F A C
-                [62, 67, 71, 74], // G    (IV)  D G B D — B natural = the Dorian signature
+                [62, 65, 69, 72], // Dm7  (i)   D F B C - B natural = the Dorian signature
+                [62, 67, 69, 74], // D?   (IV)  D G B C
                 [57, 60, 64, 67], // Am7  (v)   A C E G — minor v (no leading tone)
                 [62, 64, 67, 71], // Em7  (ii)  D E G B
             ],
             next: 0,
         }
+    }
+
+    /// Set the primary-playhead (dry) level in the mix. 0 = pad only.
+    pub fn set_dry_mix(&mut self, m: f32) {
+        self.dry_mix = m.max(0.0);
     }
 }
 
@@ -186,9 +197,9 @@ impl Rig for TransporterRig {
         }
         // 2. reverse-grain pad of the chord (parallel send: dry untouched)
         self.trans.process(&self.dry, &mut self.pad);
-        // 3. dry chord + the reverse pad
+        // 3. primary playhead (dry chord) + the reverse pad
         for i in 0..frames * 2 {
-            out[i] = self.dry[i] * 0.4 + self.pad[i];
+            out[i] = self.dry[i] * self.dry_mix + self.pad[i];
         }
         self.limiter.process(out);
     }
