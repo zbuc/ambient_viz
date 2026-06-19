@@ -10,5 +10,6 @@
 //! hand-rolled and summed in the firmware's master-bus order (see `rigs`).
 
 pub mod audio;
+pub mod fx;
 pub mod lfo;
 pub mod rigs;

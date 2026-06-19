@@ -4,6 +4,7 @@
 //! before the master limiter — see firmware/src/main.rs), so a voice auditioned
 //! here sounds like it does on the Daisy.
 
+use crate::fx::{FxChain, Instrument};
 use crate::lfo::CcLfo;
 use dsp::limiter::Limiter;
 use dsp::transporter::Transporter;
@@ -328,6 +329,9 @@ pub struct PreviewRig {
     wet: f32,
     bass: RumbleBass,
     wt: WtSynth,
+    /// Editable insert FX chain over the summed source, before the master
+    /// limiter — the "instrument" = source patches + this chain.
+    fx: FxChain,
     limiter: Limiter,
     fm_note: u8,
     bass_note: u8,
@@ -353,6 +357,7 @@ impl PreviewRig {
             wet: 0.6,
             bass,
             wt,
+            fx: FxChain::new(sample_rate),
             limiter: Limiter::new(sample_rate),
             fm_note: DEFAULT_FM_NOTE,
             bass_note: DEFAULT_BASS_NOTE,
@@ -372,6 +377,31 @@ impl PreviewRig {
         self.wt.load_patch(patch);
     }
 
+    /// The editable insert FX chain (add/remove/tweak/serialize the effects).
+    pub fn fx(&mut self) -> &mut FxChain {
+        &mut self.fx
+    }
+
+    /// Snapshot the whole composite instrument: the three source patches + the
+    /// FX chain — what `/instrument/save` persists.
+    pub fn snapshot_instrument(&self) -> Instrument {
+        Instrument {
+            fm: *self.fm.patch(),
+            bass: *self.bass.patch(),
+            wt: self.wt.patch().clone(),
+            fx: self.fx.to_nodes(),
+        }
+    }
+
+    /// Load a composite instrument: apply the source patches and rebuild the
+    /// FX chain.
+    pub fn load_instrument(&mut self, inst: &Instrument) {
+        self.fm.load_patch(inst.fm);
+        self.bass.load_patch(inst.bass);
+        self.wt.load_patch(inst.wt.clone());
+        self.fx.set_nodes(&inst.fx);
+    }
+
     /// Kill all audio immediately: the held bass sustain, any FM tail, and the
     /// ping-pong feedback ring. Rebuilds every voice + the delay from scratch
     /// (the surest reset — no per-voice "panic" API needed), then re-applies the
@@ -381,11 +411,13 @@ impl PreviewRig {
         let fm_patch = *self.fm.patch();
         let bass_patch = *self.bass.patch();
         let wt_patch = self.wt.patch().clone();
+        let fx_nodes = self.fx.to_nodes();
         let sr = self.sample_rate;
         *self = PreviewRig::new(sr);
         self.fm.load_patch(fm_patch);
         self.bass.load_patch(bass_patch);
         self.wt.load_patch(wt_patch);
+        self.fx.set_nodes(&fx_nodes); // keep the FX chain across a panic/reset
         self.prime();
     }
     /// Strike the stab. `note` of `None` reuses the last note.
@@ -439,6 +471,8 @@ impl Rig for PreviewRig {
         for (o, &w) in out.iter_mut().zip(self.send.iter()) {
             *o += w * wet;
         }
+        // editable insert FX chain over the whole instrument, pre-master
+        self.fx.process(out, self.sample_index);
         self.limiter.process(out);
         self.sample_index += frames as u64;
     }

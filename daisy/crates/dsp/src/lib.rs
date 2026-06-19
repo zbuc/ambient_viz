@@ -16,9 +16,9 @@ use alloc::vec::Vec;
 // delay's time/feedback, and `PingPongDelay` is the delay itself.
 pub use infinitedsp_core::FrameProcessor;
 pub use infinitedsp_core::core::audio_param::AudioParam;
-use infinitedsp_core::effects::dynamics::distortion::{Distortion, DistortionType};
+pub use infinitedsp_core::effects::dynamics::distortion::{Distortion, DistortionType};
 pub use infinitedsp_core::effects::time::ping_pong_delay::PingPongDelay;
-use infinitedsp_core::effects::time::reverb::Reverb;
+pub use infinitedsp_core::effects::time::reverb::Reverb;
 
 pub mod analog_bass_drum;
 pub mod bass;
