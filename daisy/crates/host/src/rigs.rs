@@ -124,7 +124,10 @@ pub struct TransporterRig {
     limiter: Limiter,
     dry: Vec<f32>,
     pad: Vec<f32>,
-    /// A slow wash in D minor — i, VI, III, v-ish held voicings.
+    /// A slow modal wash in **D Dorian** — the modal color is the raised 6th
+    /// (B natural, not B♭): a major IV and a minor v, no leading tone, a D/A
+    /// common-tone pedal so it hovers instead of resolving. 7th voicings for
+    /// the floaty modal feel.
     progression: [[u8; 4]; 4],
     next: usize,
 }
@@ -134,11 +137,12 @@ impl TransporterRig {
         let mut wt = WtSynth::new(sample_rate);
         wt.load_patch(WtPatch::default()); // sustaining wavetable pad with filter movement
         let mut trans = Transporter::new(sample_rate);
-        trans.set_grain_ms(200.0);
+        trans.set_grain_ms(1000.0);
         trans.set_density(45.0);
         trans.set_offset_ms(150.0); // start the reverse read offset-back from the playhead
         trans.set_reverse(true);
         trans.set_spread(0.4);
+        trans.set_pitch(0.5); // octave down
         // ~density·grain_s ≈ 9 grains overlap, each ~the source amplitude, so
         // scale the pad sum down to keep it near unity (rough 1/overlap).
         trans.set_level(0.12);
@@ -149,10 +153,10 @@ impl TransporterRig {
             dry: Vec::new(),
             pad: Vec::new(),
             progression: [
-                [62, 65, 69, 74], // Dm
-                [58, 62, 65, 70], // Bb
-                [57, 60, 65, 69], // F/A
-                [57, 60, 64, 69], // Am
+                [62, 65, 69, 72], // Dm7  (i)   D F A C
+                [62, 67, 71, 74], // G    (IV)  D G B D — B natural = the Dorian signature
+                [57, 60, 64, 67], // Am7  (v)   A C E G — minor v (no leading tone)
+                [62, 64, 67, 71], // Em7  (ii)  D E G B
             ],
             next: 0,
         }
@@ -167,7 +171,7 @@ impl Rig for TransporterRig {
         let chord = self.progression[self.next % self.progression.len()];
         self.next += 1;
         self.wt.play_chord(&chord, 0.7);
-        "transporter pad (held wavetable chord, evolving)"
+        "transporter pad (D Dorian wash)"
     }
 
     fn render(&mut self, out: &mut [f32]) {
@@ -384,6 +388,9 @@ mod tests {
             let e: f32 = buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32;
             peak_energy = peak_energy.max(e);
         }
-        assert!(peak_energy > 1e-4, "pad/source should be audible, peak {peak_energy}");
+        assert!(
+            peak_energy > 1e-4,
+            "pad/source should be audible, peak {peak_energy}"
+        );
     }
 }
