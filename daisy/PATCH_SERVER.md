@@ -119,12 +119,18 @@ static/audio/presets/
 
 ## How the browser editors connect
 
-The editors (`static/audio/patches`, `static/audio/wavetable`) probe
+The editors (`static/audio/instruments`, `static/audio/wavetable`) probe
 `GET /health`; if it answers they switch to **live mode** and stream patch
 edits over `POST /{fm,bass,wt}/patch` (see `static/audio/shared/preview.js`).
-Offline, they stay usable in export-only mode. An FX-chain panel would talk to
-the `/fx/*` routes the same way (not built yet — the server + model + presets
-are the substrate).
+Offline, the patch editing + export stay usable.
+
+The **instruments editor** (`static/audio/instruments`, formerly `patches`) is
+the combined front end for this whole model: a Patch panel (voice params +
+node-server patch presets), an **FX-chain panel** (catalog-driven add/remove/
+reorder/param sliders talking to the `/fx/*` routes, with fx presets), and an
+**Instrument panel** that saves/loads the patch+chain bundle via
+`/instrument/*`. The FX + instrument panels require this server (real DSP);
+patch editing works offline. `preview.js` carries the `/fx/*` + preset clients.
 
 ## Real-time / firmware safety
 

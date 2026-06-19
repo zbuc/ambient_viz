@@ -28,11 +28,33 @@ audio/
     ui.js             vanilla widgets (slider/select/grid)
     style.css         shared dark UI
   sequencer/          drum-grid + chord-prog editor
-  patches/            FM-stab / rumble-bass parameter editor
+  instruments/        combined patch + FX-chain + instrument-preset editor
   wavetable/          Microwave II-style wavetable voice editor
+  presets/            saved presets (committed): fm/ bass/ wt/ fx/ instrument/
     wavetables.json   generated wave bank (see below)
     waveview.js       canvas preview rendering
 ```
+
+## Instruments editor
+
+`instruments/` is the combined editor (formerly `patches/`). A composite
+**instrument** = a source patch + an insert **FX chain**, and it edits all
+three preset levels live against the real Rust DSP through `patch_server`
+(`daisy/crates/host/src/bin/patch_server.rs`; see `daisy/PATCH_SERVER.md`):
+
+- **Patch** — the FM-stab / rumble-bass voice params (schema
+  `shared/patch-schema.js`). Patch presets save to the **node server**
+  (`/api/presets/{fm,bass}`, schema-validated) → `presets/{fm,bass}/`.
+- **FX chain** — an ordered list of insert effects (reverb, delay,
+  distortion, tape, transporter, freeze, filter, bloom), added/reordered/
+  tweaked live; the available effects + param ranges come from
+  `GET /fx/catalog`. FX presets save to **patch_server** → `presets/fx/`.
+- **Instrument** — the whole bundle (fm + bass + wt patches + FX chain),
+  saved/loaded via **patch_server** → `presets/instrument/`. Starter:
+  `otamatone reverse wash` (otamatone wt + a transporter FX).
+
+The FX + instrument panels need the preview server running; patch editing +
+export work offline. Presets are committed to git (no `.gitignore`).
 
 ## Wavetable editor
 
