@@ -53,8 +53,8 @@ pub struct Transporter {
     pitch: f32,
     /// Reverse playback (the showcased pad behaviour). False = forward.
     reverse: bool,
-    /// Spawn-start jitter, 0..1 (fraction of grain length) — scatters the
-    /// cloud so overlapping grains decorrelate into a smooth pad rather than
+    /// Spawn-start jitter, 0..4 (fraction of grain length) — scatters the
+    /// cloud so overlapping grains can decorrelate into a smooth pad or
     /// a comb.
     spread: f32,
     /// Pad output level.
@@ -115,7 +115,7 @@ impl Transporter {
         self.reverse = on;
     }
     pub fn set_spread(&mut self, s: f32) {
-        self.spread = s.clamp(0.0, 1.0);
+        self.spread = s.clamp(0.0, 4.0);
     }
     pub fn set_level(&mut self, l: f32) {
         self.level = l.max(0.0);
@@ -146,7 +146,11 @@ impl Transporter {
         let jitter = self.spread * self.grain_len * (self.next_rand() - 0.5);
         let playhead = self.buf.write_head() as f32 - 1.0;
         let start = playhead - self.offset + jitter;
-        let rate = if self.reverse { -self.pitch } else { self.pitch };
+        let rate = if self.reverse {
+            -self.pitch
+        } else {
+            self.pitch
+        };
         let grain = Grain::start(start, rate, self.grain_len);
 
         if let Some(slot) = self.grains.iter_mut().find(|g| !g.active()) {
@@ -249,7 +253,10 @@ mod tests {
         assert!(lo > 0.1, "pad sustains above silence, min was {lo}");
         // smooth: no per-sample discontinuities (Hann grains over DC sum
         // continuously; a click would spike this)
-        assert!(max_jump < 0.05, "pad should be click-free, max jump {max_jump}");
+        assert!(
+            max_jump < 0.05,
+            "pad should be click-free, max jump {max_jump}"
+        );
     }
 
     #[test]
@@ -275,11 +282,18 @@ mod tests {
         let playhead = t.buf.write_head() as f32 - 1.0; // last written = 999
         t.spawn();
         let g = *t.grains.iter().find(|g| g.active()).unwrap();
-        assert!((g.pos() - playhead).abs() < 1.0, "starts at the playhead, got {}", g.pos());
+        assert!(
+            (g.pos() - playhead).abs() < 1.0,
+            "starts at the playhead, got {}",
+            g.pos()
+        );
         let p0 = g.pos();
         let mut g2 = g;
         g2.advance();
-        assert!(g2.pos() < p0, "reverse grain reads backward into prior audio");
+        assert!(
+            g2.pos() < p0,
+            "reverse grain reads backward into prior audio"
+        );
     }
 
     #[test]
@@ -300,6 +314,9 @@ mod tests {
     fn silent_input_gives_silent_pad() {
         let mut t = Transporter::new(SR);
         let pad = run_constant(&mut t, 0.0, SR as usize / 4);
-        assert!(pad.iter().all(|&x| x.abs() < 1e-6), "DC-zero in -> silent pad");
+        assert!(
+            pad.iter().all(|&x| x.abs() < 1e-6),
+            "DC-zero in -> silent pad"
+        );
     }
 }
