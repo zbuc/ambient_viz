@@ -156,9 +156,10 @@ fn connect_midi_rig(
             port,
             "midi-in",
             move |_t, bytes, _| {
-                if let Some(dsp::MidiMessage::ControlChange { cc, value, .. }) =
+                if let Some(dsp::MidiMessage::ControlChange { channel, cc, value }) =
                     dsp::midi::decode(bytes)
                 {
+                    println!("  CC#{cc} = {value}  (ch{channel})");
                     rig.lock().unwrap().handle_cc(cc, value);
                 }
             },
