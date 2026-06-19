@@ -143,20 +143,9 @@ impl TransporterRig {
     pub fn new(sample_rate: f32) -> Self {
         let mut wt = WtSynth::new(sample_rate);
         wt.load_patch(WtPatch::default()); // sustaining wavetable pad with filter movement
-        let mut trans = Transporter::new(sample_rate);
-        trans.set_grain_ms(20.0);
-        // trans.set_density(45.0);
-        trans.set_density(5.0);
-        trans.set_offset_ms(150.0); // start the reverse read offset-back from the playhead
-        trans.set_reverse(true);
-        trans.set_spread(0.5);
-        trans.set_pitch(0.5); // octave down
-        // ~density·grain_s ≈ 9 grains overlap, each ~the source amplitude, so
-        // scale the pad sum down to keep it near unity (rough 1/overlap).
-        trans.set_level(0.62);
-        TransporterRig {
+        let mut rig = TransporterRig {
             wt,
-            trans,
+            trans: Transporter::new(sample_rate),
             limiter: Limiter::new(sample_rate),
             dry: Vec::new(),
             pad: Vec::new(),
@@ -168,7 +157,24 @@ impl TransporterRig {
                 [62, 64, 67, 71], // Em7  (ii)  D E G B
             ],
             next: 0,
-        }
+        };
+        rig.preset_sub_reverse_wash(); // the saved boot sound
+        rig
+    }
+
+    /// **Saved preset** (found by ear over MIDI CC, 2026-06-18): a deep,
+    /// sub-octave reversed wash — pad only, long sparse grains read a full
+    /// second back, pitched down two octaves, wide spread. The CC values it
+    /// came from are noted per line.
+    pub fn preset_sub_reverse_wash(&mut self) {
+        self.set_dry_mix(0.0); //              CC20=0    pad only
+        self.trans.set_level(1.5); //          CC21=95
+        self.trans.set_grain_ms(535.0); //     CC22=112
+        self.trans.set_density(6.3); //        CC23=8
+        self.trans.set_offset_ms(1000.0); //   CC24=127
+        self.trans.set_pitch(0.25); //         CC25=0    -2 octaves
+        self.trans.set_spread(1.45); //        CC26=92
+        self.trans.set_reverse(true); //       CC27=127
     }
 
     /// Set the primary-playhead (dry) level in the mix. 0 = pad only.
@@ -410,12 +416,13 @@ mod tests {
         let sr = 48_000.0;
         let mut rig = TransporterRig::new(sr);
         rig.trigger();
-        // ~1 s of audio in blocks; the cloud needs a beat to fill + establish.
-        // Track the loudest block (the pad must sound at SOME point — the
-        // source may decay, which the timed audition refreshes by re-trigger).
+        // ~2.5 s of audio in blocks. The default preset is pad-only with a
+        // 1 s offset, so the ring must fill past 1 s before grains read real
+        // audio — give it ample warmup, then check the pad sounds at some
+        // point (track the loudest block).
         let mut buf = vec![0.0f32; 1024];
         let mut peak_energy = 0.0f32;
-        for _ in 0..48 {
+        for _ in 0..256 {
             rig.render(&mut buf);
             assert!(buf.iter().all(|x| x.is_finite()), "no NaN/Inf");
             // a limiter, not a brickwall — allow brief attack overshoot, but
