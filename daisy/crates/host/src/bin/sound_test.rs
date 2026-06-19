@@ -20,7 +20,7 @@ use cpal::traits::{DeviceTrait as _, StreamTrait as _};
 use dsp::FmPatch;
 
 use host::audio::{open_default_output, run_output};
-use host::rigs::{BellRig, Rig, VoiceRig, DEFAULT_FM_NOTE};
+use host::rigs::{BellRig, Rig, TransporterRig, VoiceRig, DEFAULT_FM_NOTE};
 
 /// Which foreground voice to audition.
 #[derive(Clone, Copy, Debug)]
@@ -28,6 +28,7 @@ enum Mode {
     Bell,
     Industrial,
     Voice,
+    Transporter,
 }
 
 impl Mode {
@@ -36,6 +37,7 @@ impl Mode {
             Mode::Bell => "bell",
             Mode::Industrial => "industrial",
             Mode::Voice => "voice",
+            Mode::Transporter => "transporter",
         }
     }
 }
@@ -49,13 +51,15 @@ fn parse_args() -> (Mode, u64) {
             "bell" => mode = Mode::Bell,
             "industrial" => mode = Mode::Industrial,
             "voice" | "pain" | "pain-material" => mode = Mode::Voice,
+            "transporter" | "pad" => mode = Mode::Transporter,
             "-h" | "--help" => {
                 println!(
-                    "usage: sound_test [bell|industrial|voice] [--every=SECS]\n\
+                    "usage: sound_test [bell|industrial|voice|transporter] [--every=SECS]\n\
                      \n\
                      bell        FM bell (firmware ch0 patch)\n\
                      industrial  industrial stab (firmware ch1 patch)\n\
                      voice       formant speech through reverb, cycling all phrases\n\
+                     transporter reverse-grain pad: an FmStab chord through dsp::transporter\n\
                      --every=N   seconds between triggers (default 10)"
                 );
                 std::process::exit(0);
@@ -104,6 +108,7 @@ fn main() -> Result<()> {
             "industrial",
         ))),
         Mode::Voice => Arc::new(Mutex::new(VoiceRig::new(out.sample_rate))),
+        Mode::Transporter => Arc::new(Mutex::new(TransporterRig::new(out.sample_rate))),
     };
     rig.lock().unwrap().prime();
 

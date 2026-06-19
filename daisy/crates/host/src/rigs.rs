@@ -5,6 +5,7 @@
 //! here sounds like it does on the Daisy.
 
 use dsp::limiter::Limiter;
+use dsp::transporter::Transporter;
 use dsp::{
     AudioParam, BassPatch, FmPatch, FmStab, FrameProcessor as _, PainMaterialVoice, PingPongDelay,
     RumbleBass, WtPatch, WtSynth,
@@ -105,6 +106,76 @@ impl Rig for BellRig {
         }
         self.limiter.process(out);
         self.sample_index += frames as u64;
+    }
+}
+
+/// Audition the reverse-grain pad (`dsp::transporter`): the existing 8-voice
+/// `FmStab` plays a held chord (the polyphony we already have), and that chord
+/// is run through the [`Transporter`] — grains starting at the playhead-minus-
+/// `offset` and reading backward into the prior audio, summed into a smooth
+/// reversed pad. Output = dry chord + the pad, into the master limiter. This
+/// is an EFFECT over a polyphonic source, not a new voice allocator.
+pub struct TransporterRig {
+    fm: FmStab,
+    trans: Transporter,
+    limiter: Limiter,
+    dry: Vec<f32>,
+    pad: Vec<f32>,
+    /// D-minor voicing (the install key): D3 A3 D4 F4.
+    chord: [u8; 4],
+}
+
+impl TransporterRig {
+    pub fn new(sample_rate: f32) -> Self {
+        let mut fm = FmStab::new(sample_rate);
+        fm.load_patch(FmPatch::bell()); // a tonal source for the cloud to smear
+        let mut trans = Transporter::new(sample_rate);
+        trans.set_grain_ms(180.0);
+        trans.set_density(45.0);
+        trans.set_offset_ms(150.0); // start the reverse read offset-back from the playhead
+        trans.set_reverse(true);
+        trans.set_spread(0.4);
+        // ~density·grain_s ≈ 8 grains overlap, each ~the source amplitude, so
+        // scale the pad sum down to keep it near unity (rough 1/overlap).
+        trans.set_level(0.12);
+        TransporterRig {
+            fm,
+            trans,
+            limiter: Limiter::new(sample_rate),
+            dry: Vec::new(),
+            pad: Vec::new(),
+            // D-minor up where the FM bell actually sounds (its default is A5):
+            // D4 F4 A4 D5.
+            chord: [62, 65, 69, 74],
+        }
+    }
+}
+
+impl Rig for TransporterRig {
+    fn trigger(&mut self) -> &'static str {
+        // gated = the voices hold (sustain), so the cloud always has material.
+        // modest velocity so a 4-voice chord doesn't slam the master limiter.
+        self.fm.play_chord_gated(&self.chord, 0.5, None);
+        "transporter pad (Dm chord)"
+    }
+
+    fn render(&mut self, out: &mut [f32]) {
+        let frames = out.len() / 2;
+        self.dry.resize(frames * 2, 0.0);
+        self.pad.resize(frames * 2, 0.0);
+        // 1. render the polyphonic chord (mono sum) into a stereo dry buffer
+        for i in 0..frames {
+            let s = self.fm.tick();
+            self.dry[2 * i] = s;
+            self.dry[2 * i + 1] = s;
+        }
+        // 2. reverse-grain pad of the chord (parallel send: dry untouched)
+        self.trans.process(&self.dry, &mut self.pad);
+        // 3. dry chord (trimmed) + the reverse pad
+        for i in 0..frames * 2 {
+            out[i] = self.dry[i] * 0.3 + self.pad[i];
+        }
+        self.limiter.process(out);
     }
 }
 
@@ -276,5 +347,32 @@ impl Rig for PreviewRig {
         }
         self.limiter.process(out);
         self.sample_index += frames as u64;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transporter_rig_renders_a_pad() {
+        let sr = 48_000.0;
+        let mut rig = TransporterRig::new(sr);
+        rig.trigger();
+        // ~1 s of audio in blocks; the cloud needs a beat to fill + establish.
+        // Track the loudest block (the pad must sound at SOME point — the
+        // source may decay, which the timed audition refreshes by re-trigger).
+        let mut buf = vec![0.0f32; 1024];
+        let mut peak_energy = 0.0f32;
+        for _ in 0..48 {
+            rig.render(&mut buf);
+            assert!(buf.iter().all(|x| x.is_finite()), "no NaN/Inf");
+            // a limiter, not a brickwall — allow brief attack overshoot, but
+            // catch genuine runaway
+            assert!(buf.iter().all(|x| x.abs() < 1.5), "stays roughly bounded");
+            let e: f32 = buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32;
+            peak_energy = peak_energy.max(e);
+        }
+        assert!(peak_energy > 1e-4, "pad/source should be audible, peak {peak_energy}");
     }
 }
