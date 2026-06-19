@@ -1,0 +1,115 @@
+# Transporter — dual-loop transport / beat-repeat effect
+
+**Status: design only (2026-06-18). No code.** A simple FL-"Gross Beat"-ish
+performance effect: one rolling capture buffer of recent audio, read by two
+independent loop players (A and B) you mix, each with its own width and an
+optional reverse. Sibling to the existing `Freeze` module (which already
+captures a grain and loops it) and to `GRANULIZER.md` — see *Shared
+substrate* below.
+
+## Concept
+
+Engage latches a slice of recent audio; two players loop it at independent
+widths, B (or either) reversible, blended over a dry passthrough. A = 1/4
+forward and B = 1/8 reversed, mixed, is the canonical move. Equal widths →
+forward+reverse palindrome blend; unequal widths → the two loops phase
+against each other (polyrhythm).
+
+## Signal flow
+
+```
+in ──┬───────────────────────────────────► dry·gain ──┐
+     │                                                  ├──► out
+     └─► capture ring (SDRAM) ──┬─► player A ─► A·gain ─┤
+                                └─► player B ─► B·gain ─┘
+```
+
+- **Capture ring** continuously writes the input, sized to the longest
+  loop width at the slowest supported tempo (≈ 1 bar @ 60 BPM ≈ 4 s stereo
+  ≈ 1.5 MB) — lives in **SDRAM** (the FX-buffers-to-SDRAM rule; never the
+  ~448 KB AXI heap).
+- On **engage**, both players latch the *same* captured window (one
+  capture, two views). A reads the most-recent `width_A` forward; B reads
+  `width_B` reversed. Not engaged: players silent, dry passes through.
+
+## Loop player internals (the click-free part)
+
+Each player is a read pointer over the latched slice:
+- **Width** = the loop period. Forward index `+1` wraps end→start; reverse
+  index `−1` wraps start→end.
+- **Click-free seam**: a short equal-power crossfade (~5 ms / 256 samples)
+  where the loop wraps, mixing the loop's tail into its head; the same fade
+  on engage/disengage and on a live reverse toggle (crossfade the two
+  directions). This is the single most important detail for it sounding
+  musical, and it's shared machinery with the granulizer's grain window.
+- **Latch vs momentary**: latch = toggle, holds the captured slice;
+  momentary = loops only while held, re-captures each press.
+
+## Parameter surface
+
+**MVP:**
+
+| Param | Range | Notes |
+|---|---|---|
+| `engage` | gate 0/1 | start/stop the transport |
+| `dry` | 0..1 | passthrough level |
+| `a_level` / `b_level` | 0..1 | the A/B mix |
+| `a_width` / `b_width` | division | 1/16…1 bar, tempo-synced |
+| `b_reverse` | 0/1 | reverse is per-player; B is the showcased one |
+
+**Refinements (clearly optional):**
+- `a_reverse` (reverse is a per-player capability)
+- `engage_mode` (latch | momentary); `quantize` (off | 1/16…1/4 — snap
+  engage to the grid so it lands on the beat)
+- `sync` (synced divisions | free ms widths)
+- `a_pitch` / `b_pitch` (playback rate → pitch/time; the one real DSP add —
+  needs an interpolated read)
+- `a_offset` / `b_offset` (where in the captured window each loop starts)
+
+Ship the MVP rows first; quantize + per-loop reverse are cheap follow-ups;
+pitch is the only nontrivial add.
+
+## Tempo & sync
+
+Widths as **musical divisions synced to the clock** (the bpm lane / song
+clock the system already carries) is the FL feel. Ring size derives from
+the largest division × slowest tempo. A `free` mode gives ms widths for
+non-synced use.
+
+## Integration (this project's idioms)
+
+- **DSP module** `daisy/crates/dsp/src/transporter.rs`, real-time-safe like
+  `Freeze`/`TapeProcessor`: SDRAM ring allocated once at init, no alloc in
+  `process()`, f32 math, the crossfade discipline above.
+- **Params** in the `Param` enum + `apply_param` (`midi_map.rs`), CC-mapped,
+  so they're bus- and CC-controllable like every other effect.
+- **Engage stays a generic mechanism** — a bus signal / CC. *How* a project
+  drives it (touch pad, distance threshold, a sequencer step) is a
+  router-graph mapping, not baked into the effect.
+- **Browser UI**: a `TransporterPatch` (serde) + a panel in `static/audio`,
+  live against the real Rust DSP through `patch_server` — same pattern as
+  the FM/bass/wt patch editors.
+
+## RT / memory
+
+SDRAM ring (Daisy has 64 MB — ample); AXI heap untouched. Fixed-size
+crossfades. Two players over one shared buffer → minimal state. Pitch (if
+added) = one interpolated read per player, trivial.
+
+## Shared substrate
+
+Transporter, `GRANULIZER.md`, and the existing `Freeze` are one family of
+**buffer players**: an SDRAM **capture/source buffer** (live ring or loaded
+sample) + **windowed/crossfaded interpolated reads**. `Freeze` is the
+degenerate case (one frozen grain looped). Build the capture-ring +
+window-table + interpolated-read primitive ONCE and let all three share it,
+rather than three one-offs. (See the granulizer note's matching section.)
+
+## Open questions
+
+1. **A/B mixer (independent levels, assumed) vs a single A↔B morph knob?**
+   Mixer is flexible; morph is one-knob-performable.
+2. **Shared capture (one engage, two views, assumed) vs independent
+   per-loop triggers?** Shared gives the coherent forward+reverse
+   relationship and less state; independent is more flexible.
+3. **Synced divisions vs free widths as default** (lean synced).

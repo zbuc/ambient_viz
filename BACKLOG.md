@@ -261,7 +261,28 @@ flip, not a schema migration. The order roughly tracks blast radius. Detail in
 
 ## Firmware / DSP (Daisy)
 
-- [ ] **Grain-delay / granular send** — a granular FX send the mood layer can
+- [ ] **Buffer-player family: capture substrate + Transporter + Granulizer**
+  (design 2026-06-18, no code) — three buffer/grain players that should share
+  ONE primitive (an SDRAM capture/source buffer + interpolated reads + a
+  window/crossfade table), not three one-offs; the existing `Freeze` is the
+  degenerate case. Build the substrate (`dsp::buffer_player`, or extend
+  `Freeze`'s capture) first, then:
+  - **Transporter** — dual-loop transport / beat-repeat: one capture, two loop
+    players (A/B) mixed, independent tempo-synced widths, per-loop reverse;
+    `transporter.rs` + `TransporterPatch` + `static/audio` panel via
+    `patch_server`. — `TRANSPORTER.md`
+  - **Granulizer** — FL-Fruity-Granulizer-style grain cloud: fixed grain pool,
+    precomputed window table (no per-sample transcendentals × polyphony), grain
+    size / density / position / scan / pitch + spray, live-ring or loaded
+    sample source, freeze-to-drone; `granulizer.rs` + `GranulizerPatch` + panel.
+    **Subsumes the granular-send item below.** Watch the H750 budget (CPU scales
+    with active grain count). — `GRANULIZER.md`, mem `daisy-dsp-realtime`
+  Params land in `Param`/`apply_param` (CC + bus controllable); engage/density/
+  position stay generic mechanisms a project routes to (no piece-specific
+  mapping baked in). When the mood-layer granular fx key lands, mood blend can
+  drive the granulizer.
+- [ ] **Grain-delay / granular send** *(SUPERSEDED by the Granulizer above —
+  keep until that ships)* — a granular FX send the mood layer can
   parameterize (mood anchors gain a granular fx key when it lands). Explicitly
   excluded from the mood-layer build (Chris, 2026-06-11); the freeze/Stutter
   machinery is adjacent but is not this. — `PROCMUSIC.md` (§11)
