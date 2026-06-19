@@ -177,6 +177,12 @@ impl TransporterRig {
         self.trans.set_reverse(true); //       CC27=127
     }
 
+    /// Swap the wavetable source patch — e.g. one of the browser editor's
+    /// `static/audio/presets/wt/*.json` patches, loaded on the host.
+    pub fn set_wt_patch(&mut self, patch: WtPatch) {
+        self.wt.load_patch(patch);
+    }
+
     /// Set the primary-playhead (dry) level in the mix. 0 = pad only.
     pub fn set_dry_mix(&mut self, m: f32) {
         self.dry_mix = m.max(0.0);
