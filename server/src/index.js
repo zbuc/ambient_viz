@@ -674,7 +674,20 @@ function serveStatic(req, res) {
   const filePath = safeJoin(STATIC_ROOT, urlPath);
   if (!filePath) { res.writeHead(403); res.end('forbidden'); return; }
   fs.stat(filePath, (err, st) => {
+    // Directory URL (e.g. /audio/ or /audio/instruments) → its index.html.
+    if (!err && st.isDirectory()) {
+      const idx = path.join(filePath, 'index.html');
+      return fs.stat(idx, (e2, s2) => {
+        if (e2 || !s2.isFile()) { res.writeHead(404); res.end('not found'); return; }
+        sendFile(idx, s2, req, res);
+      });
+    }
     if (err || !st.isFile()) { res.writeHead(404); res.end('not found'); return; }
+    sendFile(filePath, st, req, res);
+  });
+}
+
+function sendFile(filePath, st, req, res) {
     const ext = path.extname(filePath).toLowerCase();
     const ctype = MIME[ext] || 'application/octet-stream';
     const range = req.headers.range;
@@ -706,7 +719,6 @@ function serveStatic(req, res) {
     });
     if (req.method === 'HEAD') { res.end(); return; }
     fs.createReadStream(filePath).pipe(res);
-  });
 }
 
 const server = http.createServer((req, res) => {
