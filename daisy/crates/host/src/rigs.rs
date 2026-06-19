@@ -109,71 +109,82 @@ impl Rig for BellRig {
     }
 }
 
-/// Audition the reverse-grain pad (`dsp::transporter`): the existing 8-voice
-/// `FmStab` plays a held chord (the polyphony we already have), and that chord
-/// is run through the [`Transporter`] — grains starting at the playhead-minus-
-/// `offset` and reading backward into the prior audio, summed into a smooth
-/// reversed pad. Output = dry chord + the pad, into the master limiter. This
-/// is an EFFECT over a polyphonic source, not a new voice allocator.
+/// Audition the reverse-grain pad (`dsp::transporter`). The source is the
+/// polyphonic **wavetable** voice (`WtSynth`) — sustaining (held ADSR) and
+/// evolving (per-note filter-envelope sweep) — playing a slow chord
+/// PROGRESSION (long held notes that change over time, the right material
+/// for a pad, unlike a percussive stab). That held chord is run through the
+/// [`Transporter`]: grains start at `playhead − offset` and read **backward**
+/// into the prior audio, summed into a smooth reversed pad. Output = dry
+/// chord + the pad, into the master limiter. An EFFECT over a polyphonic
+/// source — `trigger()` advances the progression.
 pub struct TransporterRig {
-    fm: FmStab,
+    wt: WtSynth,
     trans: Transporter,
     limiter: Limiter,
     dry: Vec<f32>,
     pad: Vec<f32>,
-    /// D-minor voicing (the install key): D3 A3 D4 F4.
-    chord: [u8; 4],
+    /// A slow wash in D minor — i, VI, III, v-ish held voicings.
+    progression: [[u8; 4]; 4],
+    next: usize,
 }
 
 impl TransporterRig {
     pub fn new(sample_rate: f32) -> Self {
-        let mut fm = FmStab::new(sample_rate);
-        fm.load_patch(FmPatch::bell()); // a tonal source for the cloud to smear
+        let mut wt = WtSynth::new(sample_rate);
+        wt.load_patch(WtPatch::default()); // sustaining wavetable pad with filter movement
         let mut trans = Transporter::new(sample_rate);
-        trans.set_grain_ms(180.0);
+        trans.set_grain_ms(200.0);
         trans.set_density(45.0);
         trans.set_offset_ms(150.0); // start the reverse read offset-back from the playhead
         trans.set_reverse(true);
         trans.set_spread(0.4);
-        // ~density·grain_s ≈ 8 grains overlap, each ~the source amplitude, so
+        // ~density·grain_s ≈ 9 grains overlap, each ~the source amplitude, so
         // scale the pad sum down to keep it near unity (rough 1/overlap).
         trans.set_level(0.12);
         TransporterRig {
-            fm,
+            wt,
             trans,
             limiter: Limiter::new(sample_rate),
             dry: Vec::new(),
             pad: Vec::new(),
-            // D-minor up where the FM bell actually sounds (its default is A5):
-            // D4 F4 A4 D5.
-            chord: [62, 65, 69, 74],
+            progression: [
+                [62, 65, 69, 74], // Dm
+                [58, 62, 65, 70], // Bb
+                [57, 60, 65, 69], // F/A
+                [57, 60, 64, 69], // Am
+            ],
+            next: 0,
         }
     }
 }
 
 impl Rig for TransporterRig {
     fn trigger(&mut self) -> &'static str {
-        // gated = the voices hold (sustain), so the cloud always has material.
-        // modest velocity so a 4-voice chord doesn't slam the master limiter.
-        self.fm.play_chord_gated(&self.chord, 0.5, None);
-        "transporter pad (Dm chord)"
+        // release the held chord, advance to the next — long held notes that
+        // change over time. WtSynth sustains, so the cloud always has material.
+        self.wt.note_off_all();
+        let chord = self.progression[self.next % self.progression.len()];
+        self.next += 1;
+        self.wt.play_chord(&chord, 0.7);
+        "transporter pad (held wavetable chord, evolving)"
     }
 
     fn render(&mut self, out: &mut [f32]) {
         let frames = out.len() / 2;
         self.dry.resize(frames * 2, 0.0);
         self.pad.resize(frames * 2, 0.0);
-        // 1. render the polyphonic chord (mono sum) into a stereo dry buffer
+        // 1. render the polyphonic held chord (mono sum) into a stereo dry buffer
         for i in 0..frames {
-            let s = self.fm.tick();
+            let s = self.wt.tick();
             self.dry[2 * i] = s;
             self.dry[2 * i + 1] = s;
         }
         // 2. reverse-grain pad of the chord (parallel send: dry untouched)
         self.trans.process(&self.dry, &mut self.pad);
-        // 3. dry chord (trimmed) + the reverse pad
+        // 3. dry chord + the reverse pad
         for i in 0..frames * 2 {
-            out[i] = self.dry[i] * 0.3 + self.pad[i];
+            out[i] = self.dry[i] * 0.4 + self.pad[i];
         }
         self.limiter.process(out);
     }

@@ -45,9 +45,9 @@ pub struct Transporter {
     grain_len: f32,
     /// Grains spawned per second (drives overlap / polyphony).
     density: f32,
-    /// Optional pre-delay: frames behind the playhead to *start* the reverse
-    /// read. 0 = start at the playhead (the default — "play in reverse at the
-    /// current playhead"); >0 delays the reversed ghost.
+    /// Frames behind the playhead to *start* the reverse read. The grain
+    /// then reads backward into the audio prior to that point (e.g. start at
+    /// playhead−offset, then …−1, …−2). 0 would start at the playhead itself.
     offset: f32,
     /// Grain playback-rate magnitude (pitch; 1.0 = unity, 2.0 = +octave).
     pitch: f32,
@@ -86,7 +86,7 @@ impl Transporter {
             sample_rate,
             grain_len: 0.1 * sample_rate, // 100 ms
             density: 40.0,
-            offset: 0.0, // start the reverse read at the playhead
+            offset: 0.15 * sample_rate, // 150 ms behind: start the reverse read offset-back
             pitch: 1.0,
             reverse: true,
             spread: 0.3,
