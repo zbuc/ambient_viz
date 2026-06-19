@@ -23,6 +23,7 @@ use infinitedsp_core::effects::time::reverb::Reverb;
 pub mod analog_bass_drum;
 pub mod bass;
 pub mod bloom;
+pub mod buffer_player;
 pub mod chord;
 pub mod fm_stab;
 pub mod freeze;
