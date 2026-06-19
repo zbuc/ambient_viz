@@ -75,14 +75,16 @@ Two ways to make sound on the Mac: the full **`Engine`** (`main.rs`), and
 hand-rolled **rigs** that sum a voice's sub-graph exactly the way the firmware
 master bus does (NOT via `Engine`) — for auditioning one voice/effect in
 isolation. Rigs live in `src/rigs.rs` (`Rig` trait: `trigger`, `render`,
-`prime`, `handle_cc`).
+`prime`, `handle_cc`). `src/fx.rs` (`host::fx`) is a host-only insert-FX layer
+(uniform `Effect` trait + `FxChain` over the dsp effects) used by
+`patch_server`'s composite-instrument model; `src/lfo.rs` is the CC-LFO bank.
 
 ### Binaries (`src/bin/`, + the default `main.rs`)
 | Run | What |
 | --- | ---- |
 | `cargo run -p host` | `main.rs` — the full `Engine` with CoreAudio out + CoreMIDI in (CC → `Engine` via the midi_map). `MIDI_PORT=N` selects the input. |
 | `cargo run -p host --bin sound_test -- MODE` | Audition one voice/effect (see below). |
-| `cargo run -p host --bin patch_server` | HTTP bridge (127.0.0.1:8765) for the browser patch editors — live FM/bass/wt patch hot-swap (`PreviewRig`) so you hear real Rust DSP, not the JS sim. `POST /fm|bass|wt/patch`, `/trigger`, `/panic`. |
+| `cargo run -p host --bin patch_server` | HTTP bridge (127.0.0.1:8765) for the browser editors — live FM/bass/wt patch hot-swap **plus an editable insert FX chain** (`PreviewRig` + `host::fx`) so you hear real Rust DSP. A composite **instrument** = source patches + FX chain; `/fx/catalog`, `/fx/chain`, `/fx/add\|remove\|move\|param`, and fx + instrument presets under `static/audio/presets/{fx,instrument}`. Full reference: `PATCH_SERVER.md`. |
 | `cargo run -p host --bin heap_probe` | Measure peak heap of the full firmware FX chain (proves it fits the ~448 KB AXI-SRAM heap). |
 
 ### `sound_test` — the audition tool
@@ -150,8 +152,9 @@ capture (`-bulk`, `?usbaudio=1`) — `PLAN_USB_CAPTURE.md`,
 
 ## Topic docs
 
-`../PROCMUSIC.md` (generative music) · `../TRANSPORTER.md` /
-`../GRANULIZER.md` (buffer-player effects) · `../VOICE_FITTING.md` (formant
-voice) · `TAPE_SIMULATION.md` / `PLAN_TAPE_FAILURE.md` · `../OPTIMIZATIONS.md`
-(Cortex-M7 perf) · `BENCH_QSPI.md` · `MULTICHANNEL_IO.md` ·
-`BREAKOUT.md` · `vendor/PATCHES.md` (infinitedsp patches).
+`PATCH_SERVER.md` (live patch + FX-chain preview server) · `../PROCMUSIC.md`
+(generative music) · `../TRANSPORTER.md` / `../GRANULIZER.md` (buffer-player
+effects) · `../VOICE_FITTING.md` (formant voice) · `TAPE_SIMULATION.md` /
+`PLAN_TAPE_FAILURE.md` · `../OPTIMIZATIONS.md` (Cortex-M7 perf) ·
+`BENCH_QSPI.md` · `MULTICHANNEL_IO.md` · `BREAKOUT.md` · `vendor/PATCHES.md`
+(infinitedsp patches).
