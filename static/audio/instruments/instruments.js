@@ -12,18 +12,24 @@
 // The FX + instrument sections need the preview server (real DSP); patch
 // editing/export works offline. See daisy/PATCH_SERVER.md.
 
-import { PATCH_TYPES, defaultsFor, randomizeFor } from '../shared/patch-schema.js';
-import { renderParams, sliderRow, el } from '../shared/ui.js';
-import { saveText, saveDraft, loadDraft, listPresets, savePreset, deletePreset } from '../shared/storage.js';
+import { PATCH_TYPES, WT_PATCH, defaultsFor, randomizeFor } from '../shared/patch-schema.js';
+import { renderParams, sliderRow, selectRow, el } from '../shared/ui.js';
+import { saveText, saveDraft, loadDraft, loadText, listPresets, savePreset, deletePreset } from '../shared/storage.js';
 import { createPreview } from '../shared/preview.js';
 
 const $ = (id) => document.getElementById(id);
 const status = (m) => { $('status').textContent = m; };
 
-let schema = PATCH_TYPES[0];
+// Source voices the editor can tune: the FM stab, rumble bass, AND the
+// wavetable voice (the dedicated Wavetable tool adds graphical wave previews;
+// here the wavetable + wave-position get plain dropdown/slider controls).
+const VOICES = [...PATCH_TYPES, WT_PATCH];
+
+let schema = VOICES[0];
 let patch = loadDraft(`patch:${schema.id}`) || defaultsFor(schema);
 let savedPatchPresets = {}; // node-server presets for the current voice
 let fxCatalog = null;       // [{kind, params:[{name,default,min,max}]}]
+let wtBank = null;          // wavetables.json (names for the wt pickers)
 
 // --- live preview (native patch_server) ----------------------------------
 const preview = createPreview({ onStatus: onLive });
@@ -49,7 +55,39 @@ $('stop').onclick = () => { preview.panic(); status('killed all audio'); };
 
 // ── PATCH ────────────────────────────────────────────────────────────────
 $('voice').innerHTML = '';
-for (const t of PATCH_TYPES) $('voice').appendChild(new Option(t.label, t.id));
+for (const t of VOICES) $('voice').appendChild(new Option(t.label, t.id));
+
+// The wavetable voice has two bespoke widget params (wavetable id + wave pos);
+// render those as a dropdown + slider, everything else like the other voices.
+async function loadWtBank() {
+  if (wtBank) return;
+  try { wtBank = JSON.parse(await loadText('../wavetable/wavetables.json')); }
+  catch { /* names fall back to the current value */ }
+  if (schema.id === 'wt') rerender(); // fill the pickers once names are in
+}
+function wavetableRow(param, value, onChange) {
+  const ids = wtBank && wtBank.wavetables ? wtBank.wavetables.map((t) => t.id) : [value];
+  const sel = el('select', { onchange: (e) => onChange(e.target.value) },
+    ids.map((id) => el('option', { value: id, selected: id === value || null }, id)));
+  return el('label', { class: 'param-row', title: param.help || '' }, [
+    el('span', { class: 'param-label' }, param.label), sel,
+  ]);
+}
+function renderWtParams(sch, p, container, onChange) {
+  container.innerHTML = '';
+  let section = null;
+  for (const param of sch.params) {
+    if (param.section && param.section !== section) {
+      section = param.section;
+      container.appendChild(el('h3', { class: 'param-section' }, section));
+    }
+    const apply = (v) => { p[param.key] = v; onChange(param.key, v); };
+    if (param.widget === 'wavetable') container.appendChild(wavetableRow(param, p[param.key], apply));
+    else if (param.widget === 'wavepos') container.appendChild(sliderRow({ ...param, min: 0, max: 1, step: 0.001 }, p[param.key], apply));
+    else if (param.options) container.appendChild(selectRow(param, p[param.key], apply));
+    else container.appendChild(sliderRow(param, p[param.key], apply));
+  }
+}
 
 async function fillPatchPresets() {
   savedPatchPresets = await listPresets(schema.id); // node server (disk), {} if absent
@@ -60,8 +98,9 @@ async function fillPatchPresets() {
 }
 
 $('voice').onchange = (e) => {
-  schema = PATCH_TYPES.find((t) => t.id === e.target.value);
+  schema = VOICES.find((t) => t.id === e.target.value);
   patch = loadDraft(`patch:${schema.id}`) || defaultsFor(schema);
+  if (schema.id === 'wt') loadWtBank();
   fillPatchPresets();
   rerender();
   preview.sendPatch(schema.id, patch);
@@ -89,10 +128,15 @@ $('preset-del').onclick = async () => {
   catch (err) { status(`delete failed: ${err.message}`); }
 };
 $('reset').onclick = () => { patch = defaultsFor(schema); rerender(); preview.sendPatch(schema.id, patch); status('reset to default'); };
-$('randomize').onclick = () => { patch = randomizeFor(schema); rerender(); preview.sendPatch(schema.id, patch); status('randomized'); };
+$('randomize').onclick = () => {
+  const opts = schema.id === 'wt' && wtBank ? { wavetableIds: wtBank.wavetables.map((t) => t.id) } : undefined;
+  patch = randomizeFor(schema, opts);
+  rerender(); preview.sendPatch(schema.id, patch); status('randomized');
+};
 
 function rerender() {
-  renderParams(schema, patch, $('params'), () => {
+  const render = schema.id === 'wt' ? renderWtParams : renderParams;
+  render(schema, patch, $('params'), () => {
     saveDraft(`patch:${schema.id}`, patch);
     preview.sendPatch(schema.id, patch); // stream the edit to the live DSP
     refreshExport();
@@ -113,7 +157,10 @@ function toRust() {
   return `${struct} {\n${lines.join('\n')}\n}`;
 }
 function refreshExport() {
-  $('export-out').value = $('export-fmt').value === 'rust' ? toRust() : JSON.stringify(patch, null, 2);
+  // the Rust-literal export only covers fm/bass; wt exports JSON (use the
+  // Wavetable tool for a WtPatch literal).
+  const rust = $('export-fmt').value === 'rust' && schema.id !== 'wt';
+  $('export-out').value = rust ? toRust() : JSON.stringify(patch, null, 2);
 }
 $('export-fmt').onchange = refreshExport;
 $('copy').onclick = async () => {
@@ -245,6 +292,8 @@ $('inst-del').onclick = async () => {
 };
 
 // ── boot ─────────────────────────────────────────────────────────────────
+$('voice').value = schema.id;
+if (schema.id === 'wt') loadWtBank();
 fillPatchPresets();
 rerender();
 renderFxOffline();

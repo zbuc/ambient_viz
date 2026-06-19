@@ -42,9 +42,12 @@ audio/
 three preset levels live against the real Rust DSP through `patch_server`
 (`daisy/crates/host/src/bin/patch_server.rs`; see `daisy/PATCH_SERVER.md`):
 
-- **Patch** — the FM-stab / rumble-bass voice params (schema
-  `shared/patch-schema.js`). Patch presets save to the **node server**
-  (`/api/presets/{fm,bass}`, schema-validated) → `presets/{fm,bass}/`.
+- **Patch** — the FM-stab, rumble-bass, **and wavetable** voice params
+  (schema `shared/patch-schema.js`). The wavetable voice gets dropdown +
+  slider controls for its wavetable/wave-position here; the dedicated
+  **Wavetable** tool adds the graphical wave previews. Patch presets save to
+  the **node server** (`/api/presets/{fm,bass,wt}`, schema-validated) →
+  `presets/{fm,bass,wt}/`.
 - **FX chain** — an ordered list of insert effects (reverb, delay,
   distortion, tape, transporter, freeze, filter, bloom), added/reordered/
   tweaked live; the available effects + param ranges come from
