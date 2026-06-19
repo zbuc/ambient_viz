@@ -1,6 +1,7 @@
 {
   "git": {
-    "sha1": "ccadb08fdab0c59f6799d2bb816aeda0d6f5d767"
+    "sha1": "b4da941cc78f662fc2ca4b99f5d42b7471fd23f6"
   },
-  "path_in_vcs": ""
+  "path_in_vcs": "",
+  "note": "Vendored from github.com/Na1w/infinitedsp main; local patches in src/{synthesis/speech.rs,effects/time/stutter.rs,low_mem/effects/time/reverb_low_mem.rs}. See daisy/vendor/PATCHES.md."
 }

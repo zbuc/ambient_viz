@@ -4,6 +4,29 @@ use crate::FrameProcessor;
 use alloc::vec::Vec;
 use core::f32::consts::PI;
 
+/// Prewarp tangent for the TPT/ZDF bilinear transform.
+///
+/// Exact `libm::tanf` by default.
+#[cfg(not(feature = "perf-approximations"))]
+#[inline]
+fn prewarp_tan(x: f32) -> f32 {
+    libm::tanf(x)
+}
+
+/// Prewarp tangent — Padé[3/2] approximation `tan(x) ≈ x(15 - x²)/(15 - 6x²)`.
+///
+/// Matches `tan` through the x⁵ term: <0.2% error for x ≤ ~0.64 (covers all
+/// audio cutoffs up to ~9.8 kHz at 48 kHz), rising to ~10% only near the
+/// `0.49·fs` clamp. The denominator stays positive for x < π/2, and the SVF
+/// clamps the cutoff below that, so there is no pole. Enabled by the
+/// `perf-approximations` feature.
+#[cfg(feature = "perf-approximations")]
+#[inline]
+fn prewarp_tan(x: f32) -> f32 {
+    let x2 = x * x;
+    x * (15.0 - x2) / (15.0 - 6.0 * x2)
+}
+
 /// The output type of the State Variable Filter.
 #[derive(Clone, Copy)]
 pub enum SvfType {
@@ -31,8 +54,8 @@ pub struct StateVariableFilter {
     last_res: f32,
     g: f32,
     k: f32,
-    // PATCH (vendored): per-sample-invariant quantities derived from g/k, cached
-    // behind the same change guard so the per-sample body has no division.
+    // Per-sample-invariant quantities derived from g/k, cached behind the same
+    // change guard as g/k so the per-sample body needs no division.
     denom: f32,    // 1 / (1 + g*(g+k))
     g_plus_k: f32, // g + k
     two_g: f32,    // 2*g
@@ -63,8 +86,8 @@ impl StateVariableFilter {
             denom: 0.0,
             g_plus_k: 0.0,
             two_g: 0.0,
-            cutoff_buffer: Vec::new(),
-            res_buffer: Vec::new(),
+            cutoff_buffer: Vec::with_capacity(128),
+            res_buffer: Vec::with_capacity(128),
         }
     }
 
@@ -87,18 +110,11 @@ impl StateVariableFilter {
     #[inline(always)]
     pub fn tick(&mut self, input: f32, cutoff_hz: f32, res: f32) -> f32 {
         if (cutoff_hz - self.last_cutoff).abs() > 0.001 || (res - self.last_res).abs() > 0.001 {
-            // PATCH (vendored): Padé[3/2] tan() for the TPT prewarp, replacing
-            // libm::tanf (~1250 cyc on the Daisy M7). The formant filter smooths
-            // cutoff every sample, so this ran 3×/sample and overran the audio
-            // callback → SAI underrun screech. tan(x) ≈ x(15-x²)/(15-6x²) matches
-            // tan through x⁵: <0.2% error for x ≤ ~0.64 (all speech formants ≤
-            // 9.8 kHz @ 48 kHz), ~10% only near the 0.49·fs clamp; denom > 0 for
-            // x < π/2 (cutoff is clamped below that), so no pole.
-            let x = (PI / self.sample_rate) * cutoff_hz.clamp(10.0, self.sample_rate * 0.49);
-            let x2 = x * x;
-            self.g = x * (15.0 - x2) / (15.0 - 6.0 * x2);
+            self.g = prewarp_tan(
+                (PI / self.sample_rate) * cutoff_hz.clamp(10.0, self.sample_rate * 0.49),
+            );
             self.k = 1.0 / res.max(0.01);
-            // PATCH (vendored): recompute the g/k-derived constants only here.
+            // Recompute the g/k-derived constants only when g/k change.
             self.g_plus_k = self.g + self.k;
             self.two_g = 2.0 * self.g;
             self.denom = 1.0 / (1.0 + self.g * self.g_plus_k);

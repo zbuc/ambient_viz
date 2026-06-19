@@ -3,14 +3,29 @@ use crate::core::channels::Mono;
 use crate::FrameProcessor;
 use alloc::vec::Vec;
 
-/// PATCH (vendored): fast log2 / exp2 (float bit-trick + polynomial) for the
-/// per-sample gain computer below. On the Daisy this compressor is the tape
-/// master bus, run on BOTH channels every sample, and libm `log10f` + `powf`
-/// (~1250 cyc each on the Cortex-M7) were the largest always-on per-sample cost
-/// in the whole audio path. These approximations are fit to <0.0002 dB (log2)
-/// and <0.001% (exp2) over the relevant ranges — inaudible in a smooth,
-/// envelope-driven gain control — and ~50× cheaper.
-///   20·log10(x) = 6.0205999·log2(x);  10^(db/20) = exp2(db·0.16609640)
+// Gain-computer dB conversions. The per-sample gain computer needs one log
+// (envelope → dB) and one exp (gain dB → linear) every sample. By default these
+// are exact libm `log10f`/`powf`; with `perf-approximations` they use cheap
+// float bit-trick approximations (~50x faster on a transcendental-less core such
+// as the Cortex-M7, where this is typically the largest always-on per-sample
+// cost on a master-bus compressor).
+//   20·log10(x) = 6.0205999·log2(x);   10^(db/20) = exp2(db·0.16609640)
+
+#[cfg(not(feature = "perf-approximations"))]
+#[inline]
+fn env_to_db(x: f32) -> f32 {
+    20.0 * libm::log10f(x)
+}
+
+#[cfg(not(feature = "perf-approximations"))]
+#[inline]
+fn gain_db_to_lin(db: f32) -> f32 {
+    libm::powf(10.0, db / 20.0)
+}
+
+/// log2 via the float exponent + a degree-5 polynomial on the mantissa.
+/// Fit to <0.0002 dB over the gain computer's range.
+#[cfg(feature = "perf-approximations")]
 #[inline]
 fn fast_log2(x: f32) -> f32 {
     let bits = x.to_bits();
@@ -25,6 +40,9 @@ fn fast_log2(x: f32) -> f32 {
     exp as f32 + p
 }
 
+/// exp2 via integer/fractional split and a degree-4 polynomial on the fraction.
+/// Fit to <0.001% over the gain computer's range.
+#[cfg(feature = "perf-approximations")]
 #[inline]
 fn fast_exp2(x: f32) -> f32 {
     let x = x.max(-100.0).min(100.0);
@@ -35,6 +53,18 @@ fn fast_exp2(x: f32) -> f32 {
     let n = xi as i32;
     let scale = f32::from_bits(((n + 127) as u32) << 23); // 2^n
     frac * scale
+}
+
+#[cfg(feature = "perf-approximations")]
+#[inline]
+fn env_to_db(x: f32) -> f32 {
+    6.0205999 * fast_log2(x)
+}
+
+#[cfg(feature = "perf-approximations")]
+#[inline]
+fn gain_db_to_lin(db: f32) -> f32 {
+    fast_exp2(db * 0.16609640)
 }
 
 /// A dynamic range compressor.
@@ -82,12 +112,12 @@ impl Compressor {
             attack_coeff: 0.0,
             release_coeff: 0.0,
             envelope: 0.0,
-            threshold_buffer: Vec::new(),
-            ratio_buffer: Vec::new(),
-            attack_buffer: Vec::new(),
-            release_buffer: Vec::new(),
-            makeup_buffer: Vec::new(),
-            knee_buffer: Vec::new(),
+            threshold_buffer: Vec::with_capacity(128),
+            ratio_buffer: Vec::with_capacity(128),
+            attack_buffer: Vec::with_capacity(128),
+            release_buffer: Vec::with_capacity(128),
+            makeup_buffer: Vec::with_capacity(128),
+            knee_buffer: Vec::with_capacity(128),
             last_attack_bits: u32::MAX,
             last_release_bits: u32::MAX,
         };
@@ -169,10 +199,11 @@ impl FrameProcessor<Mono> for Compressor {
             }
 
             let makeup = libm::powf(10.0, makeup_db / 20.0);
-            // PATCH (vendored): hoist block-constant gain-computer terms out of
-            // the per-sample loop (threshold/ratio/knee/coeffs are constant for
-            // the block). Removes a division (1/ratio) + several ops per sample
-            // on the always-on tape master. Bit-identical.
+            // Every term here is block-constant in this all-params-constant fast
+            // path (threshold/ratio/knee and the attack/release coeffs do not
+            // change across the buffer), so hoist them out of the per-sample
+            // loop. Removes a division (1/ratio) and several repeated ops per
+            // sample. Bit-identical to the inline form.
             let slope = 1.0 - 1.0 / ratio;
             let knee_half = knee_db / 2.0;
             let thresh_hi = threshold_db + knee_half;
@@ -192,22 +223,22 @@ impl FrameProcessor<Mono> for Compressor {
                 }
 
                 let mut gain = 1.0;
-                let env_db = 6.0205999 * fast_log2(self.envelope + 1e-9); // PATCH (vendored)
+                let env_db = env_to_db(self.envelope + 1e-9);
 
                 if knee_db > 0.0 {
                     if env_db > thresh_hi {
                         let over_db = env_db - threshold_db;
                         let gain_db = -over_db * slope;
-                        gain = fast_exp2(gain_db * 0.16609640); // PATCH (vendored)
+                        gain = gain_db_to_lin(gain_db);
                     } else if env_db > thresh_lo {
                         let over_db = env_db - threshold_db + knee_half;
                         let gain_db = -slope * (over_db * over_db) / two_knee;
-                        gain = fast_exp2(gain_db * 0.16609640); // PATCH (vendored)
+                        gain = gain_db_to_lin(gain_db);
                     }
                 } else if env_db > threshold_db {
                     let over_db = env_db - threshold_db;
                     let gain_db = -over_db * slope;
-                    gain = fast_exp2(gain_db * 0.16609640); // PATCH (vendored)
+                    gain = gain_db_to_lin(gain_db);
                 }
 
                 *sample = input * gain * makeup;
@@ -277,23 +308,23 @@ impl FrameProcessor<Mono> for Compressor {
                 }
 
                 let mut gain = 1.0;
-                let env_db = 6.0205999 * fast_log2(self.envelope + 1e-9); // PATCH (vendored)
+                let env_db = env_to_db(self.envelope + 1e-9);
 
                 if knee_db > 0.0 {
                     if env_db > (threshold_db + knee_db / 2.0) {
                         let over_db = env_db - threshold_db;
                         let gain_db = -over_db * (1.0 - 1.0 / ratio);
-                        gain = fast_exp2(gain_db * 0.16609640); // PATCH (vendored)
+                        gain = gain_db_to_lin(gain_db);
                     } else if env_db > (threshold_db - knee_db / 2.0) {
                         let slope = 1.0 - 1.0 / ratio;
                         let over_db = env_db - threshold_db + knee_db / 2.0;
                         let gain_db = -slope * (over_db * over_db) / (2.0 * knee_db);
-                        gain = fast_exp2(gain_db * 0.16609640); // PATCH (vendored)
+                        gain = gain_db_to_lin(gain_db);
                     }
                 } else if env_db > threshold_db {
                     let over_db = env_db - threshold_db;
                     let gain_db = -over_db * (1.0 - 1.0 / ratio);
-                    gain = fast_exp2(gain_db * 0.16609640); // PATCH (vendored)
+                    gain = gain_db_to_lin(gain_db);
                 }
 
                 *sample = input * gain * makeup;

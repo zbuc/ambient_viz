@@ -52,8 +52,8 @@ where
         DualMono {
             left,
             right,
-            left_buffer: Vec::new(),
-            right_buffer: Vec::new(),
+            left_buffer: Vec::with_capacity(128),
+            right_buffer: Vec::with_capacity(128),
         }
     }
 }
@@ -116,14 +116,16 @@ where
 
     #[cfg(feature = "debug_visualize")]
     fn visualize(&self, indent: usize) -> alloc::string::String {
-        use alloc::format;
-        let spaces = " ".repeat(indent);
-        let mut output = format!("{}DualMono Wrapper\n", spaces);
+        use core::fmt::Write;
 
-        output.push_str(&format!("{}  Left Channel:\n", spaces));
+        let spaces = " ".repeat(indent);
+        let mut output = alloc::string::String::new();
+        let _ = writeln!(output, "{}DualMono Wrapper", spaces);
+
+        let _ = writeln!(output, "{}  Left Channel:", spaces);
         output.push_str(&self.left.visualize(indent + 4));
 
-        output.push_str(&format!("{}  Right Channel:\n", spaces));
+        let _ = writeln!(output, "{}  Right Channel:", spaces);
         output.push_str(&self.right.visualize(indent + 4));
 
         output
@@ -174,9 +176,11 @@ impl<P: FrameProcessor<Mono> + Send> FrameProcessor<Stereo> for MonoToStereo<P> 
 
     #[cfg(feature = "debug_visualize")]
     fn visualize(&self, indent: usize) -> alloc::string::String {
-        use alloc::format;
+        use core::fmt::Write;
+
         let spaces = " ".repeat(indent);
-        let mut output = format!("{}MonoToStereo\n", spaces);
+        let mut output = alloc::string::String::new();
+        let _ = writeln!(output, "{}MonoToStereo", spaces);
         output.push_str(&self.inner.visualize(indent + 2));
         output
     }
@@ -192,7 +196,7 @@ impl<P: FrameProcessor<Stereo>> StereoToMono<P> {
     pub fn new(inner: P) -> Self {
         StereoToMono {
             inner,
-            stereo_buffer: Vec::new(),
+            stereo_buffer: Vec::with_capacity(128),
         }
     }
 }
@@ -241,9 +245,11 @@ impl<P: FrameProcessor<Stereo> + Send> FrameProcessor<Mono> for StereoToMono<P> 
 
     #[cfg(feature = "debug_visualize")]
     fn visualize(&self, indent: usize) -> alloc::string::String {
-        use alloc::format;
+        use core::fmt::Write;
+
         let spaces = " ".repeat(indent);
-        let mut output = format!("{}StereoToMono\n", spaces);
+        let mut output = alloc::string::String::new();
+        let _ = writeln!(output, "{}StereoToMono", spaces);
         output.push_str(&self.inner.visualize(indent + 2));
         output
     }

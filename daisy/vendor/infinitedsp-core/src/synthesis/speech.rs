@@ -528,15 +528,14 @@ impl<'a> FrameProcessor<Mono> for SpeechSynth<'a> {
 
         let dt_ms = 1000.0 / self.sample_rate;
 
-        // PATCH (vendored): these smoothing coefficients depend only on the
-        // (fixed) sample rate, so compute them ONCE here instead of 3 `expf`
-        // per sample. On the Daisy M7 each libm transcendental is ~1250 cycles;
-        // 3/sample × 32-sample blocks blew the audio callback budget and
-        // underran the SAI (audible screech). Upstream this if accepted.
+        // The one-pole smoothing coefficients depend only on the (fixed) sample
+        // rate, so compute the three `expf` once here instead of 2-3 per sample.
         let smooth_freq_jump = 1.0 - libm::expf(-1.0 / (0.001 * self.sample_rate));
         let smooth_freq_glide = 1.0 - libm::expf(-1.0 / (0.015 * self.sample_rate));
         let smooth_amp = 1.0 - libm::expf(-1.0 / (0.008 * self.sample_rate));
 
+        // PATCH (vendored): no `sample_index` — Stutter::tick (per-sample) needs
+        // no absolute sample index, unlike the block Stutter::process it replaces.
         for sample in buffer.iter_mut() {
             self.time_in_phoneme += dt_ms;
 
@@ -578,16 +577,15 @@ impl<'a> FrameProcessor<Mono> for SpeechSynth<'a> {
 
             let p = 110.0 * self.cur_pitch;
 
-            // PATCH (vendored): the per-oscillator detune factors
-            // `1 + ((idx/3)*2-1)*0.005` are constant (the voice stack is always 4
-            // oscillators — SpeechSynth::new), so use a precomputed table instead
-            // of recomputing `spread` for all 4 oscillators every sample. Same f32
-            // values as the original expression.
+            // The per-oscillator detune factors `1 + ((idx/3)*2 - 1)*0.005` are
+            // constants (the voice stack is fixed at 4 oscillators in `new`), so
+            // use a precomputed table instead of recomputing `spread` for all 4
+            // oscillators every sample. Same f32 values as the inline expression.
             const DETUNE: [f32; 4] = [
                 1.0 + ((0.0 / 3.0) * 2.0 - 1.0) * 0.005,
                 1.0 + ((1.0 / 3.0) * 2.0 - 1.0) * 0.005,
                 1.0 + ((2.0 / 3.0) * 2.0 - 1.0) * 0.005,
-                1.0 + ((3.0 / 3.0) * 2.0 - 1.0) * 0.005,
+                1.0 + (1.0 * 2.0 - 1.0) * 0.005,
             ];
             let voiced_stack = self
                 .voice_stack

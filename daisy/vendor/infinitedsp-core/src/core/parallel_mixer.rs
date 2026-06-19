@@ -2,7 +2,6 @@ use super::frame_processor::FrameProcessor;
 use crate::core::audio_param::AudioParam;
 use crate::core::channels::ChannelConfig;
 #[cfg(feature = "debug_visualize")]
-use alloc::format;
 #[cfg(feature = "debug_visualize")]
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -31,10 +30,10 @@ impl<P: FrameProcessor<C>, C: ChannelConfig> ParallelMixer<P, C> {
         ParallelMixer {
             processor,
             mix: AudioParam::Static(mix),
-            dry_buffer: Vec::new(),
-            delay_line: Vec::new(),
+            dry_buffer: Vec::with_capacity(128),
+            delay_line: Vec::with_capacity(128),
             write_ptr: 0,
-            mix_buffer: Vec::new(),
+            mix_buffer: Vec::with_capacity(128),
             _marker: core::marker::PhantomData,
         }
     }
@@ -73,7 +72,10 @@ impl<P: FrameProcessor<C>, C: ChannelConfig> FrameProcessor<C> for ParallelMixer
             let len = self.delay_line.len();
             for &sample in buffer.iter() {
                 self.delay_line[self.write_ptr] = sample;
-                self.write_ptr = (self.write_ptr + 1) % len;
+                self.write_ptr += 1;
+                if self.write_ptr >= len {
+                    self.write_ptr -= len;
+                }
             }
         }
 
@@ -82,10 +84,17 @@ impl<P: FrameProcessor<C>, C: ChannelConfig> FrameProcessor<C> for ParallelMixer
         if latency > 0 {
             let len = self.delay_line.len();
             let total_latency_samples = latency * channels;
-            let start_read = (self.write_ptr + len - buffer.len() - total_latency_samples) % len;
+
+            let mut start_read = self.write_ptr + len - buffer.len() - total_latency_samples;
+            while start_read >= len {
+                start_read -= len;
+            }
 
             for (i, sample) in buffer.iter_mut().enumerate() {
-                let read_idx = (start_read + i) % len;
+                let mut read_idx = start_read + i;
+                while read_idx >= len {
+                    read_idx -= len;
+                }
                 let dry = self.delay_line[read_idx];
 
                 let frame_idx = i / channels;
@@ -129,24 +138,25 @@ impl<P: FrameProcessor<C>, C: ChannelConfig> FrameProcessor<C> for ParallelMixer
 
     #[cfg(feature = "debug_visualize")]
     fn visualize(&self, indent: usize) -> String {
+        use core::fmt::Write;
         let spaces = " ".repeat(indent);
         let mut output = String::new();
 
-        output.push_str(&format!("{}ParallelMixer\n", spaces));
-        output.push_str(&format!("{}  |-- Input Signal (Passthrough)\n", spaces));
-        output.push_str(&format!("{}  |-- Processed Signal\n", spaces));
-        output.push_str(&format!("{}  |    |\n", spaces));
-        output.push_str(&format!("{}  |    v\n", spaces));
+        let _ = writeln!(output, "{}ParallelMixer", spaces);
+        let _ = writeln!(output, "{}  |-- Input Signal (Passthrough)", spaces);
+        let _ = writeln!(output, "{}  |-- Processed Signal", spaces);
+        let _ = writeln!(output, "{}  |    |", spaces);
+        let _ = writeln!(output, "{}  |    v", spaces);
 
         let inner_viz = self.processor.visualize(0);
 
         for line in inner_viz.lines() {
-            output.push_str(&format!("{}  |    {}\n", spaces, line));
+            let _ = writeln!(output, "{}  |    {}", spaces, line);
         }
 
-        output.push_str(&format!("{}  |    |\n", spaces));
-        output.push_str(&format!("{}  |    v\n", spaces));
-        output.push_str(&format!("{}  |-- Sum\n", spaces));
+        let _ = writeln!(output, "{}  |    |", spaces);
+        let _ = writeln!(output, "{}  |    v", spaces);
+        let _ = writeln!(output, "{}  |-- Sum", spaces);
 
         output
     }

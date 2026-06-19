@@ -32,8 +32,8 @@ impl RingMod {
             freq,
             mix,
             sample_rate,
-            freq_buffer: Vec::new(),
-            mix_buffer: Vec::new(),
+            freq_buffer: Vec::with_capacity(128),
+            mix_buffer: Vec::with_capacity(128),
         }
     }
 
@@ -110,8 +110,11 @@ mod tests {
         let mut buffer = [1.0; 10];
         rm.process(&mut buffer, 0);
 
-        let min = buffer.iter().fold(1.0f32, |a, &b| a.min(b));
-        let max = buffer.iter().fold(-1.0f32, |a, &b| a.max(b));
+        let (min, max) = buffer
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), &b| {
+                (min.min(b), max.max(b))
+            });
 
         assert!(min < -0.5);
         assert!(max > 0.5);

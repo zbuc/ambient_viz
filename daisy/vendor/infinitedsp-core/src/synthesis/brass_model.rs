@@ -109,9 +109,9 @@ impl BrassModel {
             bell_state: 0.0,
             last_out: 0.0,
             vibrato_phase: 0.0,
-            pitch_buffer: Vec::new(),
-            breath_buffer: Vec::new(),
-            tension_buffer: Vec::new(),
+            pitch_buffer: Vec::with_capacity(128),
+            breath_buffer: Vec::with_capacity(128),
+            tension_buffer: Vec::with_capacity(128),
             rng_state: 12345,
         }
     }
@@ -169,9 +169,15 @@ impl FrameProcessor<Mono> for BrassModel {
                 .set_resonance_lowpass(lip_freq, 0.996, self.sample_rate);
 
             let period = (self.sample_rate / pitch_val).max(2.0);
-            let read_pos = (self.write_ptr as f32 - period + delay_len as f32) % delay_len as f32;
+            let mut read_pos = self.write_ptr as f32 - period + delay_len as f32;
+            while read_pos >= delay_len as f32 {
+                read_pos -= delay_len as f32;
+            }
             let idx_a = read_pos as usize;
-            let idx_b = (idx_a + 1) % delay_len;
+            let mut idx_b = idx_a + 1;
+            if idx_b >= delay_len {
+                idx_b -= delay_len;
+            }
             let frac = read_pos - idx_a as f32;
             let bore_out = self.delay_line[idx_a] * (1.0 - frac) + self.delay_line[idx_b] * frac;
 
@@ -203,7 +209,10 @@ impl FrameProcessor<Mono> for BrassModel {
 
             *sample = bell_out * 3.0;
 
-            self.write_ptr = (self.write_ptr + 1) % delay_len;
+            self.write_ptr += 1;
+            if self.write_ptr >= delay_len {
+                self.write_ptr -= delay_len;
+            }
         }
     }
 

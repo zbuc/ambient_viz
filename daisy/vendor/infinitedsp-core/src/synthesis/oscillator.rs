@@ -5,14 +5,24 @@ use alloc::vec::Vec;
 use core::f32::consts::PI;
 use wide::f32x4;
 
-/// PATCH (vendored): fast sine of a normalized phase in [0,1) — i.e. sin(2π·phase).
-/// ~0.2% error vs libm::sinf but ~50× cheaper on the Cortex-M7 (libm sinf is
-/// ~1250 cyc/call there). The FM stab's carrier+modulator call the Sine path 2×
-/// per active voice per sample (NUM_VOICES = 8), so libm::sinf blew the Daisy's
-/// audio-callback budget on struck chords → SAI underrun / "distortion during
-/// bells." Parabolic + one refinement pass, same shape as the firmware fast-cos.
+/// Sine of a normalized phase in `[0, 1)` — i.e. `sin(2π·phase)`.
+///
+/// Exact `libm::sinf` by default.
+#[cfg(not(feature = "perf-approximations"))]
 #[inline]
-fn fast_sin_norm(phase: f32) -> f32 {
+fn sine_norm(phase: f32) -> f32 {
+    libm::sinf(phase * 2.0 * PI)
+}
+
+/// Sine of a normalized phase — parabolic approximation with one refinement
+/// pass (Bhaskara-style), ~0.2% peak error vs `libm::sinf`.
+///
+/// `libm::sinf` is ~1250 cycles on a Cortex-M7; an FM voice calls the Sine path
+/// twice per oscillator per sample, which can blow the audio-callback budget on
+/// transcendental-less cores. Enabled by the `perf-approximations` feature.
+#[cfg(feature = "perf-approximations")]
+#[inline]
+fn sine_norm(phase: f32) -> f32 {
     // sin is 1-periodic in `phase`; wrap to [-0.5, 0.5) then to x in [-PI, PI).
     let p = if phase >= 0.5 { phase - 1.0 } else { phase };
     let x = p * (2.0 * PI);
@@ -47,7 +57,10 @@ pub struct Oscillator {
     pub frequency: AudioParam,
     pub waveform: Waveform,
     pub sample_rate: f32,
-    inv_sr: f32, // PATCH (vendored): cached 1/sample_rate (tick is called 6×/sample by the voice)
+    // Cached 1/sample_rate. `tick()` is the per-sample entry point (a voice can
+    // call it several times per output sample), so caching the reciprocal keeps
+    // a division off the hot path.
+    inv_sample_rate: f32,
     freq_buffer: Vec<f32>,
     pub rng_state: u32,
 }
@@ -64,8 +77,8 @@ impl Oscillator {
             frequency,
             waveform,
             sample_rate: 44100.0,
-            inv_sr: 1.0 / 44100.0,
-            freq_buffer: Vec::new(),
+            inv_sample_rate: 1.0 / 44100.0,
+            freq_buffer: Vec::with_capacity(128),
             rng_state: 12345,
         }
     }
@@ -110,7 +123,7 @@ impl Oscillator {
     /// Processes a single sample from the oscillator.
     #[inline(always)]
     pub fn tick(&mut self, freq_hz: f32) -> f32 {
-        let inc = freq_hz * self.inv_sr; // PATCH (vendored): cached inv_sr
+        let inc = freq_hz * self.inv_sample_rate;
 
         if self.waveform != Waveform::WhiteNoise {
             self.phase += inc;
@@ -122,7 +135,7 @@ impl Oscillator {
         }
 
         match self.waveform {
-            Waveform::Sine => fast_sin_norm(self.phase), // PATCH (vendored): see fast_sin_norm
+            Waveform::Sine => sine_norm(self.phase),
             Waveform::Triangle => {
                 if self.phase < 0.5 {
                     4.0 * self.phase - 1.0
@@ -138,8 +151,11 @@ impl Oscillator {
             Waveform::Square => {
                 let naive = if self.phase < 0.5 { 1.0 } else { -1.0 };
                 let dt = inc.abs();
-                let core =
-                    Self::poly_blep(self.phase, dt) - Self::poly_blep((self.phase + 0.5) % 1.0, dt);
+                let mut p2 = self.phase + 0.5;
+                if p2 >= 1.0 {
+                    p2 -= 1.0;
+                }
+                let core = Self::poly_blep(self.phase, dt) - Self::poly_blep(p2, dt);
                 naive + core
             }
             Waveform::WhiteNoise => Self::next_random(&mut self.rng_state),
@@ -175,7 +191,7 @@ impl FrameProcessor<Mono> for Oscillator {
                         } else if phase < 0.0 {
                             phase += 1.0;
                         }
-                        out_chunk[i] = fast_sin_norm(phase); // PATCH (vendored)
+                        out_chunk[i] = sine_norm(phase);
                     }
                 }
             }
@@ -247,8 +263,11 @@ impl FrameProcessor<Mono> for Oscillator {
                         }
                         let naive = if phase < 0.5 { 1.0 } else { -1.0 };
                         let abs_inc = inc_arr[i].abs();
-                        let corr = Self::poly_blep(phase, abs_inc)
-                            - Self::poly_blep((phase + 0.5) % 1.0, abs_inc);
+                        let mut p2 = phase + 0.5;
+                        if p2 >= 1.0 {
+                            p2 -= 1.0;
+                        }
+                        let corr = Self::poly_blep(phase, abs_inc) - Self::poly_blep(p2, abs_inc);
                         out_chunk[i] = naive + corr;
                     }
                 }
@@ -279,7 +298,7 @@ impl FrameProcessor<Mono> for Oscillator {
             }
 
             let val = match self.waveform {
-                Waveform::Sine => fast_sin_norm(phase), // PATCH (vendored)
+                Waveform::Sine => sine_norm(phase),
                 Waveform::Triangle => {
                     let x = phase;
                     if x < 0.5 {
@@ -296,8 +315,11 @@ impl FrameProcessor<Mono> for Oscillator {
                 Waveform::Square => {
                     let naive = if phase < 0.5 { 1.0 } else { -1.0 };
                     let dt = inc.abs();
-                    let corr =
-                        Self::poly_blep(phase, dt) - Self::poly_blep((phase + 0.5) % 1.0, dt);
+                    let mut p2 = phase + 0.5;
+                    if p2 >= 1.0 {
+                        p2 -= 1.0;
+                    }
+                    let corr = Self::poly_blep(phase, dt) - Self::poly_blep(p2, dt);
                     naive + corr
                 }
                 Waveform::WhiteNoise => {
@@ -315,7 +337,7 @@ impl FrameProcessor<Mono> for Oscillator {
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate;
-        self.inv_sr = 1.0 / sample_rate; // PATCH (vendored)
+        self.inv_sample_rate = 1.0 / sample_rate;
         self.frequency.set_sample_rate(sample_rate);
     }
 
@@ -350,8 +372,12 @@ mod tests {
 
         // First sample at 44100Hz, 441Hz increment is 0.01.
         // Phase after first sample is 0.01. sin(0.01 * 2 * PI)
-        // PATCH (vendored): Sine now uses fast_sin_norm (~0.2% error), so widen
-        // the tolerance from 1e-5 to 5e-3.
-        assert!((buffer[0] - libm::sinf(0.01 * 2.0 * PI)).abs() < 5e-3);
+        // The exact libm path matches to 1e-5; the perf-approximations sine has
+        // ~0.2% peak error, so widen the tolerance when that feature is on.
+        #[cfg(not(feature = "perf-approximations"))]
+        let tol = 1e-5;
+        #[cfg(feature = "perf-approximations")]
+        let tol = 5e-3;
+        assert!((buffer[0] - libm::sinf(0.01 * 2.0 * PI)).abs() < tol);
     }
 }

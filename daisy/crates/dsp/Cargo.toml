@@ -15,7 +15,12 @@ itcm-tape = []
 # DaisySP-equivalent no_std DSP library (reverbs, filters, delays, distortion,
 # modulation, oscillators, etc.). Requires alloc — firmware crate provides a
 # global allocator via embedded-alloc.
-infinitedsp-core = "1.1"
+# `perf-approximations` swaps exact libm tan/sin/log/exp in the per-sample hot
+# paths for cheap polynomial/bit-trick approximations — essential on the Daisy's
+# Cortex-M7 (no hardware transcendental unit). These were our patches; upstream
+# merged them behind this feature flag (PRs #46/#47/#48). The vendored copy is
+# patched via the workspace `[patch.crates-io]` — see daisy/vendor/PATCHES.md.
+infinitedsp-core = { version = "1.1", features = ["perf-approximations"] }
 
 # Math primitives (sinf/cosf/powf/fabsf) — sin/cos/powf aren't in core for no_std.
 # Used by our DaisySP ports (SVF, analog bass drum).

@@ -10,11 +10,18 @@ default-members = ["crates/dsp", "crates/host"]
 # changes. The patch below must match daisy-embassy's own patch.crates-io block.
 # Bump these together with the daisy-embassy rev in crates/firmware/Cargo.toml.
 [patch.crates-io]
-# Vendored + patched: hoist SpeechSynth's per-sample expf out of its hot loop
-# (the Daisy M7's ~1250-cycle libm transcendentals × 3/sample overran the audio
-# callback → SAI underruns → screech), and stop Stutter::set_sample_rate from
-# Vec-resizing its ring (the doubling transient blew the AXI heap, which had
-# forced a 44.1 kHz pitch hack). See vendor/infinitedsp-core. Drop once upstreamed.
+# Vendored from infinitedsp main (github.com/Na1w/infinitedsp). Upstream merged
+# our per-sample perf work behind the `perf-approximations` feature (PRs
+# #44/#46/#47/#48 + the loop-invariant hoists), so the vendored copy now carries
+# only the THREE changes upstream hasn't taken:
+#   • synthesis/speech.rs           — voice formant de-ess + noise low-pass
+#                                     (artistic tuning) + per-sample Stutter::tick
+#   • effects/time/stutter.rs       — Stutter::tick + no-resize set_sample_rate
+#                                     (the Vec-resize doubling blew the AXI heap)
+#   • low_mem/.../reverb_low_mem.rs — scalar combs (wide::f32x4 has no HW SIMD
+#                                     on the Cortex-M7)
+# `perf-approximations` is enabled in crates/dsp/Cargo.toml. See
+# vendor/PATCHES.md for the full rationale and the re-sync procedure.
 infinitedsp-core = { path = "vendor/infinitedsp-core" }
 embassy-stm32   = { git = "https://github.com/embassy-rs/embassy.git", rev = "2a1ea6766d00c867c717290d0bb31a8e3f237dca" }
 embassy-time    = { git = "https://github.com/embassy-rs/embassy.git", rev = "2a1ea6766d00c867c717290d0bb31a8e3f237dca" }

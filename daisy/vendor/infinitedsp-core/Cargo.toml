@@ -44,6 +44,11 @@ repository = "https://github.com/Na1w/infinitedsp/"
 [features]
 debug_visualize = []
 default = []
+# Opt-in: swap exact libm transcendentals (tan/sin/log/exp) in the per-sample
+# DSP hot paths for cheap polynomial/bit-trick approximations (upstream PRs
+# #46/#47/#48). Large speedups on the Daisy's Cortex-M7 (no hardware
+# transcendental unit). Our build enables this — see crates/dsp/Cargo.toml.
+perf-approximations = []
 
 [lib]
 name = "infinitedsp_core"
