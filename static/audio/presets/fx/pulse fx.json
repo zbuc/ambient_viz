@@ -1,0 +1,23 @@
+[
+  {
+    "kind": "transporter",
+    "params": {
+      "density": 8.3,
+      "dry": 0.0,
+      "grain_ms": 170.0,
+      "offset_ms": 150.0,
+      "pitch": 0.25,
+      "reverse": 1.0,
+      "spread": 0.63,
+      "wet": 2.0
+    }
+  },
+  {
+    "kind": "delay",
+    "params": {
+      "feedback": 0.45,
+      "mix": 0.35,
+      "time_ms": 999.0
+    }
+  }
+]

@@ -1,0 +1,81 @@
+{
+  "fm": {
+    "mod_ratio": 1.0,
+    "index": 2.2,
+    "feedback": 0.0,
+    "drive": 1.0,
+    "shaper": "Tanh",
+    "attack_s": 0.002,
+    "decay_s": 0.28,
+    "mod_decay_s": 0.12
+  },
+  "bass": {
+    "octave_offset": -12,
+    "detune_cents": 12.0,
+    "sub_level": 0.7,
+    "cutoff_hz": 180.0,
+    "resonance": 0.35,
+    "env_mod_hz": 600.0,
+    "attack_s": 0.02,
+    "decay_s": 0.5,
+    "sustain": 0.8,
+    "release_s": 0.25
+  },
+  "wt": {
+    "osc1_wavetable": "xtuser",
+    "osc1_wave": 0.915,
+    "osc1_semitone": 8,
+    "osc1_detune": 33.5,
+    "osc1_keytrack": 73.0,
+    "osc2_wavetable": "ppgebass",
+    "osc2_wave": 0.111,
+    "osc2_semitone": -16,
+    "osc2_detune": -8.5,
+    "osc2_keytrack": 28.0,
+    "osc2_sync": "On",
+    "osc2_fm": 0.11,
+    "mix_osc1": 0.09,
+    "mix_osc2": 0.56,
+    "mix_ring": 0.75,
+    "mix_noise": 0.25,
+    "noise_colour": 0.04,
+    "filter_type": "Bitreduction",
+    "cutoff_hz": 711.0,
+    "resonance": 0.74,
+    "filter_env_amount": 0.76,
+    "filter_keytrack": 21.0,
+    "fenv_attack": 1.567,
+    "fenv_decay": 0.64,
+    "fenv_sustain": 0.29,
+    "fenv_release": 3.57,
+    "aenv_attack": 0.939,
+    "aenv_decay": 6.69,
+    "aenv_sustain": 0.25,
+    "aenv_release": 6.35,
+    "volume": 0.45,
+    "glide": 0.005
+  },
+  "fx": [
+    {
+      "kind": "transporter",
+      "params": {
+        "density": 8.3,
+        "dry": 0.0,
+        "grain_ms": 170.0,
+        "offset_ms": 150.0,
+        "pitch": 0.25,
+        "reverse": 1.0,
+        "spread": 0.63,
+        "wet": 2.0
+      }
+    },
+    {
+      "kind": "delay",
+      "params": {
+        "feedback": 0.45,
+        "mix": 0.35,
+        "time_ms": 999.0
+      }
+    }
+  ]
+}
