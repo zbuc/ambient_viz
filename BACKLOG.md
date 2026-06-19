@@ -277,6 +277,13 @@ flip, not a schema migration. The order roughly tracks blast radius. Detail in
     sample source, freeze-to-drone; `granulizer.rs` + `GranulizerPatch` + panel.
     **Subsumes the granular-send item below.** Watch the H750 budget (CPU scales
     with active grain count). — `GRANULIZER.md`, mem `daisy-dsp-realtime`
+    - *Skewed window option (refinement)* — asymmetric grain envelope
+      (attack/decay skew, the FL Attack/Hold/Release feel: sharp-attack/long-tail
+      percussive grains vs slow-attack pad wash) instead of the symmetric Hann.
+      Stays real-time-safe / no per-sample transcendental — via a phase-skew on
+      the table lookup, a small set of precomputed tables blended by a knob, or a
+      parametric attack-decay from linear/exp segments. The same window/crossfade
+      table the Transporter's loop seam uses. `window_shape` param. — `GRANULIZER.md`
   Params land in `Param`/`apply_param` (CC + bus controllable); engage/density/
   position stay generic mechanisms a project routes to (no piece-specific
   mapping baked in). When the mood-layer granular fx key lands, mood blend can
