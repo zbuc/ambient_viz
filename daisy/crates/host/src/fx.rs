@@ -149,14 +149,15 @@ fn param_ranges(kind: &str) -> Vec<(&'static str, f32, f32)> {
         ],
         "transporter" => vec![
             ("grain_ms", 5.0, 1000.0), ("density", 0.0, 100.0), ("offset_ms", 0.0, 2000.0),
-            ("pitch", 0.25, 4.0), ("spread", 0.0, 4.0), ("reverse", 0.0, 1.0), ("mix", 0.0, 2.0),
+            ("pitch", 0.25, 4.0), ("spread", 0.0, 4.0), ("reverse", 0.0, 1.0),
+            ("dry", 0.0, 1.0), ("wet", 0.0, 2.0),
         ],
-        "freeze" => vec![("amount", 0.0, 1.0), ("mix", 0.0, 1.0)],
+        "freeze" => vec![("amount", 0.0, 1.0), ("dry", 0.0, 1.0), ("wet", 0.0, 1.0)],
         "filter" => vec![
             ("freq", 20.0, 16000.0), ("res", 0.0, 1.0), ("drive", 0.0, 1.0),
             ("mode", 0.0, 3.0), ("mix", 0.0, 1.0),
         ],
-        "bloom" => vec![("amount", 0.0, 1.0), ("mix", 0.0, 1.0)],
+        "bloom" => vec![("amount", 0.0, 1.0), ("dry", 0.0, 1.0), ("wet", 0.0, 1.0)],
         _ => vec![],
     }
 }
@@ -248,8 +249,10 @@ impl FxChain {
 // ── wrappers ─────────────────────────────────────────────────────────────────
 //
 // In-place effects (reverb/delay/distortion/tape/filter) keep a `dry` scratch
-// and blend by `mix`. Parallel-send / additive effects (transporter/freeze/
-// bloom) keep a `send` scratch and add the wet, scaled by `mix`.
+// and blend by `mix`. Parallel-send effects (transporter/freeze/bloom) keep a
+// `send` scratch and mix the wet over a *scalable* dry — `out = dry·in +
+// wet·send` — so `dry = 0` gives a pure parallel send (the through/"primary"
+// signal removed, e.g. the sound_test transporter pad).
 
 struct ReverbFx {
     inner: Reverb,
@@ -464,12 +467,13 @@ struct TransporterFx {
     pitch: f32,
     spread: f32,
     reverse: f32,
-    mix: f32,
+    dry: f32, // through ("primary") level — 0 = pad only
+    wet: f32, // reverse-grain pad level
 }
 impl TransporterFx {
     fn new(sr: f32) -> Self {
         let mut inner = Transporter::new(sr);
-        inner.set_level(1.0); // wrapper `mix` scales the added wet
+        inner.set_level(1.0); // wrapper `wet` scales the send
         inner.set_grain_ms(200.0);
         inner.set_density(30.0);
         inner.set_offset_ms(150.0);
@@ -484,7 +488,8 @@ impl TransporterFx {
             pitch: 1.0,
             spread: 0.3,
             reverse: 1.0,
-            mix: 0.6,
+            dry: 1.0,
+            wet: 0.6,
         }
     }
 }
@@ -495,9 +500,9 @@ impl Effect for TransporterFx {
     fn process(&mut self, buf: &mut [f32], _idx: u64) {
         self.send.resize(buf.len(), 0.0);
         self.inner.process(buf, &mut self.send);
-        let mix = self.mix;
+        let (dry, wet) = (self.dry, self.wet);
         for (o, &w) in buf.iter_mut().zip(self.send.iter()) {
-            *o += w * mix;
+            *o = *o * dry + w * wet;
         }
     }
     fn set_param(&mut self, name: &str, v: f32) -> bool {
@@ -526,7 +531,8 @@ impl Effect for TransporterFx {
                 self.reverse = if v >= 0.5 { 1.0 } else { 0.0 };
                 self.inner.set_reverse(self.reverse >= 0.5);
             }
-            "mix" => self.mix = v.clamp(0.0, 2.0),
+            "dry" => self.dry = v.clamp(0.0, 1.0),
+            "wet" => self.wet = v.clamp(0.0, 2.0),
             _ => return false,
         }
         true
@@ -539,7 +545,8 @@ impl Effect for TransporterFx {
             ("pitch", self.pitch),
             ("spread", self.spread),
             ("reverse", self.reverse),
-            ("mix", self.mix),
+            ("dry", self.dry),
+            ("wet", self.wet),
         ]
     }
 }
@@ -548,11 +555,12 @@ struct FreezeFx {
     inner: Freeze,
     send: Vec<f32>,
     amount: f32,
-    mix: f32,
+    dry: f32,
+    wet: f32,
 }
 impl FreezeFx {
     fn new(sr: f32) -> Self {
-        FreezeFx { inner: Freeze::new(sr), send: Vec::new(), amount: 0.0, mix: 1.0 }
+        FreezeFx { inner: Freeze::new(sr), send: Vec::new(), amount: 0.0, dry: 1.0, wet: 1.0 }
     }
 }
 impl Effect for FreezeFx {
@@ -562,9 +570,9 @@ impl Effect for FreezeFx {
     fn process(&mut self, buf: &mut [f32], _idx: u64) {
         self.send.resize(buf.len(), 0.0);
         self.inner.process(buf, &mut self.send);
-        let mix = self.mix;
+        let (dry, wet) = (self.dry, self.wet);
         for (o, &w) in buf.iter_mut().zip(self.send.iter()) {
-            *o += w * mix;
+            *o = *o * dry + w * wet;
         }
     }
     fn set_param(&mut self, name: &str, v: f32) -> bool {
@@ -573,13 +581,14 @@ impl Effect for FreezeFx {
                 self.amount = v.clamp(0.0, 1.0);
                 self.inner.set_amount(self.amount);
             }
-            "mix" => self.mix = v.clamp(0.0, 1.0),
+            "dry" => self.dry = v.clamp(0.0, 1.0),
+            "wet" => self.wet = v.clamp(0.0, 1.0),
             _ => return false,
         }
         true
     }
     fn params(&self) -> Vec<(&'static str, f32)> {
-        vec![("amount", self.amount), ("mix", self.mix)]
+        vec![("amount", self.amount), ("dry", self.dry), ("wet", self.wet)]
     }
 }
 
@@ -674,13 +683,14 @@ impl Effect for FilterFx {
 struct BloomFx {
     inner: BloomBank,
     amount: f32,
-    mix: f32,
+    dry: f32,
+    wet: f32,
 }
 impl BloomFx {
     fn new(sr: f32) -> Self {
         let mut inner = BloomBank::new(sr);
         inner.set_amount(0.5);
-        BloomFx { inner, amount: 0.5, mix: 0.5 }
+        BloomFx { inner, amount: 0.5, dry: 1.0, wet: 0.5 }
     }
 }
 impl Effect for BloomFx {
@@ -689,12 +699,12 @@ impl Effect for BloomFx {
     }
     fn process(&mut self, buf: &mut [f32], _idx: u64) {
         let frames = buf.len() / 2;
-        let mix = self.mix;
+        let (dry, wet) = (self.dry, self.wet);
         for i in 0..frames {
             let mono = (buf[2 * i] + buf[2 * i + 1]) * 0.5;
-            let w = self.inner.tick(mono) * mix;
-            buf[2 * i] += w;
-            buf[2 * i + 1] += w;
+            let w = self.inner.tick(mono) * wet;
+            buf[2 * i] = buf[2 * i] * dry + w;
+            buf[2 * i + 1] = buf[2 * i + 1] * dry + w;
         }
     }
     fn set_param(&mut self, name: &str, v: f32) -> bool {
@@ -703,13 +713,14 @@ impl Effect for BloomFx {
                 self.amount = v.clamp(0.0, 1.0);
                 self.inner.set_amount(self.amount);
             }
-            "mix" => self.mix = v.clamp(0.0, 1.0),
+            "dry" => self.dry = v.clamp(0.0, 1.0),
+            "wet" => self.wet = v.clamp(0.0, 1.0),
             _ => return false,
         }
         true
     }
     fn params(&self) -> Vec<(&'static str, f32)> {
-        vec![("amount", self.amount), ("mix", self.mix)]
+        vec![("amount", self.amount), ("dry", self.dry), ("wet", self.wet)]
     }
 }
 

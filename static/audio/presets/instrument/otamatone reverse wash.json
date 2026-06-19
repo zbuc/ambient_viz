@@ -60,12 +60,13 @@
       "kind": "transporter",
       "params": {
         "density": 8.3,
+        "dry": 0.0,
         "grain_ms": 170.0,
-        "mix": 0.8,
         "offset_ms": 150.0,
         "pitch": 0.25,
         "reverse": 1.0,
-        "spread": 0.63
+        "spread": 0.63,
+        "wet": 0.8
       }
     }
   ]

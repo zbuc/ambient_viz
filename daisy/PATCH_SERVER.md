@@ -45,15 +45,20 @@ build/reorder/tweak/serialize-able. `FxChain` owns the `Vec<Box<dyn Effect>>`;
 | `delay` | infinitedsp `PingPongDelay` | `time_ms` `feedback` `mix` |
 | `distortion` | infinitedsp `Distortion` (SoftClip) | `drive` `mix` |
 | `tape` | `dsp::tape::TapeProcessor` | `failure` `hiss` `wow_ms` `flutter_ms` `mix` |
-| `transporter` | `dsp::transporter::Transporter` | `grain_ms` `density` `offset_ms` `pitch` `spread` `reverse` `mix` |
-| `freeze` | `dsp::freeze::Freeze` | `amount` `mix` |
+| `transporter` | `dsp::transporter::Transporter` | `grain_ms` `density` `offset_ms` `pitch` `spread` `reverse` `dry` `wet` |
+| `freeze` | `dsp::freeze::Freeze` | `amount` `dry` `wet` |
 | `filter` | `dsp::svf::Svf` (stereo) | `freq` `res` `drive` `mode` (0 low/1 high/2 band/3 notch) `mix` |
-| `bloom` | `dsp::bloom::BloomBank` | `amount` `mix` |
+| `bloom` | `dsp::bloom::BloomBank` | `amount` `dry` `wet` |
 
-Every effect has a wrapper-level `mix`: in-place effects (reverb/delay/
-distortion/tape/filter) blend `dry*(1-mix) + wet*mix`; additive effects
-(transporter/freeze/bloom) add `wet*mix` over the dry. `GET /fx/catalog`
-returns each kind's params with `default`/`min`/`max` for building a UI.
+**Inserts vs parallel sends.** In-place *insert* effects (reverb/delay/
+distortion/tape/filter) blend `dry*(1-mix) + wet*mix` — one `mix` knob. The
+*parallel-send* effects (transporter/freeze/bloom) instead expose separate
+`dry` (the through/"primary" level) and `wet` (the send level):
+`out = dry·in + wet·send`. **`dry = 0` removes the primary voice** so you hear
+only the send — e.g. the transporter's reverse-grain pad, reproducing
+sound_test's `dry_mix = 0` (the `otamatone reverse wash` instrument does
+exactly this). `GET /fx/catalog` returns each kind's params with
+`default`/`min`/`max` for building a UI.
 
 Adding a new effect: write a wrapper struct implementing `Effect` in
 `host::fx`, add it to `make()`, `KINDS`, and `param_ranges()`. Nothing else
