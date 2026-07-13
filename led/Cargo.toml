@@ -1,0 +1,25 @@
+# The led workspace — LED render-node code (led_room's render plane).
+#
+# NOT in daisy/ (that workspace is on-Daisy audio-plane code only) and NOT in
+# projects/led_room/ (that directory is project-as-data: manifests + policy).
+# Sibling of analysis/ — see led/README.md.
+#
+# node-fw is EXCLUDED from the workspace on purpose: it targets
+# xtensa-esp32-none-elf, which stock rustc cannot codegen — it needs the esp
+# fork toolchain (espup). Keeping it out means `cargo test` here works with
+# plain stable Rust. Build it from inside crates/node-fw, which has its own
+# rust-toolchain.toml.
+[workspace]
+resolver = "2"
+members = ["crates/led-core", "crates/host"]
+exclude = ["crates/node-fw"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3

@@ -31,6 +31,50 @@ protocol, manifests, policy, capture, gates. This directory is the
 project-as-data: `manifest/` (policy, modules, plugin bindings, moods)
 is what a bridge boots with `PROJECT=led_room`.
 
+## Decided (2026-07-13): the LED node
+
+The render-plane hardware/protocol, previously open:
+
+- **Chipset: SK9822** (two-wire, clock + data), *not* WS2812/SK6812. Two-wire is
+  plain SPI — no timing-critical encoding, immune to WiFi interrupts, DMA-able.
+  The deciding property is dimming: the SK9822's 5-bit global field is a real
+  constant-**current** DAC (a true APA102's is a ~580 Hz current PWM that flickers
+  on camera), so pairing it with the 8-bit PWM gives ~13 bits and a fade to black
+  that stays smooth. Cost: ~3x WS2812, and no RGBW — we gave up SK6812's real
+  white die to get the dimming.
+- **Node: ESP32-DevKitC-32** (6 on hand), firmware in **`no_std` Rust /
+  esp-hal + esp-radio**. Accepted risks, in `led/README.md`: the SPI-DMA API is
+  `unstable` and churning; ESP-NOW has **no hardware CI on Xtensa** (soak-test
+  before mounting anything); OTA needs a bootloader we build. Escape hatch if the
+  radio proves flaky: an ESP32-C6 — `led-core` is chip-agnostic, so only the thin
+  `node-fw` crate would change.
+- **Power: several islands, 12V within each, a 5V buck at each node.** Not one central
+  PSU — that would mean 12V trunks radiating to every corner, the wires-everywhere
+  problem the distributed-node design exists to avoid. Each island gets its own supply,
+  fuse block, and node cluster, sized to its own load. Within an island, distributing at
+  12V draws 2.4x less current than 5V (so the trunk barely drops), and each node
+  regenerates a clean local 5V centimetres from its strip — 5V being the rail that
+  cannot tolerate a drop (below 5V the blue/green dies dim before red, so an undervolted
+  strip shifts *colour*, not just brightness).
+  Because the nodes couple wirelessly, **no signal wire crosses between islands**: no
+  ground bonding, no ground loops. "Never ship pixels" buys electrical independence as
+  well as radio bandwidth.
+  **Consequence for the render plane:** an island is a **failure domain**. A dead supply
+  darkens its cluster and nothing else — desirable, but it means an emitter group can
+  span islands and its choreography must degrade gracefully with a member missing,
+  rather than assuming every node is alive.
+  Rig details in `led/README.md`; the rules that kill hardware or people are in
+  `led/SAFETY.md`.
+- **Code lives in the `led/` root workspace** (sibling of `analysis/`), not here:
+  this directory stays project-as-data. `led/node-manifest.draft.json` is the
+  node's manifest, held out of `manifest/modules/` until a real node boots — a
+  registered module that never publishes health would just be a phantom.
+
+Still open: how many strips, their physical layout and `geometry.positionM`, and
+**which control signals a node actually renders from** (`music.genome.*` is the
+obvious source, but nothing publishes `clock.main.*` in led_room yet — SongClock
+is pain-material's module, not a shared one).
+
 ## What lives here today
 
 - `manifest/moods.json` — the 5 mood anchors (first drafts, tune by ear).

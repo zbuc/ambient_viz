@@ -1,0 +1,79 @@
+{
+  "_comment": [
+    "DRAFT — deliberately NOT in projects/led_room/manifest/modules/ yet.",
+    "Dropping it there would register a module that never boots and never publishes",
+    "health, so the registry would carry a phantom node and its staleness warnings.",
+    "Move it (one per physical node) when the first node actually runs.",
+    "Shape follows MANIFEST_PROTOCOL.md's render-node example.",
+    "PLACEHOLDER VALUES — do not reason from these, they are not design decisions:",
+    "  group.count = 6 is a stand-in taken from the number of dev boards on hand,",
+    "  NOT a decision about the installation's size, which is unknown. Same for",
+    "  group.index, geometry.logical (a 1/6 slice) and geometry.positionM — all wait",
+    "  on strips being physically mounted in a real room.",
+    "OPEN: clock.main.* has no publisher in led_room yet (pain-material's SongClock",
+    "is the precedent, not a shared module)."
+  ],
+  "schema": "manifest.v1",
+  "identity": {
+    "stableId": "spiffe://led-room.local/render/led-01",
+    "instanceId": "led01",
+    "humanLabel": "LED strip node 1 (ESP32 + SK9822)",
+    "type": "sk9822-strip-node",
+    "firmwareVersion": "node-fw 0.1.0",
+    "schemaVersion": "manifest.v1"
+  },
+  "role": "render_node",
+  "subscribes": [
+    {
+      "_comment": "Clock arrives as a (position, rate) tuple; PHASE IS EXTRAPOLATED LOCALLY on the node — never shipped sampled. Phase 7's SongClock contract.",
+      "path": "clock.main.beat",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE"
+    },
+    {
+      "path": "clock.main.tempo",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE"
+    },
+    {
+      "path": "music.genome.color",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE"
+    },
+    {
+      "path": "music.genome.brightness",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE"
+    },
+    {
+      "path": "music.genome.density",
+      "valueType": "VALUE_TYPE_FLOAT",
+      "shape": "SHAPE_STATE"
+    }
+  ],
+  "publishes": [
+    {
+      "path": "device.led01.health",
+      "valueType": "VALUE_TYPE_BOOL",
+      "shape": "SHAPE_STATE",
+      "staleAfterMs": 2000,
+      "onStale": "ON_STALE_NULL"
+    }
+  ],
+  "group": {
+    "group": "room",
+    "index": 0,
+    "count": 6
+  },
+  "geometry": {
+    "topology": "LINE",
+    "positionM": { "x": 0.0, "y": 0.0, "z": 0.0 },
+    "logical": [0.0, 0.167],
+    "colorProfile": "sk9822-bgr",
+    "brightnessLimit": 0.8,
+    "safe": {
+      "maxBrightness": 0.9,
+      "maxFlashHz": 3.0
+    }
+  }
+}

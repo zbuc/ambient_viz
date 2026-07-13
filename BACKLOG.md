@@ -472,11 +472,16 @@ M55/M85) — proven by disassembly (a 4-lane f32 multiply lowers to 4 scalar
 
 ## Kiosk hardware
 
-- [ ] **Addressable LED strip/array output** — drive WS2812/SK6812 from audio/visual state
-  (Pi SPI vs ESP32 node vs Daisy); define layout + data source (palette/levels via SSE or
-  the dasp sidecar). *In the platform model this is the LED **sink** (Tier-B sync),
-  subscribing to `clock.*` + chosen signals; standalone or mirroring a downscaled
-  visualizer region.* — `ARCHITECTURE.md` (LED strips/panels), conversation 2026-06-06 (new)
+- [ ] **Addressable LED strip/array output** — *chipset + node + language DECIDED 2026-07-13:
+  **SK9822** strips driven by **ESP32 (no_std Rust / esp-hal)** render nodes; rationale and
+  accepted risks in `led/README.md`, decision recorded in `projects/led_room/PROJECT.md`.
+  `led/` workspace scaffolded: `led-core` (gamma + hybrid 5-bit-global/8-bit-PWM dimming +
+  temporal dither + SK9822 framing, tested) and `led-sim` (judge fades without hardware).*
+  **Remaining:** light a real strip (`node-fw` is an uncompiled skeleton), ESP-NOW ingress,
+  OTA, then physical layout + which control signals a node renders from.
+  *In the platform model this is the LED **sink** (Tier-B sync), subscribing to `clock.*` +
+  chosen signals; standalone or mirroring a downscaled visualizer region.* —
+  `ARCHITECTURE.md` (LED strips/panels), `led/README.md`, conversation 2026-06-06 (new)
 - [ ] **Finalize cursor hiding on labwc** — transparent XCURSOR_THEME for the compositor
   default (mouseless case), plus the USB-mouse + page-cursor sources; verify on hardware. —
   `PI_KIOSK_BRINGUP.md`, mem `kiosk-hide-cursor-wayland`

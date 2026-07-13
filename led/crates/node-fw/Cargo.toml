@@ -1,0 +1,35 @@
+[package]
+name = "node-fw"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+led-core = { path = "../led-core" }
+
+# PIN esp-hal at ~1.1 deliberately. Its 1.0 stability promise covers only GPIO,
+# UART, SPI, I2C and the core init/time APIs; everything else — including the SPI
+# DMA driver used here — is behind the `unstable` feature and MAY BREAK ACROSS
+# MINOR VERSIONS. The SpiDmaBus -> SpiDma merge is already queued for 1.2.
+esp-hal = { version = "~1.1", features = ["esp32", "unstable"] }
+
+# Versions left unpinned: resolve them on the first real build (`cargo add`), since
+# they track esp-hal and none of this has been compiled yet — see README.
+esp-backtrace = { version = "*", features = ["esp32", "panic-handler", "println"] }
+esp-println = { version = "*", features = ["esp32"] }
+
+# ESP-NOW arrives with esp-radio (the crate that superseded esp-wifi) and needs
+# esp-alloc + esp-rtos: the radio requires a heap and a preemptive scheduler, and
+# THE SCHEDULER MUST BE STARTED BEFORE THE RADIO IS INITIALIZED. Not wired yet —
+# step 2, after pixels are lit.
+# esp-radio = { version = "1.0.0-beta.0", features = ["esp32", "esp-now"] }
+# esp-alloc = "*"
+# esp-rtos  = "*"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = 3
+overflow-checks = false

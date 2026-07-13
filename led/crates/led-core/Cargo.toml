@@ -1,0 +1,11 @@
+[package]
+name = "led-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No dependencies, on purpose: this crate is the shared core between the Mac
+# host sim and the ESP32 firmware, so it must build for both. The gamma tables
+# are precomputed literals rather than powf() at init, which also keeps libm out.
+[dependencies]

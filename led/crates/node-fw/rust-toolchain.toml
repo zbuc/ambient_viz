@@ -1,0 +1,9 @@
+# Xtensa is NOT upstreamed into rustc — codegen comes from Espressif's LLVM fork,
+# so this crate needs the `esp` toolchain from espup:
+#
+#   cargo install espup --locked && espup install && . ~/export-esp.sh
+#
+# (The rest of the led/ workspace builds on plain stable; that is why node-fw is
+# excluded from it.)
+[toolchain]
+channel = "esp"
